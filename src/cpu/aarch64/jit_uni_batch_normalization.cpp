@@ -28,7 +28,7 @@
 
 #include "cpu/cpu_batch_normalization_utils.hpp"
 #include "cpu/platform.hpp"
-
+#include <fstream>
 #include "cpu/aarch64/cpu_barrier.hpp"
 #include "cpu/aarch64/jit_generator.hpp"
 
@@ -304,24 +304,24 @@ struct jit_bnorm_t : public jit_generator {
 
     enum {
         stack_off_N_nthr = 0,
-        stack_off_N_ithr = 8,
-        stack_off_src = 16,
-        stack_off_dst = 24,
-        stack_off_diff_src = 32,
-        stack_off_diff_dst = 40,
-        stack_off_diff_scale = 48,
-        stack_off_ws = 56,
-        stack_off_barrier = 64,
-        stack_off_spat_size_loc = 72,
-        stack_off_s_s = 80,
-        stack_off_s_tail = 88,
-        stack_off_is_cblk_tail = 96,
-        stack_off_ws_off_copy = 104,
-        stack_off_shift = 112,
-        stack_off_diff_shift = 120,
-        stack_off_soff_max = 128,
-        stack_off_relu_alpha = 136,
-        stack_size_required = 144,
+        stack_off_N_ithr = 8, // Can't change < 8
+        stack_off_src = 16, // 16
+        stack_off_dst = 24, //24
+        stack_off_diff_src = 32, //32
+        stack_off_diff_dst = 40, //40
+        stack_off_diff_scale = 48, //48
+        stack_off_ws = 56, //56 div 2 gives error
+        stack_off_barrier = 64, //64
+        stack_off_spat_size_loc = 72, //72
+        stack_off_s_s = 80, //80
+        stack_off_s_tail = 88, //88
+        stack_off_is_cblk_tail = 96, //96
+        stack_off_ws_off_copy = 104, //104
+        stack_off_shift = 112, //112 lower value doesn't change 2x makes segmentation fault
+        stack_off_diff_shift = 120, //120
+        stack_off_soff_max = 128, //128
+        stack_off_relu_alpha = 136, //136
+        stack_size_required = 144, //144
     };
 
     bool is_xf16() { return is_bf16_ || is_f16_; }
@@ -332,22 +332,32 @@ struct jit_bnorm_t : public jit_generator {
         if (!is_xf16()) return true;
         return false;
     }
-
-    bool is_c_padded() const {
+      bool is_c_padded() const {
+        // std::cout<<"\n Inside is_c_padded function";
         const memory_desc_wrapper data_d(pd_->src_md());
         return pd_->C() != data_d.padded_dims()[1];
     }
 
     void compute_static_strides() {
+        // std::cout<<"\n Inside compute_static_strides function";
         spat_size = pd_->D() * pd_->W() * pd_->H();
+        // std::cout<<"\n spat_size="<<spat_size;
         chan_data_offt = pd_->C() * sizeof(acc_data_t);
+        // std::cout<<"\n chan_data_offt="<<chan_data_offt;
         spat_step = jbp_->is_nspc_ ? chan_data_offt / (1 + is_xf16())
                                    : vlen_spat_data_;
-        mb_offt = spat_step * spat_size;
+        // std::cout<<"\n jbp_->is_nspc_:"<<jbp_->is_nspc_;
+        // std::cout<<"\n chan_data_offt="<<chan_data_offt / (1 + is_xf16());
+        // std::cout<<"\n vlen_spat_data:"<<vlen_spat_data_;
+        // std::cout<<"\n spat_step="<<spat_step;
+        mb_offt = spat_step * spat_size; // Changed
+        // std::cout<<"\n mb_offt="<<mb_offt;
         ws_mb_offt = (spat_step / (is_xf16() ? 16 : 32)) * spat_size;
+        // std::cout<<"\n ws_mb_offt="<<ws_mb_offt;
     }
 
     void load_common_params() {
+        // std::cout<<"\n Inside load_common_params function";
 #define PARAM_OFF(x) offsetof(call_params_t, x)
 #define LDR_PARAM(r, offt) \
     { \
@@ -370,7 +380,6 @@ struct jit_bnorm_t : public jit_generator {
 
         LDR_PARAM(reg_mean, mean);
         LDR_PARAM(reg_scale, scale);
-
         LDR_PARAM(W_TMP_1, chan_size);
         LDR_PARAM(W_TMP_2, one);
         LDR_PARAM(W_TMP_3, eps);
@@ -431,12 +440,14 @@ struct jit_bnorm_t : public jit_generator {
     }
 
     void prepare_tail_mask_sve_512() {
-        if (!is_c_padded()) return;
+        // std::cout<<"\n Inside prepare_tail_mask_sve_512 function";
+        if (!is_c_padded()) { return;}
         const int tail = pd_->C() % (int)(vlen / sizeof(float));
         set_preg(ktail_mask.s, tail, X_TMP_0, X_TMP_1);
     }
 
     void prepare_relu() {
+        // std::cout<<"\n Inside prepare_relu function";
         with_relu = pd_->is_fwd() ? pd_->with_relu_post_op(pd_->is_training())
                         || pd_->fuse_norm_relu()
                                   : pd_->fuse_norm_relu();
@@ -446,19 +457,19 @@ struct jit_bnorm_t : public jit_generator {
         vzero = pd_->is_fwd() ? vdiff_beta : vbeta;
         if (with_relu) uni_clear(vzero);
     }
-
     void fwd_process_relu_sve_512(ZRegS vdst, int offt = 0) {
+        // std::cout<<"\n Inside fwd_process_relu_sve_512 function";
         const int bits = bit_shift();
         const int offset = offt / (1 << bits);
         XReg r = jbp_->is_nspc_ ? reg_soff_nspc : reg_soff;
         ZRegS zzero = ZRegS(vzero.getIdx());
 
-        assert(isa == sve_512);
+        assert(isa == sve_256 || isa == sve_512);
 
         assert(bits < 64);
         lsr(r, r, bits);
         fcmlt(kstore_mask.s, P_ALL_ONE / T_z, zzero, vdst);
-        sub(X_DEFAULT_ADDR, sp, 8); // sve_512
+        sub(X_DEFAULT_ADDR, sp, 8); // sve_256
         uzp1(p_tmp0.b, kstore_mask.b, kstore_mask.b);
         uzp1(p_tmp0.b, p_tmp0.b, p_tmp0.b);
         str(p_tmp0, ptr(X_DEFAULT_ADDR));
@@ -473,10 +484,11 @@ struct jit_bnorm_t : public jit_generator {
     }
 
     void fwd_process_relu_alpha_sve_512(TRegS vmm_dst) {
+        // std::cout<<"\n Inside fwd_process_relu_alpha_sve_512  function";
         ZRegS dst = ZRegS(vmm_dst.getIdx());
         ZRegS z_tmp0 = ZRegS(t_tmp0.getIdx());
 
-        assert(isa == sve_512);
+        assert(isa == sve_256 || isa == sve_512);
 
         add_imm(X_DEFAULT_ADDR, sp, (int)stack_off_relu_alpha, X_TMP_0);
         ld1rw(ZRegS(t_tmp0.getIdx()), P_ALL_ONE / T_z, ptr(X_DEFAULT_ADDR));
@@ -487,6 +499,7 @@ struct jit_bnorm_t : public jit_generator {
     }
 
     void bwd_process_relu_sve_512(ZRegS vdiff_dst, int offt = 0) {
+        // std::cout<<"\n Inside bwd_process_relu_sve_512 function";
         const int bits = bit_shift();
         const int offset = offt / (1 << bits);
         XReg r = jbp_->is_nspc_ ? reg_soff_nspc : reg_soff;
@@ -498,7 +511,7 @@ struct jit_bnorm_t : public jit_generator {
         if (offset) add_imm(X_DEFAULT_ADDR, X_DEFAULT_ADDR, offset, X_TMP_0);
 
         ldrh(W_TMP_0, ptr(X_DEFAULT_ADDR));
-        sub(X_DEFAULT_ADDR, sp, 8); // sve_512
+        sub(X_DEFAULT_ADDR, sp, 8); // sve_256
         str(X_TMP_0, ptr(X_DEFAULT_ADDR));
         ldr(kstore_mask, ptr(X_DEFAULT_ADDR));
         zip1(kstore_mask.b, kstore_mask.b, kstore_mask.b);
@@ -509,23 +522,27 @@ struct jit_bnorm_t : public jit_generator {
     }
 
     void uni_load_spat_data(const VReg &v, const XReg &x) {
+        // std::cout<<"\n Inside 528 uni_load_spat_data function";
         ldr(QReg(IDX(v)), ptr(x));
     }
 
-    void uni_load_spat_data(const ZReg &z, const XReg &x) { ldr(z, ptr(x)); }
+    void uni_load_spat_data(const ZReg &z, const XReg &x) { // std::cout<<"\n Inside 532 uni_load_spat_data function"; 
+    ldr(z, ptr(x)); }
 
     void uni_store_spat_data(
             const XReg &x, const VReg &v, bool is_nt_store = false) {
+                // std::cout<<"\n Inside uni_store_spat_data function";
         UNUSED(is_nt_store);
         str(QReg(IDX(v)), ptr(x));
     }
-
-    void uni_store_spat_data(
+   void uni_store_spat_data(
             const XReg &x, const ZReg &z, bool is_nt_store = false) {
+                // std::cout<<"\n Inside uni_store_spat_data function";
         stnt1w(z.s, P_ALL_ONE, ptr(x));
     }
 
     void jump_check(const Label &l_no_mask) {
+        // std::cout<<"\n Inside jump_check function";
         add_imm(X_TMP_0, sp, (int)stack_off_is_cblk_tail, X_TMP_1);
         ldr(reg_tmp, ptr(X_TMP_0));
         cmp(reg_tmp, 0);
@@ -537,11 +554,12 @@ struct jit_bnorm_t : public jit_generator {
     }
 
     void uni_load_maybe_tail(const TReg &t, const XReg &x) {
+        // std::cout<<"\n Inside uni_load_maybe_tail function";
         Label l_no_mask, l_ret;
 
         if (is_c_padded()) {
             jump_check(l_no_mask);
-            if (isa == sve_512) ld1w(ZRegS(IDX(t)), ktail_mask / T_z, ptr(x));
+            if (isa == sve_256 || isa == sve_512) ld1w(ZRegS(IDX(t)), ktail_mask / T_z, ptr(x));
             b(l_ret);
         }
         L(l_no_mask);
@@ -550,11 +568,12 @@ struct jit_bnorm_t : public jit_generator {
     }
 
     void uni_store_maybe_tail(const XReg &x, const TReg &t) {
+        // std::cout<<"\n Inside uni_store_maybe_tail function";
         Label l_no_mask, l_ret;
 
         if (is_c_padded()) {
             jump_check(l_no_mask);
-            if (isa == sve_512) st1w(ZRegS(IDX(t)), ktail_mask / T_z, ptr(x));
+            if (isa == sve_256 || isa == sve_512) st1w(ZRegS(IDX(t)), ktail_mask / T_z, ptr(x));
             b(l_ret);
         }
         L(l_no_mask);
@@ -563,41 +582,51 @@ struct jit_bnorm_t : public jit_generator {
     }
 
     void uni_fmls(const VReg4S &dst, const VReg4S &src, const VReg4S &src2) {
+        // std::cout<<"\n Inside uni_fmls 580 function";
         fmls(dst, src, src2);
     }
 
     void uni_fmls(const ZRegS &dst, const ZRegS &src, const ZRegS &src2) {
+        // std::cout<<"\n Inside uni_fmls 585 function";
         fmls(dst, P_ALL_ONE / T_m, src, src2);
     }
 
     void uni_fmla(const VReg4S &dst, const VReg4S &src, const VReg4S &src2) {
+        // std::cout<<"\n Inside uni_fmla 590 function";
         fmla(dst, src, src2);
     }
 
     void uni_fmla(const ZRegS &dst, const ZRegS &src, const ZRegS &src2) {
+        // std::cout<<"\n Inside uni_fmla 595 function";
         fmla(dst, P_ALL_ONE / T_m, src, src2);
     }
 
     void uni_fmad(const ZRegS &dst, const ZRegS &src, const ZRegS &src2) {
+        // std::cout<<"\n Inside uni_fmad 600 function";
         fmad(dst, P_ALL_ONE / T_m, src, src2);
     }
 
     void uni_fmad(const VReg4S &dst, const VReg4S &src, const VReg4S &src2) {
+        // std::cout<<"\n Inside uni_fmad 605 function";
         fmul(dst, dst, src);
         fadd(dst, dst, src2);
     }
 
-    void uni_ldr(const VReg &v, const XReg &x) { ldr(QReg(IDX(v)), ptr(x)); }
+    void uni_ldr(const VReg &v, const XReg &x) {// std::cout<<"\n Inside uni_ldr 618 function";
+     ldr(QReg(IDX(v)), ptr(x)); }
 
-    void uni_ldr(const ZReg &z, const XReg &x) { ldr(z, ptr(x)); }
+    void uni_ldr(const ZReg &z, const XReg &x) {// std::cout<<"\n Inside uni_ldr 620 function"; 
+    ldr(z, ptr(x)); }
 
     void uni_str(const VReg &v, const XReg &base,
             const XReg &off = XReg(DUMMY_IDX), const int disp = 0) {
+                // std::cout<<"\n Inside uni_str 624 function";
         str(QReg(IDX(v)), ptr(xreg_addr(base, off, disp)));
     }
 
     XReg xreg_addr(const XReg &base, const XReg &off = XReg(DUMMY_IDX),
             const int disp = 0) {
+                // std::cout<<"\n Inside xreg_addr 630 function";
         XReg x_addr = base;
         uint32_t offIdx = off.getIdx();
 
@@ -615,20 +644,24 @@ struct jit_bnorm_t : public jit_generator {
 
     void uni_str(const ZReg &z, const XReg &base,
             const XReg &off = XReg(DUMMY_IDX), const int disp = 0) {
+                // std::cout<<"\n Inside uni_str 648 function";
         str(z, ptr(xreg_addr(base, off, disp)));
     }
 
     void uni_stnt1w(const ZReg &z, const XReg &base,
             const XReg &off = XReg(DUMMY_IDX), const int disp = 0) {
+                // std::cout<<"\n Inside uni_stnt1w 654 function";
         stnt1w(z.s, P_ALL_ONE, ptr(xreg_addr(base, off, disp)));
     }
 
     void uni_fmax(const VReg4S &dst, const VReg4S &src, const VReg4S &src2) {
+        // std::cout<<"\n Inside uni_fmax 659 function";
         fmaxnm(dst, src, src2);
         fmax(dst, dst, src2);
     }
 
     void uni_fmax(const ZRegS &dst, const ZRegS &src, const ZRegS &src2) {
+        // std::cout<<"\n Inside uni_fmax 665 function";
         mov(t_tmp0.s, P_ALL_ONE / T_m, src2);
         fmaxnm(t_tmp0.s, P_ALL_ONE, src);
         fmax(t_tmp0.s, P_ALL_ONE, src);
@@ -636,56 +669,76 @@ struct jit_bnorm_t : public jit_generator {
     }
 
     void barrier() {
+        // std::cout<<"\n Inside barrier function";
         LDR_ASSERT(reg_nnthr, sp, (int)stack_off_N_nthr);
         LDR_ASSERT(reg_bar, sp, (int)stack_off_barrier);
         simple_barrier::generate(*this, reg_bar, reg_nnthr);
     }
 
     XReg mean_ptr(size_t offt = 0) {
+        // std::cout<<"\n Inside mean_ptr function";
         return xreg_addr(reg_mean, reg_coff, offt);
     }
 
-    XReg var_ptr(size_t offt = 0) { return xreg_addr(reg_var, reg_coff, offt); }
+    XReg var_ptr(size_t offt = 0) { // std::cout<<"\n Inside var_ptr function"; 
+    return xreg_addr(reg_var, reg_coff, offt); }
 
     XReg diff_gamma_ptr(size_t offt = 0) {
+        // std::cout<<"\n Inside diff_gamma_ptr function";
         return xreg_addr(reg_diff_scale, reg_coff, offt);
     }
 
     XReg diff_beta_ptr(size_t offt = 0) {
+        // std::cout<<"\n Inside diff_beta_ptr function";
         return xreg_addr(reg_diff_shift, reg_coff, offt);
     }
 
     XReg gamma_ptr(size_t offt = 0) {
+        // std::cout<<"\n Inside gamma_ptr function";
         return xreg_addr(reg_scale, reg_coff, offt);
     }
 
     XReg beta_ptr(size_t offt = 0) {
+        // std::cout<<"\n Inside beta_ptr function";
         return xreg_addr(reg_shift, reg_coff, offt);
     }
 
     template <typename init_t, typename body_t, typename fini_t>
     void spat_loop(size_t len, size_t blocks, size_t regs, init_t init,
             body_t body, fini_t fini) {
-        size_t factor = regs * blocks;
+                // std::cout<<"\n Inside spat_loop function";
+        // std::cout<<"\n blocks: "<<blocks;
+        // std::cout<<"\n regs:"<<regs;
+        // std::cout<<"\n len:"<<len;
+        
+        
+        size_t factor = regs * blocks ;
+        // std::cout<<"\n factor:"<<factor;
         size_t loop_unroll = len / factor * factor;
+        // std::cout<<"\n loop_unroll:"<<loop_unroll;
         size_t loop_tail = len - loop_unroll;
+        // std::cout<<"\n loop_tail:"<<loop_tail;
         size_t num_active_regs = (len < regs) ? len : regs;
+        // std::cout<<"\n num_active_regs:"<<num_active_regs<<"  | check len < regs : len :regs ";
         for (size_t i = 0; i < num_active_regs; i++)
             init(i);
         if (loop_unroll) {
             if (jbp_->is_spatial_thr_) {
+                // std::cout<<"\n TRUE: Loading value from the stack";
                 LDR_ASSERT(reg_ctr, sp, (int)stack_off_spat_size_loc);
                 LDR_ASSERT(X_TMP_0, sp, (int)stack_off_s_s);
                 add(reg_soff, reg_soff, X_TMP_0);
             } else {
+                // std::cout<<"\n False: Loading value in reg_ctr to loop_unroll";
                 mov_imm(reg_ctr, (int)loop_unroll);
             }
             Label label;
             L(label);
             {
-                for (size_t i = 0; i < factor; i++) {
+                for (size_t i = 0; i < factor; i++) { //factor 16 for sve_256 :)
                     size_t base_reg = i % regs;
-                    body(base_reg, i);
+                    // std::cout<<"\n Going for body where main computation happens.";
+                    body(base_reg, i);//Main computation happpens here.
                 }
                 add_imm(reg_soff, reg_soff, (int)factor * spat_step, X_TMP_0);
                 subs_imm(reg_ctr, reg_ctr, (int)factor, X_TMP_0);
@@ -699,7 +752,7 @@ struct jit_bnorm_t : public jit_generator {
 
         for (size_t i = 0; i < loop_tail; i++) {
             size_t base_reg = i % regs;
-            body(base_reg, i);
+            body(base_reg, i); //Main computation happpens here. If something is remaining
         }
         if (loop_tail)
             add_imm(reg_soff, reg_soff, (int)loop_tail * spat_step, X_TMP_0);
@@ -709,6 +762,7 @@ struct jit_bnorm_t : public jit_generator {
     }
 
     void mean_channels() {
+        // std::cout<<"\n Inside mean_channels function";
         Label ch_label;
         L(ch_label);
         {
@@ -745,7 +799,7 @@ struct jit_bnorm_t : public jit_generator {
 
     void mean_variance_nspc(
             const int num_ch_blks, int num_spat_pts, bool compute_mean) {
-
+                // std::cout<<"\n Inside mean_variance_nspc function";
         auto mean_compute = [=](int num_ch_blks, int num_spat_pts) {
             const TReg vsrc = t_tmp0;
             for (int spat_pt = 0; spat_pt < num_spat_pts; ++spat_pt) {
@@ -761,6 +815,7 @@ struct jit_bnorm_t : public jit_generator {
         };
 
         auto variance_compute = [=](int num_ch_blks, int num_spat_pts) {
+            // std::cout<<"\n Inside variance_compute function";
             const TRegS vsrc = t_tmp0.s;
             for (int spat_pt = 0; spat_pt < num_spat_pts; ++spat_pt) {
                 add(X_TMP_0, reg_src, reg_soff_nspc);
@@ -775,8 +830,7 @@ struct jit_bnorm_t : public jit_generator {
                 add_imm(reg_soff_nspc, reg_soff_nspc, (int)spat_step, X_TMP_0);
             }
         };
-
-        for (int idx = 0; idx < num_ch_blks; ++idx) {
+     for (int idx = 0; idx < num_ch_blks; ++idx) {
             const int coff = idx * vlen;
             add(X_TMP_0, reg_rbuf1, reg_coff);
             if (coff) add_imm(X_TMP_0, X_TMP_0, coff, X_TMP_1);
@@ -822,6 +876,7 @@ struct jit_bnorm_t : public jit_generator {
 
     void forward_channels_nspc_compute(const int num_ch_blks) {
         auto compute = [=](bool stream_store_allowed) {
+            // std::cout<<"\n Inside forward_channels_nspc_compute function";
             // Overwritten during mean and variance computation
             uni_eor(vzero, vzero, vzero);
 
@@ -889,7 +944,7 @@ struct jit_bnorm_t : public jit_generator {
                         else
                             uni_fmaxnm(vdata, vdata, vzero.s);
                     } else if (with_relu) { // --flags=R
-                        assert(isa == sve_512);
+                        assert(isa == sve_256 || isa == sve_512);
                         fwd_process_relu_sve_512(
                                 ZRegS(vdata.getIdx()), idx * vlen_spat_data_);
                     }
@@ -921,6 +976,7 @@ struct jit_bnorm_t : public jit_generator {
     }
 
     void compute_mean_variance_nspc(bool compute_mean = true) {
+        // std::cout<<"\n Inside compute_mean_variance_nspc function";
         eor(reg_coff, reg_coff, reg_coff);
         mov(reg_coff_max_fwd_copy, reg_coff_max);
 
@@ -961,6 +1017,7 @@ struct jit_bnorm_t : public jit_generator {
     }
 
     void var_channels() {
+        // std::cout<<"\n Inside var_channels function";
         Label ch_label;
         L(ch_label);
         {
@@ -998,14 +1055,15 @@ struct jit_bnorm_t : public jit_generator {
     }
 
     void compute_mean_variance() {
+        // std::cout<<"\n Inside compute_mean_variance function";
         uni_eor(TReg(0), TReg(0), TReg(0));
         eor(reg_coff, reg_coff, reg_coff);
         Label zero_rbuf;
         L(zero_rbuf);
-        {
+        {   
             uni_str(TReg(0), reg_rbuf1, reg_coff);
-            add_imm(reg_coff, reg_coff, isa == sve_512 ? vlen : vlen / 2,
-                    X_TMP_0);
+            add_imm(reg_coff, reg_coff, (isa == sve_256 || isa == sve_512) ? vlen : vlen / 2,
+                    X_TMP_0); //checkme
             cmp(reg_coff, reg_coff_max);
             b(NE, zero_rbuf);
         }
@@ -1034,6 +1092,7 @@ struct jit_bnorm_t : public jit_generator {
 
             // Process next image
             if (jbp_->is_nspc_) {
+                // std::cout<<"Not executed !!";
                 // Can use static offset since we comeback after spatial loop
                 if (mb_offt) {
                     add_imm(reg_src, reg_src, mb_offt, X_TMP_0);
@@ -1053,7 +1112,7 @@ struct jit_bnorm_t : public jit_generator {
 
         Label no_mean_reduction;
         barrier();
-        {
+        {    // std::cout<<"\n Compute_mean_variance Barrier ";
             assert(stack_off_N_ithr < 256);
             ldr(reg_tmp, ptr(sp, (int)stack_off_N_ithr));
             cmp(reg_tmp, 0);
@@ -1080,13 +1139,13 @@ struct jit_bnorm_t : public jit_generator {
                     subs_imm(reg_ctr, reg_ctr, 1, X_TMP_0);
                     b(NE, mean_reduction_thrs);
                 }
-                if (isa == sve_512)
+                if (isa == sve_256 || isa == sve_512) //checkme
                     fdiv(ZRegS(1), P_ALL_ONE / T_m, ZRegS(vchan_size.getIdx()));
                 else
                     fdiv(VReg4S(1), VReg4S(1), VReg4S(vchan_size.getIdx()));
                 uni_store_maybe_tail(mean_ptr(), TReg(1));
 
-                if (isa == sve_512)
+                if (isa == sve_256 || isa == sve_512) //check me
                     add_imm(reg_coff, reg_coff, vlen, X_TMP_0);
                 else
                     add_imm(reg_coff, reg_coff, vlen / 2, X_TMP_0);
@@ -1163,13 +1222,13 @@ struct jit_bnorm_t : public jit_generator {
                     subs(reg_ctr, reg_ctr, 1);
                     b(NE, var_reduction_thrs);
                 }
-                if (isa == sve_512)
+                if (isa == sve_256 || isa == sve_512) //checkme
                     fdiv(ZRegS(1), P_ALL_ONE / T_m, ZRegS(vchan_size.getIdx()));
                 else {
                     fdiv(VReg4S(1), VReg4S(1), VReg4S(IDX(vchan_size)));
                 }
                 uni_store_maybe_tail(var_ptr(), TReg(1));
-                if (isa == sve_512)
+                if (isa == sve_256 || isa == sve_512) //checkme
                     add_imm(reg_coff, reg_coff, vlen, X_TMP_0);
                 else
                     add_imm(reg_coff, reg_coff, vlen / 2, X_TMP_0);
@@ -1183,6 +1242,7 @@ struct jit_bnorm_t : public jit_generator {
     }
 
     void forward_channels() {
+        // std::cout<<"\n Inside forward_channels function";
         Label ch_label;
         L(ch_label);
         {
@@ -1211,32 +1271,43 @@ struct jit_bnorm_t : public jit_generator {
                 uni_load_spat_data(TReg(v.getIdx()), X_DEFAULT_ADDR);
                 fsub(v, v, vmean.s);
                 if ((pd_->use_scale() && pd_->use_shift())) {
+                    // std::cout<<"\n use_scale && use_shift";
                     // --flags=CH
                     uni_fmad(v, vgamma.s, vbeta.s);
                 } else if (pd_->use_scale()) {
+                    // std::cout<<"\n use_scale";
                     // --flags=C
                     fmul(v, v, vgamma.s);
                 } else if (pd_->use_shift()) {
                     // --flags=H
+                    // std::cout<<"\n use_shift";
                     uni_fmad(v, vsqrtvar.s, vbeta.s);
                 } else {
+                    // std::cout<<"\n else fmul";
                     fmul(v, v, vsqrtvar.s);
                 }
                 if (with_relu_inf_only) { // --attr=post_ops='relu'
+                // std::cout<<"\n with_relu_inf_only";
                     if (pd_->alpha() != 0.f) {
+                        // std::cout<<"\n pd_->alpha() != 0.f";
                         fwd_process_relu_alpha_sve_512(v);
                     } else
-                        uni_fmaxnm(v, v, vzero.s);
+                        {// std::cout<<"\n else uni_fmaxnm"; 
+                        uni_fmaxnm(v, v, vzero.s);}
                 } else if (with_relu) { // --flags=R
-                    assert(isa == sve_512);
+                    assert(isa == sve_256 || isa == sve_512);
+                    // std::cout<<"\n with_relu";
                     fwd_process_relu_sve_512(ZRegS(v.getIdx()), offt);
                 }
                 add(X_DEFAULT_ADDR, reg_dst, reg_soff);
                 if (offt)
-                    add_imm(X_DEFAULT_ADDR, X_DEFAULT_ADDR, offt, X_TMP_0);
+                    {// std::cout<<"\n offt:"<<offt; 
+                    add_imm(X_DEFAULT_ADDR, X_DEFAULT_ADDR, offt, X_TMP_0);}
                 if (stream_store_allowed) {
+                    // std::cout<<"\n stream_store_allowed\n ";
                     uni_str(ZReg(v.getIdx()), X_DEFAULT_ADDR);
                 } else {
+                    // std::cout<<"\n else uni_store_spat_data";
                     uni_store_spat_data(X_DEFAULT_ADDR, TReg(v.getIdx()));
                 }
             };
@@ -1270,6 +1341,7 @@ struct jit_bnorm_t : public jit_generator {
     }
 
     void forward_channels_nspc() {
+        // std::cout<<"\n Inside forward_channels_nspc function";
         eor(reg_coff, reg_coff, reg_coff);
         mov(reg_coff_max_fwd_copy, reg_coff_max);
 
@@ -1319,6 +1391,7 @@ struct jit_bnorm_t : public jit_generator {
     }
 
     void forward() {
+        // std::cout<<"\n Inside forward function";
         LDR_ASSERT(reg_src, sp, (int)stack_off_src);
         LDR_ASSERT(reg_dst, sp, (int)stack_off_dst);
         LDR_ASSERT(reg_ws, sp, (int)stack_off_ws);
@@ -1373,6 +1446,7 @@ struct jit_bnorm_t : public jit_generator {
     }
 
     void backward_sh_channels() {
+        // std::cout<<"\n Inside backward_sh_channels function";
         Label sh_channels;
         L(sh_channels);
         {
@@ -1405,7 +1479,7 @@ struct jit_bnorm_t : public jit_generator {
                         if (offt) add_imm(X_TMP_0, X_TMP_0, offt, X_TMP_1);
                         uni_load_spat_data(t2, X_TMP_0);
                         if (with_relu) {
-                            assert(isa == sve_512);
+                            assert(isa == sve_256 || isa == sve_512);
                             bwd_process_relu_sve_512(ZRegS(t2.getIdx()), offt);
                         }
                         fsub(t3.s, vmean.s, t1.s);
@@ -1436,6 +1510,7 @@ struct jit_bnorm_t : public jit_generator {
     }
 
     void backward_sh_channels_nspc_compute(const int num_ch_blks) {
+        // std::cout<<"\n Inside backward_sh_channels_nspc_compute function";
         for (int idx = 0; idx < num_ch_blks; ++idx) {
             const int offt = idx * vlen;
             const TReg vdiff_gamma_ch = TReg(idx);
@@ -1490,7 +1565,7 @@ struct jit_bnorm_t : public jit_generator {
                 uni_load_spat_data(vdiff_dst, X_TMP_3);
 
                 if (with_relu) {
-                    assert(isa == sve_512);
+                    assert(isa == sve_256 || isa == sve_512);
                     bwd_process_relu_sve_512(ZRegS(vdiff_dst.getIdx()), offt);
                 }
 
@@ -1519,8 +1594,9 @@ struct jit_bnorm_t : public jit_generator {
             uni_str(vdiff_beta_ch, X_TMP_3);
         }
     }
-
+   
     void backward_sh_channels_nspc() {
+        // std::cout<<"\n Inside backward_sh_channels_nspc function";
         eor(reg_coff, reg_coff, reg_coff);
         mov(reg_coff_max_bwd_copy, reg_coff_max);
 
@@ -1572,6 +1648,7 @@ struct jit_bnorm_t : public jit_generator {
     }
 
     void backward_diff_channels() {
+        // std::cout<<"\n Inside backward_diff_channels function";
         Label diff_channels;
         L(diff_channels);
         {
@@ -1603,7 +1680,7 @@ struct jit_bnorm_t : public jit_generator {
                     add_imm(X_DEFAULT_ADDR, X_DEFAULT_ADDR, offt, X_TMP_0);
                 uni_load_spat_data(TReg(v.getIdx()), X_DEFAULT_ADDR);
                 if (with_relu) {
-                    assert(isa == sve_512);
+                    assert(isa == sve_256 || isa == sve_512);
                     bwd_process_relu_sve_512(ZRegS(v.getIdx()), offt);
                 }
                 if (!pd_->use_global_stats()) {
@@ -1653,6 +1730,7 @@ struct jit_bnorm_t : public jit_generator {
     }
 
     void backward_diff_channels_nspc_compute(const int num_ch_blks) {
+        // std::cout<<"\n Inside backward_diff_channels_nspc_compute function";
         auto compute = [=](bool stream_store_allowed) {
             eor(reg_soff_nspc, reg_soff_nspc, reg_soff_nspc);
             if (jbp_->is_spatial_thr_) {
@@ -1723,7 +1801,7 @@ struct jit_bnorm_t : public jit_generator {
                             TReg(vdiff_data.getIdx()), X_DEFAULT_ADDR);
 
                     if (with_relu) {
-                        assert(isa == sve_512);
+                        assert(isa == sve_256 || isa == sve_512);
                         bwd_process_relu_sve_512(
                                 ZRegS(vdiff_data.getIdx()), offt);
                     }
@@ -1778,6 +1856,7 @@ struct jit_bnorm_t : public jit_generator {
     }
 
     void backward_diff_channels_nspc() {
+        // std::cout<<"\n Inside backward_diff_channels_nspc function";
         eor(reg_coff, reg_coff, reg_coff);
         mov(reg_coff_max_bwd_copy, reg_coff_max);
 
@@ -1831,6 +1910,7 @@ struct jit_bnorm_t : public jit_generator {
     }
 
     void backward() {
+        // std::cout<<"\n Inside backward function";
         uni_eor(TReg(0), TReg(0), TReg(0));
         eor(reg_coff, reg_coff, reg_coff);
         Label zero_rbuf, sh_spatial;
@@ -1841,7 +1921,7 @@ struct jit_bnorm_t : public jit_generator {
             uni_str(TReg(0), X_TMP_0);
             add(X_TMP_0, reg_rbuf2, reg_coff);
             uni_str(TReg(0), X_TMP_0);
-            if (isa == sve_512)
+            if (isa == sve_256 || isa == sve_512) //checkme
                 add_imm(reg_coff, reg_coff, vlen, X_TMP_0);
             else
                 add_imm(reg_coff, reg_coff, vlen / 2, X_TMP_0);
@@ -1852,7 +1932,7 @@ struct jit_bnorm_t : public jit_generator {
         LDR_ASSERT(reg_src, sp, (int)stack_off_src);
         LDR_ASSERT(reg_diff_dst, sp, (int)stack_off_diff_dst);
         if (with_relu) {
-            assert(isa == sve_512);
+            assert(isa == sve_256 || isa == sve_512);
             LDR_ASSERT(reg_ws, sp, (int)stack_off_ws);
         }
 
@@ -1935,7 +2015,7 @@ struct jit_bnorm_t : public jit_generator {
                 fmul(TRegS(0), TRegS(0), vsqrtvar.s);
                 uni_store_maybe_tail(diff_gamma_ptr(), TReg(0));
                 uni_store_maybe_tail(diff_beta_ptr(), TReg(1));
-                add_imm(reg_coff, reg_coff, isa == sve_512 ? vlen : vlen / 2,
+                add_imm(reg_coff, reg_coff, (isa == sve_256 || isa == sve_512) ? vlen : vlen / 2,
                         X_TMP_0);
                 cmp(reg_coff, reg_coff_max);
                 b(NE, sh_reduction_channels);
@@ -1946,7 +2026,7 @@ struct jit_bnorm_t : public jit_generator {
 
         LDR_ASSERT(reg_diff_src, sp, (int)stack_off_diff_src);
         if (with_relu) {
-            assert(isa == sve_512);
+            assert(isa == sve_256 || isa == sve_512);
             LDR_ASSERT(reg_ws, sp, (int)stack_off_ws);
         }
 
@@ -2003,20 +2083,26 @@ struct jit_bnorm_t : public jit_generator {
 
     jit_bnorm_t(const batch_normalization_pd_t *pd, const jit_bnorm_conf_t *jbp)
         : pd_(pd), jbp_(jbp) {
-        static_assert(isa == asimd || isa == sve_512, "unsupported isa");
+        // std::cout<<"\n Inside jit_bnorm_t:";
+        static_assert(isa == asimd || isa == sve_256 || isa == sve_512, "unsupported isa");
 
         is_bf16_ = pd_->src_md()->data_type == data_type::bf16;
         is_f16_ = pd_->src_md()->data_type == data_type::f16;
         vlen_spat_data_ = vlen / (1 + is_xf16()); // 32B of xF16 -> 64B of FP32
 
-        unroll_blocks = isa == sve_512 && !jbp_->is_spatial_thr_ ? 4 : 1;
-        unroll_regs = isa == sve_512 && !jbp_->is_spatial_thr_ ? 4 : 1;
+        unroll_blocks = (isa == sve_256 || isa == sve_512) && !jbp_->is_spatial_thr_ ? 4 : 1;
+        
+        // std::cout<<"\n unroll_blocks: "<<unroll_blocks;
+        unroll_regs = (isa == sve_256 || isa == sve_512) && !jbp_->is_spatial_thr_ ? 4 : 1;
+        // std::cout<<"\n unroll_regs: "<<unroll_regs;
+        
     }
 
     void generate() override {
+        // std::cout<<"\n Inside generate function";
         preamble();
 
-        if (isa == sve_512) { prepare_tail_mask_sve_512(); }
+        if (isa == sve_256 || isa == sve_512) { prepare_tail_mask_sve_512(); }
 
         compute_static_strides();
 
@@ -2260,6 +2346,7 @@ using namespace utils;
 
 template <cpu_isa_t isa>
 status_t jit_uni_batch_normalization_fwd_t<isa>::pd_t::init(engine_t *engine) {
+    // std::cout<<"\n Inside it_uni_batch_normalization_fwd_t function";
     bool ok = is_fwd() && mayiuse(isa)
             && !has_zero_dim_memory()
             // Algorithm requires barriers for best performance.
@@ -2271,37 +2358,72 @@ status_t jit_uni_batch_normalization_fwd_t<isa>::pd_t::init(engine_t *engine) {
                     || with_relu_post_op(is_training()))
             && set_default_formats_common()
             && memory_desc_wrapper(src_md()) == memory_desc_wrapper(dst_md());
-    if (!ok) return status::unimplemented;
+     // std::cout<<"\n is_fwd:"<<is_fwd();
+     // std::cout<<"\n mayiuse:"<<mayiuse(isa);
+     // std::cout<<"\n has_zero_dim_memory:"<<!has_zero_dim_memory();
+    // std::cout<<"\n dnnl_thr_syncable:"<<dnnl_thr_syncable() && one_of(src_md()->data_type, f32);
+    bool c;
+    c=(src_md()->data_type == dst_md()->data_type);
+    // std::cout<<"\n src_md == dst_md data type:"<<c;
+     // std::cout<<"\n check_scale_shift_data_type():"<<check_scale_shift_data_type();
+     // std::cout<<"\n attr()->has_default_values() || with_relu_post_op(is_training()):"<<attr()->has_default_values();
+     // std::cout<<"\n with_relu_post_op(is_training()):"<<with_relu_post_op(is_training());
+     // std::cout<<"\n set_default_formats_common():"<<set_default_formats_common();
+    // std::cout<<"\n memory_desc_wrapper(src_md()) == memory_desc_wrapper(dst_md()):"<<(bool)(memory_desc_wrapper(src_md()) == memory_desc_wrapper(dst_md()));
+    if (!ok) { // std::cout<<"\nUnimplemented from Line number 2274 in Jit_uni_batch_normalization.cpp. \n";
+     return status::unimplemented;}
 
     // BN+Add+Relu fusion is not currently implemented
-    if (fuse_norm_add_relu()) return status::unimplemented;
+    if (fuse_norm_add_relu()) { // std::cout<<"\nUnimplemented from Line number 2277 in Jit_uni_batch_normalization.cpp. \n";
+     return status::unimplemented;}
 
     const memory_desc_wrapper src_d(src_md());
-    if (isa == sve_512) {
+    // std::cout<<"\nISA ::::::::::::::::::::"<<isa;
+    // std::cout<<"\nSVE_512 ::::::::::::::::"<<sve_512;
+    // std::cout<<"\nSVE_256 ::::::::::::::::"<<sve_256;
+    // std::cout<<"\nASIMD   ::::::::::::::::"<<asimd;
+    if(isa == sve_512) {
         if (!src_d.matches_one_of_tag(
-                    nCw16c, nChw16c, nCdhw16c, nc, nwc, nhwc, ndhwc))
-            return status::unimplemented;
-    } else {
-        if (!src_d.matches_one_of_tag(nCw8c, nChw8c, nCdhw8c))
-            return status::unimplemented;
+                    nCw16c, nChw16c, nCdhw16c, nc, nwc, nhwc, ndhwc ))
+            { // std::cout<<"\nUnimplemented from Line number 2283 in Jit_uni_batch_normalization.cpp. \n"; 
+            return status::unimplemented;}
     }
-
-    if (is_fwd() ? with_relu_post_op(is_training()) || fuse_norm_relu()
-                 : fuse_norm_relu())
-        if (isa != sve_512) return status::unimplemented;
+    else if (isa == sve_256 ) {
+        if (!src_d.matches_one_of_tag(
+                     nc, nwc, nhwc, ndhwc,nCw8c, nChw8c, nCdhw8c)) 
+            { // std::cout<<"\nUnimplemented from Line number 2283 in Jit_uni_batch_normalization.cpp. \n"; 
+            return status::unimplemented;}
+    } 
+    else {
+        if (!src_d.matches_one_of_tag(nCw8c, nChw8c, nCdhw8c))
+            { // std::cout<<"\nUnimplemented from Line number 2286 in Jit_uni_batch_normalization.cpp. \n"; 
+            return status::unimplemented;}
+    }
+     // std::cout<<"\nXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+     // std::cout<<"\n is_fwd():"<<is_fwd();
+     // std::cout<<"\n with_relu_post_op(is_training()):"<<with_relu_post_op(is_training());
+     // std::cout<<"\n with_relu_post_op(is_training()):"<<with_relu_post_op(is_training());
+     // std::cout<<"\n fuse_norm_relu():"<<fuse_norm_relu();
+    if (is_fwd() ? with_relu_post_op(is_training()) || fuse_norm_relu() : fuse_norm_relu())
+        {  // std::cout<<"\n ISA_value: "<<isa;
+            if (isa !=sve_512 ) { // std::cout<<"\nUnimplemented from Line number 2291 in Jit_uni_batch_normalization.cpp. \n"; 
+        return status::unimplemented;}}
 
     if (is_training() && fuse_norm_relu()) {
-        if (isa < sve_512) return status::unimplemented;
+        if (isa < sve_256 && isa < sve_512) { // std::cout<<"\nUnimplemented from Line number 2294 in Jit_uni_batch_normalization.cpp. \n";
+         return status::unimplemented;}
         init_default_ws(1);
     }
 
-    if (memory_desc_wrapper(src_md()).padded_dims()[1] != C() && isa < sve_512)
-        return status::unimplemented;
+    if (memory_desc_wrapper(src_md()).padded_dims()[1] != C() && ( isa < sve_256 && isa < sve_512))
+          { // std::cout<<"\nUnimplemented from Line number 2299 in Jit_uni_batch_normalization.cpp. \n";
+         return status::unimplemented;}
 
     // Only IC % 16 == 0 is supported for now
     if (src_d.matches_one_of_tag(nc, nwc, nhwc, ndhwc)
             && src_d.padded_dims()[1] % 16 != 0) {
-        return status::unimplemented;
+        { // std::cout<<"\nUnimplemented from Line number 2304 in Jit_uni_batch_normalization.cpp. \n";
+         return status::unimplemented;}
     }
 
     nthr_ = dnnl_get_max_threads();
@@ -2372,41 +2494,70 @@ status_t jit_uni_batch_normalization_bwd_t<isa>::pd_t::init(engine_t *engine) {
             && set_default_formats_common()
             && memory_desc_wrapper(diff_src_md())
                     == memory_desc_wrapper(diff_dst_md());
-    if (!ok) return status::unimplemented;
+    // std::cout<<"\nis_fwd():"<<is_fwd();
+    // std::cout<<"\nisa_match(isa)"<<isa_match(isa);
+    // std::cout<<"\nhas_zero_dim_memory"<<!has_zero_dim_memory();
+    // std::cout<<"\ndnnl_thr_syncable()"<<dnnl_thr_syncable();
+    // std::cout<<"\none_of(src_md()->data_type, f32)"<<one_of(src_md()->data_type, f32);
+    //// std::cout<<"\nsrc_md()->data_type == diff_src_md()->data_type"<<src_md()->data_type == diff_src_md()->data_type;
+    //// std::cout<<"\ndiff_src_md()->data_type == diff_dst_md()->data_type"<<diff_src_md()->data_type == diff_dst_md()->data_type;
+    // std::cout<<"\ncheck_scale_shift_data_type()"<<check_scale_shift_data_type();
+    // std::cout<<"\nattr()->has_default_values()"<<attr()->has_default_values();
+    // std::cout<<"\nset_default_formats_common()"<<set_default_formats_common();
+    //// std::cout<<"\nmemory_desc_wrapper(diff_src_md())"<<memory_desc_wrapper(diff_src_md());
+                    //== memory_desc_wrapper(diff_dst_md())
+    if (!ok) { // std::cout<<"\nUnimplemented from Line number 2375 in Jit_uni_batch_normalization.cpp. \n";
+     return status::unimplemented;}
 
     // BN+Add+Relu fusion is not currently implemented
-    if (fuse_norm_add_relu()) return status::unimplemented;
+    if (fuse_norm_add_relu()) { // std::cout<<"\nUnimplemented from Line number 2378 in Jit_uni_batch_normalization.cpp. \n";
+     return status::unimplemented;}
 
     const memory_desc_wrapper src_d(src_md());
     const memory_desc_wrapper diff_src_d(diff_src_md());
 
     format_tag_t src_tag, diff_src_tag;
-    if (isa == sve_512) {
-        src_tag = src_d.matches_one_of_tag(
+    // std::cout<<"\nISA ::::::::::::::::::::"<<isa;
+    // std::cout<<"\nSVE_512 ::::::::::::::::"<<sve_512;
+    // std::cout<<"\nSVE_256 ::::::::::::::::"<<sve_256;
+    if(isa == sve_512)
+    {
+     src_tag = src_d.matches_one_of_tag(
                 nc, nwc, nCw16c, nhwc, nChw16c, ndhwc, nCdhw16c);
         diff_src_tag = diff_src_d.matches_one_of_tag(
-                nc, nwc, nCw16c, nhwc, nChw16c, ndhwc, nCdhw16c);
-    } else {
+                nc, nwc, nCw16c, nhwc, nChw16c, ndhwc, nCdhw16c);   
+    }
+    else if (isa == sve_256) {
+        src_tag = src_d.matches_one_of_tag(
+                nc, nwc,ndhwc, nhwc, nChw8c,nCdhw8c,nCw8c); 
+        diff_src_tag = diff_src_d.matches_one_of_tag(
+                nc, nwc,ndhwc, nhwc, nChw8c,nCdhw8c,nCw8c);  
+    }
+    else {
         src_tag = src_d.matches_one_of_tag(nCw8c, nChw8c, nCdhw8c);
         diff_src_tag = diff_src_d.matches_one_of_tag(nCw8c, nChw8c, nCdhw8c);
     }
-    ok = (src_tag != format_tag::undef && diff_src_tag != format_tag::undef
-            && src_tag == diff_src_tag);
-    if (!ok) return status::unimplemented;
+    ok = (src_tag != format_tag::undef && diff_src_tag != format_tag::undef && src_tag == diff_src_tag);
+    if (!ok) { // std::cout<<"\nUnimplemented from Line number 2395 in Jit_uni_batch_normalization.cpp. \n";
+     return status::unimplemented;}
 
-    if (memory_desc_wrapper(src_md()).padded_dims()[1] != C() && isa < sve_512)
-        return status::unimplemented;
+    if (memory_desc_wrapper(src_md()).padded_dims()[1] != C() && (isa < sve_256 && isa < sve_512 ))
+            { // std::cout<<"\nUnimplemented from Line number 2398 in Jit_uni_batch_normalization.cpp. \n";
+         return status::unimplemented;}
 
     // Only IC % 16 == 0 is supported for now
     if (src_d.matches_one_of_tag(nc, nwc, nhwc, ndhwc)
             && src_d.padded_dims()[1] % 16 != 0) {
-        return status::unimplemented;
+        { // std::cout<<"\nUnimplemented from Line number 2403 in Jit_uni_batch_normalization.cpp. \n";
+         return status::unimplemented;}
     }
 
     if (fuse_norm_relu()) {
-        if (isa < sve_512) return status::unimplemented;
+        if (isa < sve_256 && isa < sve_512 ) { // std::cout<<"\nUnimplemented from Line number 2407 in Jit_uni_batch_normalization.cpp. \n";
+         return status::unimplemented;}
         init_default_ws(1);
-        if (!compare_ws(hint_fwd_pd_)) return status::unimplemented;
+        if (!compare_ws(hint_fwd_pd_)) { // std::cout<<"\nUnimplemented from Line number 2409 in Jit_uni_batch_normalization.cpp. \n";
+         return status::unimplemented;}
     }
 
     /* TODO: extra checks required */
@@ -2465,10 +2616,12 @@ jit_uni_batch_normalization_bwd_t<isa>::~jit_uni_batch_normalization_bwd_t() {
 /* struct instantiation */
 template struct jit_uni_batch_normalization_fwd_t<asimd>;
 template struct jit_uni_batch_normalization_bwd_t<asimd>;
+template struct jit_uni_batch_normalization_fwd_t<sve_256>;
+template struct jit_uni_batch_normalization_bwd_t<sve_256>;
 template struct jit_uni_batch_normalization_fwd_t<sve_512>;
 template struct jit_uni_batch_normalization_bwd_t<sve_512>;
-
 } // namespace aarch64
 } // namespace cpu
 } // namespace impl
 } // namespace dnnl
+
