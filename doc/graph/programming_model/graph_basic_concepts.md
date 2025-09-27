@@ -44,7 +44,7 @@ tensor as the edge between them.
 is associated to a specific engine kind (@ref dnnl::engine::kind). In addition, 
 you can set the graph-level floating-point math mode through the setter API 
 ( @ref dnnl::graph::graph::set_fpmath_mode ) or in the constructor. The API
-accepts two paramters, the given floating point math mode and a optional boolean
+accepts two parameters, the given floating point math mode and a optional boolean
 flag to indicate whether to use floating-point arithmetic for integral
 operations.
 

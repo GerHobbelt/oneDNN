@@ -161,7 +161,7 @@ struct cublas_params : cublas_base_params {
             const memory_desc_wrapper &weights_d,
             const memory_desc_wrapper &dst_d,
             const memory_desc_wrapper &bias_d) {
-        // Matmul supports runtime paramters for dimensions and scales.
+        // Matmul supports runtime parameters for dimensions and scales.
         // We need to initialize them in the execute function.
         CHECK(set_gemm_params(src_d, weights_d, dst_d));
 

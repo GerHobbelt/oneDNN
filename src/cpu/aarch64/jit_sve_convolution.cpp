@@ -293,7 +293,7 @@ void jit_sve_convolution_fwd_t<src_type, wei_type, dst_type,
             }
         }
 
-        // This call is required only to finalize pipeline with paramaters set
+        // This call is required only to finalize pipeline with parameters set
         // on the last iteration of loop above. Only valid pointers make sense
         // here as call parameters to avoid execution of prefetch instructions
         // with nullptr, other parameters are not used in real jit call here
@@ -453,7 +453,7 @@ void jit_sve_convolution_fwd_t<src_type, wei_type, dst_type,
             }
         }
 
-        // This call is required only to finalize pipeline with paramaters set
+        // This call is required only to finalize pipeline with parameters set
         // on the last iteration of loop above. Only valid pointers make sense
         // here as call parameters to avoid execution of prefetch instructions
         // with nullptr, other parameters are not used in real jit call here
@@ -618,7 +618,7 @@ void jit_sve_convolution_fwd_t<src_type, wei_type, dst_type,
             }
         }
 
-        // This call is required only to finalize pipeline with paramaters set
+        // This call is required only to finalize pipeline with parameters set
         // on the last iteration of loop above. Only valid pointers make sense
         // here as call parameters to avoid execution of prefetch instructions
         // with nullptr, other parameters are not used in real jit call here
@@ -739,7 +739,7 @@ void jit_sve_convolution_bwd_data_t<diff_dst_type, wei_type, diff_src_type,
             }
         }
 
-        // This call is required only to finalize pipeline with paramaters set
+        // This call is required only to finalize pipeline with parameters set
         // on the last iteration of loop above. Only valid pointers make sense
         // here as call parameters to avoid execution of prefetch instructions
         // with nullptr, other parameters are not used in real jit call here
@@ -907,7 +907,7 @@ void jit_sve_convolution_bwd_data_t<diff_dst_type, wei_type, diff_src_type,
             }
         }
 
-        // This call is required only to finalize pipeline with paramaters set
+        // This call is required only to finalize pipeline with parameters set
         // on the last iteration of loop above. Only valid pointers make sense
         // here as call parameters to avoid execution of prefetch instructions
         // with nullptr, other parameters are not used in real jit call here
@@ -1121,7 +1121,7 @@ void jit_sve_convolution_bwd_data_t<diff_dst_type, wei_type, diff_src_type,
             }
         }
 
-        // This call is required only to finalize pipeline with paramaters set
+        // This call is required only to finalize pipeline with parameters set
         // on the last iteration of loop above. Only valid pointers make sense
         // here as call parameters to avoid execution of prefetch instructions
         // with nullptr, other parameters are not used in real jit call here
@@ -1318,7 +1318,7 @@ void jit_sve_convolution_bwd_weights_t<src_type, diff_dst_type,
         const int oc_off_idx = is_ddst_layout_nxc
                 ? ti->g_start * jcp.oc + ti->oc_b_start * jcp.oc_block
                 : _oc;
-        // This call is required only to finalize pipeline with paramaters
+        // This call is required only to finalize pipeline with parameters
         // set on the last iteration of loop above. Only valid pointers make
         // sense here as call parameters to avoid execution of prefetch
         // instructions with nullptr, other parameters are not used in real
@@ -1419,7 +1419,7 @@ void jit_sve_convolution_bwd_weights_t<src_type, diff_dst_type,
         const int oc_off_idx = is_ddst_layout_nxc
                 ? ti->g_start * jcp.oc + ti->oc_b_start * jcp.oc_block
                 : _oc;
-        // This call is required only to finalize pipeline with paramaters set
+        // This call is required only to finalize pipeline with parameters set
         // on the last iteration of loop above. Only valid pointers make sense
         // here as call parameters to avoid execution of prefetch instructions
         // with nullptr, other parameters are not used in real jit call here
@@ -1531,7 +1531,7 @@ void jit_sve_convolution_bwd_weights_t<src_type, diff_dst_type,
         const int oc_off_idx = is_ddst_layout_nxc
                 ? ti->g_start * jcp.oc + ti->oc_b_start * jcp.oc_block
                 : _oc;
-        // This call is required only to finalize pipeline with paramaters set
+        // This call is required only to finalize pipeline with parameters set
         // on the last iteration of loop above. Only valid pointers make sense
         // here as call parameters to avoid execution of prefetch instructions
         // with nullptr, other parameters are not used in real jit call here

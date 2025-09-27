@@ -1,4 +1,4 @@
-﻿--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
 --
 --  This file is part of the Doxyrest toolkit.
 --
@@ -288,7 +288,7 @@ function formatDocBlock_parameterdescription(block, context)
 	text = trimWhitespace(text)
 
 	if string.find(text, "\n") then
-		text = "\n" .. replaceCommonSpacePrefix(text, "\t\t  ") -- add paramter table offset "- "
+		text = "\n" .. replaceCommonSpacePrefix(text, "\t\t  ") -- add parameter table offset "- "
 	end
 
 	if context.paramSection then
