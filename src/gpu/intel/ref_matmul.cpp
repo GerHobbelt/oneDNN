@@ -108,6 +108,7 @@ status_t ref_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
                 : last_scale_dim * last_scale_stride;
         last_scale_stride = wei_scale_strides[d];
         last_scale_dim = wei_scale_dims[d];
+        if (wei_scale_dims[d] == 1) wei_scale_strides[d] = 0;
     }
 
     const dim_t wei_scale_stride_n = wei_scale_strides[b_d.ndims() - 1];
@@ -140,6 +141,7 @@ status_t ref_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
                 : last_scale_dim * last_scale_stride;
         last_scale_stride = src_scale_strides[d];
         last_scale_dim = src_scale_dims[d];
+        if (src_scale_dims[d] == 1) src_scale_strides[d] = 0;
     }
 
     const dim_t src_scale_stride_k = src_scale_strides[a_d.ndims() - 1];
@@ -290,7 +292,7 @@ status_t ref_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
         arg_list.set(arg_idx++, CTX_IN_STORAGE(DNNL_ARG_ATTR_ROUNDING_SEED));
     }
     append_post_ops_to_arg_list(
-            ctx, arg_list, arg_idx, pd()->attr()->post_ops_);
+            ctx, arg_list, arg_idx, pd()->attr()->post_ops_, *pd()->dst_md());
 
     compute::range_t gws = {1, (size_t)N, (size_t)(D0 * D1 * D2 * D3)};
     auto nd_range = compute::nd_range_t(gws);

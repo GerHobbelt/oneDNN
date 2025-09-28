@@ -149,8 +149,8 @@ status_t ref_group_normalization_fwd_t::execute(const exec_ctx_t &ctx) const {
     arg_list.append(dst_scale);
     arg_list.append(pd()->desc()->group_norm_epsilon);
 
-    append_post_ops_to_arg_list(
-            ctx, arg_list, arg_list.nargs(), pd()->attr()->post_ops_);
+    append_post_ops_to_arg_list(ctx, arg_list, arg_list.nargs(),
+            pd()->attr()->post_ops_, *pd()->dst_md());
 
     const compute::nd_range_t &nd_range_kernel = pd()->dispatch.nd_range();
     status_t status = parallel_for(ctx, nd_range_kernel, kernel_, arg_list);
@@ -160,6 +160,10 @@ status_t ref_group_normalization_fwd_t::execute(const exec_ctx_t &ctx) const {
 
 status_t ref_group_normalization_bwd_t::pd_t::init(impl::engine_t *engine) {
     using namespace data_type;
+
+    // TODO: remove me
+    VDISPATCH_GNORM(
+            false, "The implementation doesn't return the correct result");
 
     const data_type_t src_dt = src_md()->data_type;
     const data_type_t diff_dst_dt = diff_dst_md()->data_type;

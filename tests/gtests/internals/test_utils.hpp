@@ -97,16 +97,13 @@ void write_to_dnnl_memory(const T *handle, dnnl::memory &mem, dnnl::engine &eng,
                     (const unsigned *)handle, mem_u32_mem, eng, s);
             dnnl::reorder(mem_u32_mem, mem).execute(s, mem_u32_mem, mem);
         } else {
-#ifdef DNNL_WITH_SYCL
-            void *mapped_ptr = (uint8_t *)mem.get_data_handle();
-            auto sycl_queue = dnnl::sycl_interop::get_queue(s);
-            sycl_queue.memcpy(mapped_ptr, handle, size);
-#else
             s.wait();
             void *mapped_ptr = mem.map_data();
-            if (mapped_ptr) std::memcpy(mapped_ptr, handle, size);
+            if (!mapped_ptr)
+                throw std::runtime_error(
+                        "Failed to map memory in write_to_dnnl_memory");
+            std::memcpy(mapped_ptr, handle, size);
             mem.unmap_data(mapped_ptr);
-#endif
         }
         return;
     }

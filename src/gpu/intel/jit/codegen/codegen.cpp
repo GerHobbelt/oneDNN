@@ -992,6 +992,12 @@ public:
                 auto src0_op = eval(obj.a, a_out_op);
                 auto src1_op = eval(obj.b, b_out_op);
 
+                if ((src0_op.is_reg_buf_data()
+                            && src0_op.reg_buf_data().hs() != 0)
+                        || (src1_op.is_reg_buf_data()
+                                && src1_op.reg_buf_data().hs() != 0))
+                    mod.setExecSize(obj.type.elems());
+
                 ebinary(obj, mod, dst_op, src0_op, src1_op);
                 break;
             }
@@ -1090,6 +1096,15 @@ public:
         int off = to_cpp<int>(off_op.immediate());
         auto load_rbd = buf_op.reg_buf_data().format(off / scalar_type.size(),
                 type.elems(), stride, to_ngen(scalar_type));
+        bind(obj, load_rbd);
+    }
+    void _visit(const ref_t &obj) override {
+        auto &type = obj.type;
+        auto scalar_type = type.scalar();
+        auto buf_op = eval(obj.var);
+        int off = obj.off;
+        auto load_rbd = buf_op.reg_buf_data().format(
+                off, type.elems(), /*stride=*/1, to_ngen(scalar_type));
         bind(obj, load_rbd);
     }
 
