@@ -277,6 +277,12 @@ struct EmulationImplementation {
             dst.setType(DataType::ud);
             src0.setType(DataType::uw);
             g.shl(mod, dst, src0, 16, loc);
+        } else if (src0.getType() == DataType::bf8
+                && dst.getType() == DataType::f) {
+            RegData hfTmp = src0;
+            hfTmp.setType(DataType::uw);
+            g.shl(mod, hfTmp, src0.setType(DataType::ub), 8, loc);
+            g.mov(mod, dst, hfTmp.setType(DataType::hf), loc);
         } else
             g.mov(mod, dst, src0, loc);
     }
@@ -553,7 +559,7 @@ struct EmulationImplementation {
         bool s1W = isW(src1);
         bool s1D = isDW(src1);
         bool s1Q = isQW(src1);
-        bool s1Immed = std::is_base_of<Immediate, S1>::value;
+        const bool s1Immed = std::is_base_of<Immediate, S1>::value;
 
         bool s0Signed = isSigned(src0.getType());
         bool s1Signed = isSigned(src1.getType());

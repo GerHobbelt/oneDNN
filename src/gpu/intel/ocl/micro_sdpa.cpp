@@ -39,9 +39,9 @@ namespace {
 
 using namespace gemmstone;
 
-/// Returns true if a common scale value is used for each slice of the tensor
-/// operation. For 4D case it's when the mask's two first bits are on and two
-/// last bits are off.
+/// Returns true if a common quantization value is used for each slice of the
+/// tensor operation. For 4D case it's when the mask's two first bits are on
+/// and two last bits are off.
 /// Examples:
 ///   | mask      | result  |
 ///   |-----------+---------|
@@ -50,19 +50,8 @@ using namespace gemmstone;
 ///   |  3 (1100) | true    |
 ///   |  1 (1000) | true    |
 ///   |  8 (0001) | false   |
-bool with_quantize_common(const quant_entry_t &scale_entry) {
-    return !scale_entry.has_default_values()
-            && (((scale_entry.get_mask() & 3) != 0
-                        && (scale_entry.get_mask() & 12) == 0)
-                    || scale_entry.get_mask() == 0);
-}
-
-/// Returns true if a common zero points value is used for each slice of the
-/// tensor operation
-bool with_quantize_common(const zero_points_t &zp) {
-    int mask = zp.get_mask(DNNL_ARG_WEIGHTS);
-    return !zp.has_default_values(DNNL_ARG_WEIGHTS)
-            && (((mask & 3) != 0 && (mask & 12) == 0) || mask == 0);
+bool with_quantize_common(const quant_entry_t &entry) {
+    return !entry.has_default_values() && ((entry.get_mask() & 12) == 0);
 }
 
 } /* anonymous namespace */
@@ -148,11 +137,12 @@ status_t micro_sdpa_t::pd_t::init_microkernels(impl::engine_t *engine) {
     if (status != status::success) return status;
 
     VDEBUGINFO(4, primitive, sdpa,
-            "D=%d,K=%ld,%s%s%s"
+            "D=%d,K=%d,%s%s%s"
             "kq_tile(%d, %d): unroll_m=%d unroll_n=%d wg_m=%d wg_n=%d,"
             "vs_tile(%d, %d): unroll_m=%d unroll_n=%d wg_m=%d wg_n=%d",
-            d->head_size(), d->keys(), thin_q ? "thin_q," : "",
-            quantized ? "quant," : "", is_integrated ? "integrated" : "",
+            static_cast<int>(d->head_size()), static_cast<int>(d->keys()),
+            thin_q ? "thin_q," : "", quantized ? "quant," : "",
+            is_integrated ? "integrated" : "",
             config->unroll_m_kq * config->wg_m_kq,
             config->unroll_n_kq * config->wg_n_kq, config->unroll_m_kq,
             config->unroll_n_kq, config->wg_m_kq, config->wg_n_kq,
@@ -174,7 +164,8 @@ status_t micro_sdpa_t::pd_t::init_microkernels(impl::engine_t *engine) {
             "The vs matmul config work_group tile M(%d*%d=%d) axis must be "
             "greater than or equal to head size(%ld)",
             config->unroll_m_vs, config->wg_m_vs,
-            config->unroll_m_vs * config->wg_m_vs, d->head_size());
+            config->unroll_m_vs * config->wg_m_vs,
+            static_cast<long int>(d->head_size()));
 
     /* Get device information */
     HWInformation hw_info;
@@ -206,7 +197,7 @@ status_t micro_sdpa_t::pd_t::init_microkernels(impl::engine_t *engine) {
     } else {
         VCHECK_SDPA_COND(utils::one_of(qry_md()->data_type, data_type::f16,
                                  data_type::bf16),
-                "Q tensor's data type(%s) must be bf16 or f16");
+                "Q tensor's data type must be bf16 or f16");
     }
     problem.Tc = problem.Tc_ext = Type::f32;
     problem.Ts = problem.Tc;

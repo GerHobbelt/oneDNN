@@ -48,28 +48,20 @@ bool sdp_decomp_config_t::initial_check(const std::shared_ptr<subgraph_t> &sg,
     dims wei2_user_dims = ltw(inputs[graph_inport[4]]).vdims();
     VCHECK_SDP_DECOMP(
             batch_size == wei1_user_dims[0] && batch_size == wei2_user_dims[0],
-            false,
-            "Batch size mismatch, batch_size: %lld, wei1: %lld, wei2: %lld",
-            batch_size, wei1_user_dims[0], wei2_user_dims[0]);
+            false, "Batch size mismatch, batch_size: %ld, wei1: %ld, wei2: %ld",
+            static_cast<long int>(batch_size),
+            static_cast<long int>(wei1_user_dims[0]),
+            static_cast<long int>(wei2_user_dims[0]));
 
     head_size_v = wei2_user_dims[3];
     // Check scale size
     if (graph_inport[2] != -1) {
         auto scale_sz = ltw(inputs[graph_inport[2]]).nelems();
         VCHECK_SDP_DECOMP(scale_sz == 1, false,
-                "Only supports single scale value, but got %lld", scale_sz);
+                "Only supports single scale value, but got %ld",
+                static_cast<long int>(scale_sz));
     }
 
-    // Check select cond and src0 shape
-    if (graph_inport[5] != -1 && graph_inport[6] != -1) {
-        const auto select_cond_dims = ltw(inputs[graph_inport[5]]).vdims();
-        const auto select_src0_dims = ltw(inputs[graph_inport[6]]).vdims();
-        VCHECK_SDP_DECOMP(select_cond_dims != select_src0_dims, false,
-                "Only supports select for case requiring broadcast cond input, "
-                "but got cond dims %s and src0 dims %s",
-                dims2str(select_cond_dims).c_str(),
-                dims2str(select_src0_dims).c_str());
-    }
     VCHECK_SDP_DECOMP(ltw(inputs[graph_inport[1]]).data_type()
                     == ltw(inputs[graph_inport[4]]).data_type(),
             false,
@@ -93,9 +85,10 @@ bool sdp_decomp_config_t::initial_check(const std::shared_ptr<subgraph_t> &sg,
     nthr = dnnl_get_current_num_threads();
     VCHECK_SDP_DECOMP(batch_size * num_head_q > RATIO * nthr, false,
             "Doesn't meet condition for decompose: Batch size * num_head_q "
-            "should be larger than ratio * nthr, but got batch_size %lld, "
-            "num_head_q %lld, ration %d , nthr %d",
-            batch_size, num_head_q, RATIO, nthr);
+            "should be larger than ratio * nthr, but got batch_size %ld, "
+            "num_head_q %ld, ration %d , nthr %d",
+            static_cast<long int>(batch_size),
+            static_cast<long int>(num_head_q), RATIO, nthr);
 #endif
     return true;
 }
