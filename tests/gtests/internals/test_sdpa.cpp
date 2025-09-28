@@ -706,8 +706,29 @@ sdpa_tensors_t get_descriptors(dnnl::engine &eng, const sdpa_dims_t &p,
     return out;
 }
 
+static std::unique_ptr<dnnl::engine> sdpa_eng;
+
+dnnl::engine get_sdpa_test_engine() {
+    return *sdpa_eng;
+}
+
 class sdpa_test_t : public ::testing::TestWithParam<sdpa_dims_t> {
 public:
+    // Testing reusable functionality requires shared engine between tests.
+    static void SetUpTestSuite() {
+#ifdef DNNL_SYCL_CUDA
+        GTEST_SKIP() << "SDPA primitive tests do not support CUDA";
+#endif
+#ifdef DNNL_SYCL_HIP
+        GTEST_SKIP() << "SDPA primitive tests do not support HIP";
+#endif
+#ifndef DNNL_TEST_WITH_ENGINE_PARAM
+        SKIP_IF(engine::get_count(engine::kind::gpu) == 0,
+                "SDPA tests require gpus.");
+        sdpa_eng.reset(new dnnl::engine(engine::kind::gpu, 0));
+#endif
+    }
+
     void SetUp() override {
 #ifdef DNNL_SYCL_CUDA
         GTEST_SKIP() << "SDPA primitive tests do not support CUDA";
@@ -722,7 +743,7 @@ public:
 #else
         SKIP_IF(engine::get_count(engine::kind::gpu) == 0,
                 "SDPA tests require gpus.");
-        eng = dnnl::engine(engine::kind::gpu, 0);
+        eng = get_sdpa_test_engine();
 #endif
         strm = dnnl::stream(eng);
         p = GetParam();
@@ -736,10 +757,16 @@ public:
         }
     }
 
+    static void TearDownTestSuite() {
+#ifndef DNNL_TEST_WITH_ENGINE_PARAM
+        sdpa_eng.reset();
+#endif
+    }
+
 protected:
-    sdpa_dims_t p;
     dnnl::engine eng;
     dnnl::stream strm;
+    sdpa_dims_t p;
     sdpa_tensors_t t;
     std::vector<dnnl_memory_t> doubled_memory;
 };
@@ -928,6 +955,7 @@ INSTANTIATE_TEST_SUITE_P(llama_3_8b,
                                // mb,hd_num,kv_hd_num,seq_len,qry_num,hd_size, kg_sz, vgrp_sz,       dt,      qdt,       kdt,        ksdt,      kzpdt,       vdt,       vsdt,      vzpdt,    mskdt, qtype
     testing::Values(
                     sdpa_dims_t{   1,    32,        8,    384,    384,    128,   128,     128, mdt::f16, mdt::f16,  mdt::f16,  mdt::undef, mdt::undef,  mdt::f16, mdt::undef, mdt::undef, mdt::f16, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    32,        8,    386,    386,    128,   128,     128, mdt::f16, mdt::f16,  mdt::f16,  mdt::undef, mdt::undef,  mdt::f16, mdt::undef, mdt::undef, mdt::f16, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
                     sdpa_dims_t{   1,    32,        8,    385,      1,    128,   128,     128, mdt::f16, mdt::f16,  mdt::f16,  mdt::undef, mdt::undef,  mdt::f16, mdt::undef, mdt::undef, mdt::f16, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
                     sdpa_dims_t{   1,    32,        8,    512,    512,    128,   128,     128, mdt::f16, mdt::f16,  mdt::f16,  mdt::undef, mdt::undef,  mdt::f16, mdt::undef, mdt::undef, mdt::f16, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
                     sdpa_dims_t{   1,    32,        8,    513,      1,    128,   128,     128, mdt::f16, mdt::f16,  mdt::f16,  mdt::undef, mdt::undef,  mdt::f16, mdt::undef, mdt::undef, mdt::f16, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
@@ -944,6 +972,53 @@ INSTANTIATE_TEST_SUITE_P(llama_3_8b,
                     sdpa_dims_t{   1,    32,        8,   2048,   2048,    128,   128,     128, mdt::f16, mdt::f16,   mdt::s8,    mdt::f16, mdt::undef,   mdt::s8,   mdt::f16, mdt::undef, mdt::f16, quantize_type::per_token_with_groups,  with_key_transposed, mask_type::twoD },
                     sdpa_dims_t{   1,    32,        8,   2049,      1,    128,   128,     128, mdt::f16, mdt::f16,   mdt::s8,    mdt::f16, mdt::undef,   mdt::s8,   mdt::f16, mdt::undef, mdt::f16, quantize_type::per_token_with_groups,  with_key_transposed, mask_type::twoD }
     ), &print_to_string);
+
+INSTANTIATE_TEST_SUITE_P(llama_f32,
+    sdpa_test_t,
+                               // mb,hd_num,kv_hd_num,seq_len,qry_num,hd_size, kg_sz, vgrp_sz,       dt,      qdt,       kdt,        ksdt,      kzpdt,       vdt,       vsdt,      vzpdt,    mskdt, qtype
+    testing::Values(
+                    sdpa_dims_t{   1,    2,        2,    384,    384,    32,   32,     32, mdt::f32, mdt::f32,  mdt::f32,  mdt::undef, mdt::undef,  mdt::f32, mdt::undef, mdt::undef, mdt::f32, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,    385,      1,    32,   32,     32, mdt::f32, mdt::f32,  mdt::f32,  mdt::undef, mdt::undef,  mdt::f32, mdt::undef, mdt::undef, mdt::f32, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,    384,    384,    64,   64,     64, mdt::f32, mdt::f32,  mdt::f32,  mdt::undef, mdt::undef,  mdt::f32, mdt::undef, mdt::undef, mdt::f32, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,    385,      1,    64,   64,     64, mdt::f32, mdt::f32,  mdt::f32,  mdt::undef, mdt::undef,  mdt::f32, mdt::undef, mdt::undef, mdt::f32, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,    384,    384,    128,   128,     128, mdt::f32, mdt::f32,  mdt::f32,  mdt::undef, mdt::undef,  mdt::f32, mdt::undef, mdt::undef, mdt::f32, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,    385,      1,    128,   128,     128, mdt::f32, mdt::f32,  mdt::f32,  mdt::undef, mdt::undef,  mdt::f32, mdt::undef, mdt::undef, mdt::f32, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,    384,    384,    256,   256,     256, mdt::f32, mdt::f32,  mdt::f32,  mdt::undef, mdt::undef,  mdt::f32, mdt::undef, mdt::undef, mdt::f32, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,    385,      1,    256,   256,     256, mdt::f32, mdt::f32,  mdt::f32,  mdt::undef, mdt::undef,  mdt::f32, mdt::undef, mdt::undef, mdt::f32, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,    384,    384,    512,   512,     512, mdt::f32, mdt::f32,  mdt::f32,  mdt::undef, mdt::undef,  mdt::f32, mdt::undef, mdt::undef, mdt::f32, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,    384,      1,    512,   512,     512, mdt::f32, mdt::f32,  mdt::f32,  mdt::undef, mdt::undef,  mdt::f32, mdt::undef, mdt::undef, mdt::f32, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
+
+                    sdpa_dims_t{   1,    2,        2,   1024,   1024,     32,    32,      32, mdt::f32, mdt::f32,  mdt::f32,  mdt::undef, mdt::undef,  mdt::f32, mdt::undef, mdt::undef, mdt::f32, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,   1025,      1,     32,    32,      32, mdt::f32, mdt::f32,  mdt::f32,  mdt::undef, mdt::undef,  mdt::f32, mdt::undef, mdt::undef, mdt::f32, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,   1024,   1024,     64,    64,      64, mdt::f32, mdt::f32,  mdt::f32,  mdt::undef, mdt::undef,  mdt::f32, mdt::undef, mdt::undef, mdt::f32, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,   1025,      1,     64,    64,      64, mdt::f32, mdt::f32,  mdt::f32,  mdt::undef, mdt::undef,  mdt::f32, mdt::undef, mdt::undef, mdt::f32, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,   1024,   1024,    128,   128,     128, mdt::f32, mdt::f32,  mdt::f32,  mdt::undef, mdt::undef,  mdt::f32, mdt::undef, mdt::undef, mdt::f32, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,   1025,      1,    128,   128,     128, mdt::f32, mdt::f32,  mdt::f32,  mdt::undef, mdt::undef,  mdt::f32, mdt::undef, mdt::undef, mdt::f32, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,   1024,   1024,    256,   256,     256, mdt::f32, mdt::f32,  mdt::f32,  mdt::undef, mdt::undef,  mdt::f32, mdt::undef, mdt::undef, mdt::f32, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,   1025,      1,    256,   256,     256, mdt::f32, mdt::f32,  mdt::f32,  mdt::undef, mdt::undef,  mdt::f32, mdt::undef, mdt::undef, mdt::f32, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,   1024,   1024,    512,   512,     512, mdt::f32, mdt::f32,  mdt::f32,  mdt::undef, mdt::undef,  mdt::f32, mdt::undef, mdt::undef, mdt::f32, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,   1025,      1,    512,   512,     512, mdt::f32, mdt::f32,  mdt::f32,  mdt::undef, mdt::undef,  mdt::f32, mdt::undef, mdt::undef, mdt::f32, quantize_type::no_quantization,        with_key_transposed, mask_type::twoD },
+
+
+                    sdpa_dims_t{   1,    2,        2,    384,    384,     32,    32,      32, mdt::f32, mdt::f32,  mdt::s8,  mdt::f32, mdt::undef,  mdt::s8, mdt::f32, mdt::undef, mdt::f32, quantize_type::per_token_with_groups,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,   1024,   1024,     32,    32,      32, mdt::f32, mdt::f32,  mdt::s8,  mdt::f32, mdt::undef,  mdt::s8, mdt::f32, mdt::undef, mdt::f32, quantize_type::per_token_with_groups,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,   1025,      1,     32,    32,      32, mdt::f32, mdt::f32,  mdt::s8,  mdt::f32, mdt::undef,  mdt::s8, mdt::f32, mdt::undef, mdt::f32, quantize_type::per_token_with_groups,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,    384,    384,     64,    64,      64, mdt::f32, mdt::f32,  mdt::s8,  mdt::f32, mdt::undef,  mdt::s8, mdt::f32, mdt::undef, mdt::f32, quantize_type::per_token_with_groups,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,   1024,   1024,     64,    64,      64, mdt::f32, mdt::f32,  mdt::s8,  mdt::f32, mdt::undef,  mdt::s8, mdt::f32, mdt::undef, mdt::f32, quantize_type::per_token_with_groups,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,   1025,      1,     64,    64,      64, mdt::f32, mdt::f32,  mdt::s8,  mdt::f32, mdt::undef,  mdt::s8, mdt::f32, mdt::undef, mdt::f32, quantize_type::per_token_with_groups,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,    384,    384,    128,   128,     128, mdt::f32, mdt::f32,  mdt::s8,  mdt::f32, mdt::undef,  mdt::s8, mdt::f32, mdt::undef, mdt::f32, quantize_type::per_token_with_groups,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,   1024,   1024,    128,   128,     128, mdt::f32, mdt::f32,  mdt::s8,  mdt::f32, mdt::undef,  mdt::s8, mdt::f32, mdt::undef, mdt::f32, quantize_type::per_token_with_groups,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,   1025,      1,    128,   128,     128, mdt::f32, mdt::f32,  mdt::s8,  mdt::f32, mdt::undef,  mdt::s8, mdt::f32, mdt::undef, mdt::f32, quantize_type::per_token_with_groups,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,    384,    384,    256,   256,     256, mdt::f32, mdt::f32,  mdt::s8,  mdt::f32, mdt::undef,  mdt::s8, mdt::f32, mdt::undef, mdt::f32, quantize_type::per_token_with_groups,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,   1024,   1024,    256,   256,     256, mdt::f32, mdt::f32,  mdt::s8,  mdt::f32, mdt::undef,  mdt::s8, mdt::f32, mdt::undef, mdt::f32, quantize_type::per_token_with_groups,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,   1025,      1,    256,   256,     256, mdt::f32, mdt::f32,  mdt::s8,  mdt::f32, mdt::undef,  mdt::s8, mdt::f32, mdt::undef, mdt::f32, quantize_type::per_token_with_groups,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,    384,    384,    512,   512,     512, mdt::f32, mdt::f32,  mdt::s8,  mdt::f32, mdt::undef,  mdt::s8, mdt::f32, mdt::undef, mdt::f32, quantize_type::per_token_with_groups,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,   1024,   1024,    512,   512,     512, mdt::f32, mdt::f32,  mdt::s8,  mdt::f32, mdt::undef,  mdt::s8, mdt::f32, mdt::undef, mdt::f32, quantize_type::per_token_with_groups,        with_key_transposed, mask_type::twoD },
+                    sdpa_dims_t{   1,    2,        2,   1025,      1,    512,   512,     512, mdt::f32, mdt::f32,  mdt::s8,  mdt::f32, mdt::undef,  mdt::s8, mdt::f32, mdt::undef, mdt::f32, quantize_type::per_token_with_groups,        with_key_transposed, mask_type::twoD }
+    ), &print_to_string);
+
+
+
 
 
 INSTANTIATE_TEST_SUITE_P(minicpm_1b_st,

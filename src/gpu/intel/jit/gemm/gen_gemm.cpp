@@ -34,6 +34,16 @@ namespace gpu {
 namespace intel {
 namespace jit {
 
+namespace {
+dim_t quant_entry_group_prod(const quant_entry_t &attr) {
+    dim_t ret = 1;
+    if (attr.has_default_groups()) return ret;
+    for (int i = 0; i < 2; ++i)
+        ret *= attr.get_group(i);
+    return ret;
+}
+} // anonymous namespace
+
 status_t gen_gemm_t::launch_nocopy(const gemm_exec_ctx_t &ctx,
         compute::compute_stream_t *compute_stream, zero_pool_t *zero_pool,
         const memory_storage_t &a, const memory_storage_t &b,
@@ -89,7 +99,6 @@ status_t gen_gemm_t::launch_nocopy(const gemm_exec_ctx_t &ctx,
         int32_t ldaq = isColMajor(layout)
                 ? pd()->eff_m()
                 : utils::div_up(pd()->desc()->k(), problem->aqGroupK);
-        if (pd()->src_po_sc_ && swapab) ldaq = 0;
         arg_list.set(argn++, ldaq);
     }
     if (problem->boPtrDims == 2 || problem->bScale2D()) {
@@ -98,7 +107,6 @@ status_t gen_gemm_t::launch_nocopy(const gemm_exec_ctx_t &ctx,
         int32_t ldbq = !isColMajor(layout)
                 ? pd()->eff_n()
                 : utils::div_up(pd()->desc()->k(), problem->bqGroupK);
-        if (pd()->src_po_sc_ && !swapab) ldbq = 0;
         arg_list.set(argn++, ldbq);
     }
     if (pd()->with_c_zero_points() || pd()->with_bias()
@@ -143,14 +151,16 @@ status_t gen_gemm_t::launch_nocopy(const gemm_exec_ctx_t &ctx,
             arg_list.set(argn++, stride_b);
             arg_list.set(argn++, stride_c);
             if (problem->asPtrDims > 2) {
-                auto scale_stride_a = int32_t(stride_a
-                        / pd()->quant_entry_group_prod(
+                dim_t scale_stride = pd()->stride_scale(i, DNNL_ARG_A);
+                auto scale_stride_a = int32_t(scale_stride
+                        / quant_entry_group_prod(
                                 pd()->attr()->scales_.get(DNNL_ARG_A)));
                 arg_list.set(argn++, scale_stride_a);
             }
             if (problem->bsPtrDims > 2) {
-                auto scale_stride_b = int32_t(stride_b
-                        / pd()->quant_entry_group_prod(
+                dim_t scale_stride = pd()->stride_scale(i, DNNL_ARG_B);
+                auto scale_stride_b = int32_t(scale_stride
+                        / quant_entry_group_prod(
                                 pd()->attr()->scales_.get(DNNL_ARG_B)));
                 arg_list.set(argn++, scale_stride_b);
             }
@@ -389,9 +399,9 @@ status_t gen_gemm_t::execute(const gemm_exec_ctx_t &ctx) const {
         if (swapab) std::swap(ao, bo);
     }
 
-    if (pd()->wei_scales_2d()) { a_scales = &GEMM_CTX_ARG_STORAGE(a_scales); }
+    if (pd()->a_scales_2d()) { a_scales = &GEMM_CTX_ARG_STORAGE(a_scales); }
 
-    if (pd()->src_scales_2d()) { b_scales = &GEMM_CTX_ARG_STORAGE(b_scales); }
+    if (pd()->b_scales_2d()) { b_scales = &GEMM_CTX_ARG_STORAGE(b_scales); }
     if (swapab) std::swap(a_scales, b_scales);
 
     if (swapab) {

@@ -1400,14 +1400,17 @@ void jit_brgemm_kernel_t<Wmm>::store_accumulators_apply_post_ops(dim_t bd_block,
 
     const bool dt_requires_saturation
             = one_of(brg.dt_d, data_type::u8, data_type::s8, data_type::s32);
+    const bool use_sat_cvt
+            = dt_requires_saturation && isa_has_sat_cvt(brg.isa_impl, brg.dt_d);
     assert(vmm_lbound().getIdx() != vmm_ubound().getIdx());
     if (dt_requires_saturation) {
         init_saturate_f32(vmm_lbound(), vmm_ubound(), reg_tmp_gpr,
-                data_type::f32, brg.dt_d);
+                data_type::f32, brg.dt_d, false, use_sat_cvt);
         for (dim_t bd = 0; bd < bd_block; bd++) {
             for (dim_t ld = 0; ld < ld_block2; ld++) {
                 auto vmm = accm(ld_block2, bd, ld);
-                saturate_cvt_f32(vmm, vmm_lbound(), vmm_ubound(), brg.dt_d);
+                saturate_cvt_f32(vmm, vmm_lbound(), vmm_ubound(), brg.dt_d,
+                        false, use_sat_cvt);
             }
         }
         // below call is not required as s32 doesn't use vmm_lbound
@@ -1420,6 +1423,9 @@ void jit_brgemm_kernel_t<Wmm>::store_accumulators_apply_post_ops(dim_t bd_block,
         mov(ptr[rsp + reg_aux_D_backup_offs_], reg_aux_D);
 
     if (brg.is_fp8_via_convert()) mov(ptr[rsp + reg_val_tmp_1_], reg64_fp8_aux);
+
+    if (is_superset(brg.isa_impl, avx10_2_512)) prefetchrst2(ptr[reg_aux_D]);
+
     for_(dim_t bd = 0; bd < bd_block; bd++)
     for (dim_t ld = 0; ld < ld_block2; ld++) {
         auto addr = ptr[reg_aux_D + D_offset(bd, ld)];
@@ -1432,7 +1438,7 @@ void jit_brgemm_kernel_t<Wmm>::store_accumulators_apply_post_ops(dim_t bd_block,
                     = vmm_mask(vmm_lower, is_tail, true, k_mask);
             const Xmm xmm = Xmm(vmm.getIdx());
             const Xmm r_xmm = vmm_mask(xmm, is_tail, true, k_mask);
-            if (isa_has_sat_cvt(brg.isa_impl, brg.dt_d)) {
+            if (use_sat_cvt) {
                 assert(one_of(brg.dt_d, data_type::s8, data_type::u8));
                 auto vmm_perm = vmm_ubound();
                 vpermb(vmm, vmm_perm, vmm);
@@ -1578,14 +1584,17 @@ void jit_brgemm_kernel_t<Wmm>::store_accumulators_without_post_ops(
             = brg.beta == 1.f && IMPLICATION(brg.is_int8, brg.alpha == 1.0f);
     const bool dt_requires_saturation = brg.is_int8
             && !IMPLICATION(alpha_or_beta_applicable, beta_uses_vadd);
+    const bool use_sat_cvt
+            = dt_requires_saturation && isa_has_sat_cvt(brg.isa_impl, brg.dt_d);
 
     if (dt_requires_saturation) {
         init_saturate_f32(vmm_lbound(), vmm_ubound(), reg_tmp_gpr,
-                data_type::f32, brg.dt_d);
+                data_type::f32, brg.dt_d, false, use_sat_cvt);
         for (dim_t bd = 0; bd < bd_block; bd++) {
             for (dim_t ld = 0; ld < ld_block2; ld++) {
                 auto vmm = accm(ld_block2, bd, ld);
-                saturate_cvt_f32(vmm, vmm_lbound(), vmm_ubound(), brg.dt_d);
+                saturate_cvt_f32(vmm, vmm_lbound(), vmm_ubound(), brg.dt_d,
+                        false, use_sat_cvt);
             }
         }
         // below call is not required as s32 doesn't use vmm_lbound
@@ -1594,6 +1603,8 @@ void jit_brgemm_kernel_t<Wmm>::store_accumulators_without_post_ops(
 
     if (brg.is_runtime_ldc && bd_block > 1)
         mov(ptr[rsp + reg_aux_C_backup_offs_], reg_aux_C);
+
+    if (is_superset(brg.isa_impl, avx10_2_512)) prefetchrst2(ptr[reg_aux_C]);
 
     for_(dim_t bd = 0; bd < bd_block; bd++)
     for (dim_t ld = 0; ld < ld_block2; ld++) {
@@ -2312,13 +2323,22 @@ void jit_brgemm_kernel_t<Wmm>::gemm_microkernel(dim_t bd_block2,
     };
 
     auto load_B = [this, is_ld_tail](dim_t vmm_load_idx, dim_t rd, dim_t ld) {
+        const bool mem_advice_B
+                = utils::one_of(brg.brgattr.mem_advice,
+                          brgemm_hint_mem_advice_B, brgemm_hint_mem_advice_A_B)
+                && IMPLICATION(
+                        brg.dt_b == data_type::f16, brg.isa_impl == avx10_2_512)
+                && IMPLICATION(brg.dt_b == data_type::bf16,
+                        brg.isa_impl != avx2_vnni_2);
         const Vmm vmm_load
                 = vmm_mask(load(vmm_load_idx), is_ld_tail, false, ld_tail_mask);
         const auto addr = ptr[reg_aux_B + B_offset(ld, rd)];
         // Note: Assuming the tails are properly padded/blocked for
         // avx2_vnni_2 with xf16 data type, as the B matrix is generally
         // at least double-blocked.
-        if (brg.dt_b == data_type::f16) {
+        if (mem_advice_B) {
+            vmovrsd(vmm_load, addr);
+        } else if (brg.dt_b == data_type::f16) {
             if (brg.isa_impl == avx10_2_512) {
                 uni_vmovups(vmm_load, addr);
             } else if (brg.isa_impl == avx2_vnni_2) {
