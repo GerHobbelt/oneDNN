@@ -1100,37 +1100,6 @@ void init_regs(config_t &cfg) {
     cfg.set_regs(default_regs(cfg));
 }
 
-bool post_op_layouts_ok(const problem_t &prb) {
-    auto *pd = prb.conv_pd;
-    auto *attr = pd->attr();
-
-    auto &output_md = prb.c_md();
-    for (int i = 0; i < attr->post_ops_.len(); i++) {
-        auto &po = attr->post_ops_.entry_[i];
-        if (po.is_binary() || po.is_prelu()) {
-            int mask = po.is_prelu()
-                    ? po.prelu.mask
-                    : utils::get_dims_mask(output_md.dims,
-                            po.binary.src1_desc.dims, prb.ndims, true);
-            // These cases don't have message-related limitations.
-            if ((mask & (1 << 1)) == 0 || mask == (1 << 1)) continue;
-            const auto &rhs_layout = po.is_prelu()
-                    ? layout_t(type_t::f32(), 0,
-                            get_prelu_weights_dims(po.prelu.mask, output_md))
-                    : layout_t(po.binary.src1_desc);
-            // No blocks means it's a scalar, can be always loaded.
-            if (rhs_layout.blocks().empty()) return true;
-
-            auto rhs0 = rhs_layout.blocks()[0];
-            // Innermost block must:
-            // - be across output channels
-            // - be dense
-            if (rhs0.dim_idx != 1 || dim_t(rhs0.stride) != 1) return false;
-        }
-    }
-    return true;
-}
-
 bwd_d_optimize_kind_t bwd_d_optimize_kind_hint(const problem_t &prb) {
     bool with_dilation = prb.dh || prb.dw || prb.dd;
     if (!prb.is_bwd_d || with_dilation) return bwd_d_optimize_kind_t::none;
@@ -1185,9 +1154,6 @@ status_t init_pd_time_cfg(const problem_t &prb, config_t &cfg,
     CHECK(init_tensor_layouts(cfg, pd, engine));
 
     CHECK(attr->set_default_formats(&prb.c_md()));
-
-    VDISPATCH_CHECK(
-            pd, engine, post_op_layouts_ok(prb), VERBOSE_UNSUPPORTED_POSTOP);
 
     init_global_reduction(cfg);
     init_bwd_d_optimize(cfg);
@@ -1427,8 +1393,8 @@ dim_t map_spatial(const config_t &cfg, const pvar_t &dim, const tile_t &tile) {
 
 bool needs_spatial_mapping(const config_t &cfg, const pvar_t &dim) {
     auto &prb = cfg.prb();
-    if (utils::one_of(dim.name(), "od", "oh", "ow")) return prb.is_bwd_d;
-    if (utils::one_of(dim.name(), "id", "ih", "iw"))
+    if (utils::one_of(dim.str(), "od", "oh", "ow")) return prb.is_bwd_d;
+    if (utils::one_of(dim.str(), "id", "ih", "iw"))
         return prb.is_fwd || prb.is_bwd_w;
     return false;
 }
@@ -1496,7 +1462,8 @@ walk_order_t maybe_fixup_group_with_small_channels(
     auto &b0 = layout.blocks()[0];
     auto &b1 = layout.blocks()[1];
     // Check that layout has groups followed by channels, i.e. *gc form.
-    if (b0.dim_idx != c_dim_idx || b1.dim_idx != g_dim_idx) return walk_order;
+    if (b0.dim.index() != c_dim_idx || b1.dim.index() != g_dim_idx)
+        return walk_order;
     // If the full channel dimension exceeds the cache line size, cache reuse
     // should be already good enough.
     // Xe2 has 256 byte L3 cache block so try to span 4 cache lines.
@@ -1693,8 +1660,7 @@ walk_order_t compute_walk_order(const config_t &cfg) {
                             grid_tile[b.dim], grid_inner.get(b.dim, 1));
                     if (rem == 1) continue;
                     auto bmnk = to_gemm(b.dim, prb);
-                    bool is_bk = utils::one_of(
-                            std::move(bmnk), pvars::b, pvars::k);
+                    bool is_bk = utils::one_of(bmnk, pvars::b, pvars::k);
                     if ((step == 2) != is_bk) continue;
                     walk_order.add(b.dim, rem, 0);
                     break;
@@ -1829,7 +1795,7 @@ void validate_config_and_plan(config_t &cfg) {
                   for (auto &tile : grid)
                       for (auto &d : tile)
                           if (d == dim) return;
-                  gpu_error_not_expected() << dim.name();
+                  gpu_error_not_expected() << dim.str();
               };
     const auto &tg_dims = get_thread_group_grid_dims(cfg);
     const auto &grid_dims = get_kernel_grid_dims(cfg);
@@ -1933,13 +1899,13 @@ int config_t::pad_block(const pvar_t &d) const {
     int oc_idxs[] = {-1, 1, 2};
     int ic_idxs[] = {2, 2, -1};
     int *idxs = nullptr;
-    if (d.name() == "g") {
+    if (d.str() == "g") {
         idxs = g_idxs;
-    } else if (d.name() == "mb") {
+    } else if (d.str() == "mb") {
         idxs = mb_idxs;
-    } else if (d.name() == "oc") {
+    } else if (d.str() == "oc") {
         idxs = oc_idxs;
-    } else if (d.name() == "ic") {
+    } else if (d.str() == "ic") {
         idxs = ic_idxs;
     } else {
         return 1;
@@ -2023,8 +1989,8 @@ std::string config_t::blocking_brief_str() const {
         dim_t loop = loop_dim(d);
         dim_t grid = grid_dim(d);
         if (iter == 1 && loop == 1 && tg == 1) continue;
-        oss << "  Dimension " << d.name()
-            << pad_str(":", -18 + (int)d.name().length());
+        oss << "  Dimension " << d.str()
+            << pad_str(":", -18 + (int)d.str().length());
         oss << "(grid:" << pad_int(grid, 5) << ") x ";
         oss << "(tg:" << pad_int(tg, 5) << ") x ";
         oss << "(loop:" << pad_int(loop, 5) << ") x ";
