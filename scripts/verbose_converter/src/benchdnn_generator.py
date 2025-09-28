@@ -140,6 +140,15 @@ class Converter(metaclass=ConverterMeta):
         args = self._get_nondefault_args(values, defaults=(0.0, 0.0, 1.0))
         return ":".join([po.alg] + args)
 
+    def _convert_select_post_op(self, po: ir.SelectPostOp):
+        src1_arg = f"{po.dt}.{po.mask}"
+        if po.tag != "any":
+            src1_arg = src1_arg + f".{po.tag}"
+        src2_arg = f"{po.src2_mask}"
+        if po.src2_tag != "any":
+            src2_arg = src2_arg + f".{po.tag}"
+        return ":".join([po.alg, src1_arg, src2_arg])
+
     def _convert_binary_post_op(self, po: ir.BinaryPostOp):
         if po.tag != "any":
             return f"{po.alg}:{po.dt}:{po.mask}:{po.tag}"
@@ -161,6 +170,9 @@ class Converter(metaclass=ConverterMeta):
             elif post_op.alg == "prelu":
                 prelu_po = cast(ir.PreLUPostOp, post_op)
                 results.append(self._convert_prelu_post_op(prelu_po))
+            elif post_op.alg == "binary_select":
+                select_po = cast(ir.SelectPostOp, post_op)
+                results.append(self._convert_select_post_op(select_po))
             elif post_op.alg.startswith("binary_"):
                 binary_po = cast(ir.BinaryPostOp, post_op)
                 results.append(self._convert_binary_post_op(binary_po))
@@ -417,7 +429,20 @@ class BinaryConverter(AlgorithmMixin, MultiSourceMixin, Converter):
 
     @property
     def shapes(self):
-        return self.entry.shapes.split(" ", 1)[0]
+        return ":".join(self.entry.shapes.split(":", 2)[:2])
+
+    @property
+    def dts(self):
+        src0, src1, *_, dst = self.entry.mds
+        return f"--sdt={src0.data_type}:{src1.data_type} --ddt={dst.data_type}"
+
+    @property
+    def tags(self):
+        src0, src1, *_, dst = self.entry.mds
+        src0_tag = maybe_make_any_tag(src0)
+        src1_tag = maybe_make_any_tag(src1)
+        dst_tag = maybe_make_any_tag(dst)
+        return f"--stag={src0_tag}:{src1_tag} --dtag={dst_tag}"
 
 
 class BRGEMMConverter(MultiDataTypeMixin, Converter):

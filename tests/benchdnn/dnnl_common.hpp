@@ -612,6 +612,8 @@ void check_correctness(const prb_t *prb, const std::vector<data_kind_t> &kinds,
     // and ref CPU failures.
     if (prim_ref) {
         BENCHDNN_PRINT(1, "run ref: %s\n", res->prim_ref_repro.c_str());
+    } else {
+        BENCHDNN_PRINT(8, "%s\n", "[NAIVE_REF]: Start");
     }
 
     TIME_REF(compute_ref(prb, dir, ref_args, prim_ref));
@@ -917,10 +919,18 @@ void init_memory_args(dnn_mem_map_t &mem_map, const prb_t *prb,
     for (int idx = 0; idx < dnnl_post_ops_len(const_po); ++idx) {
         if (dnnl_post_ops_get_kind(const_po, idx) != dnnl_binary) continue;
 
-        int po_arg = DNNL_ARG_ATTR_MULTIPLE_POST_OP(idx) | DNNL_ARG_SRC_1;
-        const auto &po_md = query_md(const_pd, po_arg);
+        int po_arg1 = DNNL_ARG_ATTR_MULTIPLE_POST_OP(idx) | DNNL_ARG_SRC_1;
+        const auto &po_md1 = query_md(const_pd, po_arg1);
         mem_map.emplace(
-                po_arg, dnn_mem_t(po_md, test_engine, /* prefill = */ true));
+                po_arg1, dnn_mem_t(po_md1, test_engine, /* prefill = */ true));
+
+        if (!query_post_ops_has_binary_alg_kind(
+                    const_po, idx, dnnl_binary_select))
+            continue;
+        int po_arg2 = DNNL_ARG_ATTR_MULTIPLE_POST_OP(idx) | DNNL_ARG_SRC_2;
+        const auto &po_md2 = query_md(const_pd, po_arg2);
+        mem_map.emplace(
+                po_arg2, dnn_mem_t(po_md2, test_engine, /* prefill = */ true));
     }
 
     // Prelu post-op.
