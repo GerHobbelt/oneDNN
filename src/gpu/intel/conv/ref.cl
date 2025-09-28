@@ -125,15 +125,8 @@ __kernel void ref_convolution_fwd(
                     const off_t src_off = SRC_OFF(n, g * IC + ic, id, ih, iw);
                     const off_t wei_off = WEI_OFF(g, oc, ic, kd, kh, kw);
 
-                    ACC_DATA_T s;
-                    ACC_DATA_T w;
-#if SRC_DT_F4_E2M1 || SRC_DT_F4_E3M0
-                    load(&s, src, src_off);
-                    load(&w, wei, wei_off);
-#else
-                    load(&s, src + src_off);
-                    load(&w, wei + wei_off);
-#endif
+                    ACC_DATA_T s = load(s, src, src_off);
+                    ACC_DATA_T w = load(w, wei, wei_off);
                     d += s * w;
 
 #if WITH_SRC_ZPOINTS
@@ -218,9 +211,56 @@ KERNEL_ATTR
 __kernel void ref_convolution_bwd_data(__global SRC_DATA_T *diff_src,
         const __global WEI_DATA_T *wei, const __global DST_DATA_T *diff_dst,
         const __global BIA_DATA_T *bias POST_OP_ARGS,
-        const __global float *src_scales, const __global float *wei_scales,
-        const __global float *dst_scales, const __global int *src_zpoints,
-        const __global WEI_ZP_T *wei_zpoints, const __global int *dst_zpoints) {
+#if WITH_HOST_SRC_SCALE
+        float src_scale_value,
+#else
+        const __global float *src_scales,
+#endif
+#if WITH_HOST_WEI_SCALE
+        float wei_scale_value,
+#else
+        const __global float *wei_scales,
+#endif
+#if WITH_HOST_DST_SCALE
+        float dst_scale_value,
+#else
+        const __global float *dst_scales,
+#endif
+#if WITH_HOST_SRC_ZP
+        int src_zp_value,
+#else
+        const __global int *src_zpoints,
+#endif
+#if WITH_HOST_WEI_ZP
+        WEI_ZP_T wei_zp_value,
+#else
+        const __global WEI_ZP_T *wei_zpoints,
+#endif
+#if WITH_HOST_DST_ZP
+        int dst_zp_value
+#else
+        const __global int *dst_zpoints
+#endif
+) {
+#if WITH_HOST_SRC_SCALE
+    SRC_SCALES_DATA_T *src_scales = &src_scale_value;
+#endif
+#if WITH_HOST_WEI_SCALE
+    WEI_SCALES_DATA_T *wei_scales = &wei_scale_value;
+#endif
+#if WITH_HOST_DST_SCALE
+    DST_SCALES_DATA_T *dst_scales = &dst_scale_value;
+#endif
+#if WITH_HOST_SRC_ZP
+    int *src_zpoints = &src_zp_value;
+#endif
+#if WITH_HOST_DST_ZP
+    int *dst_zpoints = &dst_zp_value;
+#endif
+#if WITH_HOST_WEI_ZP
+    WEI_ZP_T *wei_zpoints = &wei_zp_value;
+#endif
+
     const off_t n = GWS_GET_MB();
     const off_t ic = GWS_GET_IC();
     const off_t g = GWS_GET_G();
@@ -246,15 +286,8 @@ __kernel void ref_convolution_bwd_data(__global SRC_DATA_T *diff_src,
         if (oh < OH && ow < OW && od < OD) {
             const off_t dst_off = DST_OFF(n, g * OC + oc, od, oh, ow);
             const off_t wei_off = WEI_OFF(g, oc, ic, kd, kh, kw);
-            ACC_DATA_T diff_d;
-            ACC_DATA_T w;
-#if DST_DT_F4_E2M1 || DST_DT_F4_E3M0
-            load(&diff_d, diff_dst, dst_off);
-            load(&w, wei, wei_off);
-#else
-            load(&diff_d, diff_dst + dst_off);
-            load(&w, wei + wei_off);
-#endif
+            ACC_DATA_T diff_d = load(diff_d, diff_dst, dst_off);
+            ACC_DATA_T w = load(w, wei, wei_off);
             d += diff_d * w;
 #if WITH_SRC_ZPOINTS
             const int src_zp
@@ -372,15 +405,8 @@ __kernel void ref_convolution_bwd_weights(const __global SRC_DATA_T *src,
                     off_t dst_off = DST_OFF(n, g * OC + oc, od, oh, ow);
                     off_t src_off = SRC_OFF(n, g * IC + ic, id, ih, iw);
 
-                    ACC_DATA_T diff_d;
-                    ACC_DATA_T s;
-#if DST_DT_F4_E2M1 || DST_DT_F4_E3M0
-                    load(&diff_d, diff_dst, dst_off);
-                    load(&s, src, src_off);
-#else
-                    load(&diff_d, diff_dst + dst_off);
-                    load(&s, src + src_off);
-#endif
+                    ACC_DATA_T diff_d = load(diff_d, diff_dst, dst_off);
+                    ACC_DATA_T s = load(s, src, src_off);
                     dw += diff_d * s;
                 }
     write(diff_wei + WEI_OFF(g, oc, ic, kd, kh, kw), dw);

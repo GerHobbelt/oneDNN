@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2022-2025 Intel Corporation
+* Copyright 2025 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -14,21 +14,9 @@
 * limitations under the License.
 *******************************************************************************/
 
-#ifndef GPU_INTEL_GEMM_OCL_ATTRS_H
-#define GPU_INTEL_GEMM_OCL_ATTRS_H
+#ifndef GPU_INTEL_JIT_IR_INCLUDE_IR_HPP
+#define GPU_INTEL_JIT_IR_INCLUDE_IR_HPP
 
-#define ATTR_ALPHA 1.0f
+#include "gpu/intel/jit/ir/include/type.hpp"
 
-#if WITH_SRC_ZPOINTS
-#define ATTR_A0 ao[0]
-#else
-#define ATTR_A0 0
 #endif
-
-#if WITH_WEI_ZPOINTS
-#define ATTR_B0 bo[0]
-#else
-#define ATTR_B0 0
-#endif
-
-#endif // GPU_INTEL_GEMM_OCL_ATTRS_H
