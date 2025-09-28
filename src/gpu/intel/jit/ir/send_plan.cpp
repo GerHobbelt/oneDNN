@@ -392,8 +392,8 @@ modulus_t operator%(modulus_t a, int64_t b) {
 class tdim_info_t {
 public:
     tdim_info_t() = default;
-    tdim_info_t(
-            int tidx, const tdim_t &tdim, const view_t &view, int64_t block = 1)
+    tdim_info_t(size_t tidx, const tdim_t &tdim, const view_t &view,
+            int64_t block = 1)
         : tidx_(tidx)
         , size_(view.tlayout().elems(tidx))
         , base_mod_(to_base(tdim, view.vvars()))
@@ -405,11 +405,11 @@ public:
         }
     }
 
-    int tidx() const { return tidx_; }
+    size_t tidx() const { return tidx_; }
 
     int64_t size() const { return size_; }
 
-    int vidx(int i) const { return vidxs_[i]; }
+    size_t vidx(int i) const { return vidxs_[i]; }
 
     dim_t vstride(int i) const { return vstrides_[i]; }
 
@@ -432,11 +432,11 @@ public:
         return mask && !mask.is_equal(expr_t(true));
     }
 
-    bool has_vidx(int vidx) const {
+    bool has_vidx(size_t vidx) const {
         return utils::one_of(vidx, vidxs_[0], vidxs_[1]);
     }
 
-    int64_t vstride_by_vidx(int vidx) const {
+    int64_t vstride_by_vidx(size_t vidx) const {
         for (int i = 0; i < 2; i++) {
             if (vidxs_[i] == vidx) return vstrides_[i];
         }
@@ -448,7 +448,7 @@ public:
     T offset(const std::vector<T> &voff, const T &base = T()) const {
         T ret = base;
         for (int i = 0; i < 2; i++) {
-            if (vidxs_[i] == -1) continue;
+            if (vidxs_[i] == dim_idx::invalid) continue;
             ret += voff[vidxs_[i]] * vstrides_[i];
         }
         if (block_ != 1) ret /= block_;
@@ -493,10 +493,10 @@ private:
         return to_base(tdim, vvars, tdim.expr());
     }
 
-    int tidx_ = -1;
+    size_t tidx_ = dim_idx::invalid;
     int64_t size_ = 0;
     modulus_t base_mod_;
-    int vidxs_[2] = {-1, -1};
+    size_t vidxs_[2] = {dim_idx::invalid, dim_idx::invalid};
     int64_t vstrides_[2] = {0, 0};
     int64_t block_ = 1;
     const tdim_t *dim_ = nullptr;
@@ -526,14 +526,14 @@ public:
 
     const tdim_info_t &tdim() const { return tdim_; }
 
-    int tidx() const { return tdim_.tidx(); }
+    size_t tidx() const { return tdim_.tidx(); }
 
     bool is_bound() const { return is_bound_; }
 
     void set_base(const expr_t &base) {
         base_ = base;
         dim_t factor = 1;
-        if (tdim_.vidx(1) == -1) {
+        if (tdim_.vidx(1) == dim_idx::invalid) {
             factor = get_max_const_factor(base_, constraint_set_t());
             factor = math::gcd(factor, a_ * tdim_.block());
             factor = math::gcd(factor, b_ * tdim_.block());
@@ -610,13 +610,13 @@ private:
     bool is_bound_ = false;
 };
 
-bool has_vidx_mask(const std::vector<mask_desc_t> &mask_descs, int idx,
+bool has_vidx_mask(const std::vector<mask_desc_t> &mask_descs, size_t idx,
         dim_t dim, dim_t block, dim_t &factor) {
     factor = 1;
     for (auto &md : mask_descs) {
         auto &tdim = md.tdim();
         if (!tdim.has_vidx(idx)) continue;
-        if (tdim.vidx(1) != -1) return true;
+        if (tdim.vidx(1) != dim_idx::invalid) return true;
         if (dim >= tdim.block()) {
             gpu_assert(dim % tdim.block() == 0);
             return true;
@@ -783,7 +783,8 @@ struct send_2d_params_t {
         return h_send_idx * h;
     }
 
-    layout_t reg_layout(int grf_size, int ndims, const type_t &mem_type) const {
+    layout_t reg_layout(
+            int grf_size, size_t ndims, const type_t &mem_type) const {
         layout_t l(type, std::vector<dim_t>(ndims, 1));
         dim_t cur_stride = 1;
         enum class pad_kind_t {
@@ -791,9 +792,9 @@ struct send_2d_params_t {
             dim_pow2,
             stride_grf,
         };
-        auto add_block = [&](int dim_idx, dim_t block,
+        auto add_block = [&](size_t dim_idx, dim_t block,
                                  pad_kind_t pad = pad_kind_t::none) {
-            l = l.add_outer_block(dim_idx, block, cur_stride);
+            l = l.with_block({dim_idx, block, cur_stride});
             dim_t stride = cur_stride * block;
             switch (pad) {
                 case pad_kind_t::dim_pow2:
@@ -807,6 +808,18 @@ struct send_2d_params_t {
             }
             cur_stride = stride;
         };
+
+        auto add_padded_block = [&](size_t dim_idx, dim_t block, dim_t pad) {
+            int type_size = l.type().size();
+            gpu_assert(pad % type_size == 0);
+            if (l.blocks().empty())
+                return l.with_block({dim_idx, block, pad / type_size});
+            auto &last = l.blocks().back();
+            auto stride = utils::rnd_up(
+                    (dim_t)last.stride * last.block, (dim_t)(pad / type_size));
+            return l.with_block({dim_idx, block, stride});
+        };
+
         if (transpose) {
             add_block(h_vidx, h, pad_kind_t::dim_pow2);
             add_block(w_vidx, w, pad_kind_t::stride_grf);
@@ -821,8 +834,8 @@ struct send_2d_params_t {
             add_block(h_vidx, h, pad_kind_t::stride_grf);
         }
         add_block(vnni_factor > 1 ? h_vidx : w_vidx, c);
-        l = l.add_outer_block_and_pad(w_vidx, w_rcount, grf_size);
-        l = l.add_outer_block_and_pad(h_vidx, h_rcount, grf_size);
+        l = add_padded_block(w_vidx, w_rcount, grf_size);
+        l = add_padded_block(h_vidx, h_rcount, grf_size);
         if (type != mem_type) l = reinterpret(l, mem_type);
         return l;
     }
@@ -855,10 +868,10 @@ struct send_2d_params_t {
     int c = 0; // Batch count.
     int w_rcount = 0;
     int h_rcount = 0;
-    int w_vidx = -1;
-    int h_vidx = -1;
-    int w_tidx = -1;
-    int h_tidx = -1;
+    size_t w_vidx = dim_idx::invalid;
+    size_t h_vidx = dim_idx::invalid;
+    size_t w_tidx = dim_idx::invalid;
+    size_t h_tidx = dim_idx::invalid;
     int h_vstride = 0;
 };
 
@@ -913,13 +926,11 @@ class split_bounds_t {
 public:
     split_bounds_t(const layout_t &layout, int factor) {
         gpu_assert(is_zero(layout.offset())) << layout;
-        auto tile_coord = layout.split_exact(factor);
+        auto tile_coord = split_exact(layout, factor);
         if (tile_coord.is_invalid()) return;
 
-        layout.for_each_tile(tile_coord.tile, [&](const icoord_t &start) {
-            int off = offset_bytes<int>(layout, start);
-            offs_.push_back(off);
-        });
+        for (auto &start : layout.iter(tile_coord.tile))
+            offs_.push_back(offset_bytes<int>(layout, start));
     }
 
     int factor() const { return (int)offs_.size(); }
@@ -975,7 +986,7 @@ struct send_group_t {
     }
 
     bool has_mask(const mask_desc_t &md) const { return has_mask(md.tidx()); }
-    bool has_mask(int tidx) const { return (mask_bits & (1 << tidx)) != 0; }
+    bool has_mask(size_t tidx) const { return (mask_bits & (1 << tidx)) != 0; }
 
     int nmasks() const {
         int ret = 0;
@@ -1194,10 +1205,10 @@ public:
     template <typename T>
     static modulus_t get_modulus(
             const layout_t &layout, const std::vector<T> &off, const T &base) {
-        int ndims = layout.ndims();
-        gpu_assert((int)off.size() == ndims);
+        auto ndims = layout.ndims();
+        gpu_assert(off.size() == ndims);
         std::vector<modulus_t> mods(layout.ndims());
-        for (int i = 0; i < ndims; i++)
+        for (size_t i = 0; i < ndims; i++)
             mods[i] = off[i];
         modulus_t ret = base;
         std::vector<bool> ok(layout.ndims(), true);
@@ -1242,7 +1253,7 @@ send_kind_t get_send_kind(const stmt_t &s) {
 struct layout_2d_wrapper_t {
     layout_2d_wrapper_t(const layout_t &l) : l(l) {}
 
-    int nblocks(dim_idx_t idx = -1) const {
+    int nblocks(size_t idx = dim_idx::invalid) const {
         int ret = 0;
         for (auto &b : l.blocks()) {
             if (b.block == 1) continue;
@@ -1262,8 +1273,8 @@ struct layout_2d_wrapper_t {
     int64_t h_stride() const { return h_block().stride; }
     dim_t w_dim() const { return w_block().block; }
     dim_t h_dim() const { return h_block().block; }
-    dim_idx_t w_idx() const { return w_block().dim.index(); }
-    dim_idx_t h_idx() const { return h_block().dim.index(); }
+    size_t w_idx() const { return w_block().dim.index(); }
+    size_t h_idx() const { return h_block().dim.index(); }
 
     const layout_t &l;
 };
@@ -1286,7 +1297,7 @@ public:
     const view_t &view() const { return view_; }
     const send_params_t &send_params() const { return send_params_; }
     const layout_t &vlayout() const { return vlayout_; }
-    const tdim_info_t &tdim(int tidx) const { return tdims_[tidx]; }
+    const tdim_info_t &tdim(size_t tidx) const { return tdims_[tidx]; }
     size_t inner_idx() const { return inner_idx_; }
     size_t outer_idx() const { return outer_idx_; }
     int reg_bytes_per_elem() const { return reg_bytes_per_elem_; }
@@ -1313,7 +1324,7 @@ public:
         return ret;
     }
 
-    const tdim_info_t &vidx_to_tdim(int vidx) const {
+    const tdim_info_t &vidx_to_tdim(size_t vidx) const {
         for (dim_idx_t i = 0; i < view_.ntdims(); i++) {
             auto &tdim = tdims_[i];
             if (utils::one_of(vidx, tdim.vidx(0), tdim.vidx(1))) return tdim;
@@ -1679,8 +1690,8 @@ public:
 
         auto w_vidx = lw.w_idx();
         auto h_vidx = lw.h_idx();
-        dim_idx_t w_tidx = w_tdim.tidx();
-        dim_idx_t h_tidx = h_tdim.tidx();
+        size_t w_tidx = w_tdim.tidx();
+        size_t h_tidx = h_tdim.tidx();
         bool use_xy = true;
 
         int w_tcount = 0;
@@ -2763,7 +2774,7 @@ send_plan_t create_send_plan(const exec_config_t &exec_cfg, const view_t &view,
             stride, base_group.pad_bytes * type.packing() / type.size());
     for (size_t i = outer_idx; i < blocks.size(); i++) {
         auto &b = blocks[i];
-        reg_layout = reg_layout.add_outer_block(b.dim, b.block, stride);
+        reg_layout = reg_layout.with_block({b.dim, b.block, stride});
         stride *= b.block;
     }
 

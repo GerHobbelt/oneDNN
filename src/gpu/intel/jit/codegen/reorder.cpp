@@ -469,9 +469,7 @@ int reorder_2d_impl_t::vertex_t::cost(
         if (i > min_log_bytes) {
             gpu_assert(!layout.blocks().empty());
             gpu_assert(!v.layout.blocks().empty());
-            int dim_idx0 = layout[0].dim;
-            int dim_idx1 = v.layout[0].dim;
-            if (dim_idx0 != dim_idx1) continue;
+            if (layout[0].dim != v.layout[0].dim) continue;
         }
         min_cost = cur_cost;
         type = type_t::u(8 << i);
@@ -656,9 +654,7 @@ layout_t reorder_impl_t::make_compact_layout(
     auto dense = [&](dim_t stride) -> layout_t {
         if (!layout.nblocks()) return layout;
         auto blocks = layout.blocks();
-        stride_t inner_stride = stride_t::max();
-        for (auto &b : blocks)
-            if (b.stride < inner_stride) inner_stride = b.stride;
+        stride_t inner_stride = layout[0].stride;
         for (auto &b : blocks)
             b.stride = b.stride * stride / inner_stride;
         return {type, blocks, 0, layout.ndims(), /*do_normalize=*/false};
@@ -701,7 +697,7 @@ void reorder_impl_t::emit_1d(copy_plan_t &plan, const reorder_operand_t &dst,
     ngen::InstructionModifier mod;
     if (needs_saturate(dst.type(), src.type())) mod |= sat;
 
-    dst.layout.for_each_tile(tile, [&](const icoord_t &start) {
+    for (auto &start : dst.layout.iter(tile)) {
         // Tile operands
         auto tile_src = src.buffer, tile_dst = dst.buffer;
         tile_src.stride = (uint8_t)src_stride;
@@ -709,7 +705,7 @@ void reorder_impl_t::emit_1d(copy_plan_t &plan, const reorder_operand_t &dst,
         tile_src.advance(hw_, src.layout.offset<int>(start));
         tile_dst.advance(hw_, dst.layout.offset<int>(start));
         plan.mov(tile_elems, mod, tile_dst, tile_src);
-    });
+    };
     ++plan.phase;
 }
 
@@ -818,7 +814,7 @@ tile_t reorder_impl_t::find_max_tile_with_fixed_stride(const layout_t &src,
     // 1. Split layouts to have aligned blocks.
     auto a = src;
     auto b = dst;
-    layout_t::align_layouts(a, b);
+    align_layouts(a, b);
 
     // 2. Find the max innermost tile.
     auto a_blocks = a.blocks();

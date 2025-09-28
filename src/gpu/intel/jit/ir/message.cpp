@@ -509,8 +509,8 @@ void access_builder_t::build() {
     gpu_assert(ok) << "Can't generate send decomposition.";
 }
 
-static bool stride_dimension_ok(const view_t &view, int stride_tidx,
-        dim_idx_t stride_vidx, const coord_t &vstart) {
+static bool stride_dimension_ok(const view_t &view, size_t stride_tidx,
+        size_t stride_vidx, const coord_t &vstart) {
     auto &tdim = view.tdim(stride_tidx);
     auto e = tdim.expr();
     for (dim_idx_t i = 0; i < tdim.nvargs(); i++) {
@@ -582,8 +582,8 @@ bool access_builder_t::try_build_2d(send_params_t &send_params) {
     if (b0.stride != stride_t(1)) return false;
     if (!b1.stride.is_fixed()) return false;
 
-    auto get_tdim_idx = [&](dim_idx_t vdim_idx, int &stride) {
-        dim_idx_t ret = dim_idx::invalid;
+    auto get_tdim_idx = [&](size_t vdim_idx, int &stride) {
+        size_t ret = dim_idx::invalid;
         for (dim_idx_t i = 0; i < mem_view_.ntdims(); i++) {
             auto &tdim = mem_view_.tdim(i);
             for (dim_idx_t j = 0; j < tdim.nvargs(); j++) {
@@ -599,13 +599,13 @@ bool access_builder_t::try_build_2d(send_params_t &send_params) {
 
     int w_tstride = 0;
     int h_tstride = 0;
-    dim_idx_t w_dim_idx = get_tdim_idx(b0.dim, w_tstride);
-    dim_idx_t h_dim_idx = get_tdim_idx(b1.dim, h_tstride);
+    size_t w_dim_idx = get_tdim_idx(b0.dim, w_tstride);
+    size_t h_dim_idx = get_tdim_idx(b1.dim, h_tstride);
 
     if (w_tstride != 1) return false;
 
     auto &tlayout = mem_view_.tlayout();
-    auto get_2d_dim = [&](dim_idx_t tidx) {
+    auto get_2d_dim = [&](size_t tidx) {
         return inner_block(tlayout, tidx, /*skip_outer=*/false);
     };
 
@@ -665,34 +665,34 @@ bool access_builder_t::try_build_2d(send_params_t &send_params) {
             std::vector<dim_t>(vlayout.ndims(), 1));
     int h_inner = vnni ? 4 / send_type.size() : 1;
     int h_outer = ir_utils::safe_divide(height, h_inner);
-    reg_layout_ = reg_layout_.add_outer_block(b1.dim, h_inner);
+    reg_layout_ = reg_layout_.with_block({b1.dim, h_inner});
     if (transpose) {
-        reg_layout_ = reg_layout_.add_outer_block(b1.dim, h_outer);
-        reg_layout_ = reg_layout_.add_outer_block(b0.dim, width);
+        reg_layout_ = reg_layout_.with_block({b1.dim, h_outer});
+        reg_layout_ = reg_layout_.with_block({b0.dim, width});
     } else {
-        reg_layout_ = reg_layout_.add_outer_block(b0.dim, width);
-        reg_layout_ = reg_layout_.add_outer_block(b1.dim, h_outer);
+        reg_layout_ = reg_layout_.with_block({b0.dim, width});
+        reg_layout_ = reg_layout_.with_block({b1.dim, h_outer});
     }
-    reg_layout_ = reg_layout_.add_outer_block(b0.dim, count);
+    reg_layout_ = reg_layout_.with_block({b0.dim, count});
 
     int w_outermost
             = ir_utils::safe_divide(vlayout.elems(b0.dim), count * width);
     int h_outermost = ir_utils::safe_divide(vlayout.elems(b1.dim), height);
-    reg_layout_ = reg_layout_.add_outer_block(b0.dim, w_outermost);
-    reg_layout_ = reg_layout_.add_outer_block(b1.dim, h_outermost);
+    reg_layout_ = reg_layout_.with_block({b0.dim, w_outermost});
+    reg_layout_ = reg_layout_.with_block({b1.dim, h_outermost});
 
     if (type_factor != 1) {
         auto blocks = reg_layout_.blocks();
         reg_layout_
                 = layout_t(mem_type_, std::vector<dim_t>(vlayout.ndims(), 1));
-        reg_layout_ = reg_layout_.add_outer_block(b0.dim, type_factor);
+        reg_layout_ = reg_layout_.with_block({b0.dim, type_factor});
         for (auto &b : blocks)
-            reg_layout_ = reg_layout_.add_outer_block(b.dim, b.block);
+            reg_layout_ = reg_layout_.with_block({b.dim, b.block});
     }
 
     for (auto &b : blocks) {
         if (utils::one_of(b.dim, b0.dim, b1.dim)) continue;
-        reg_layout_ = reg_layout_.add_outer_block(b.dim, b.block);
+        reg_layout_ = reg_layout_.with_block({b.dim, b.block});
     }
 
     reg_layout_walker_
@@ -711,11 +711,8 @@ bool access_builder_t::try_build_2d(send_params_t &send_params) {
     auto &send = _send.as<send_t>();
 
     stmt_ = stmt_t();
-    bool ok = true;
     auto vstart0 = mem_view_.vstart();
-    vlayout.for_each_tile(tile, [&](const icoord_t &start) {
-        if (!ok) return;
-
+    for (auto &start : vlayout.iter(tile)) {
         int access_size = send.access_size();
         int access_elems = access_size / mem_type_.size();
 
@@ -723,19 +720,16 @@ bool access_builder_t::try_build_2d(send_params_t &send_params) {
         expr_t mask;
         if (!check_2d_mask(tile, start, use_virtual_surface, w_dim_idx,
                     h_dim_idx, mask)) {
-            ok = false;
-            return;
+            return false;
         }
 
         if (!send.is_prefetch_2d()) {
             if (!reg_layout_walker_->can_advance(1, access_elems)) {
-                ok = false;
-                return;
+                return false;
             }
 
             if (!reg_layout_walker_->can_access(send.payload_size())) {
-                ok = false;
-                return;
+                return false;
             }
         }
 
@@ -766,8 +760,7 @@ bool access_builder_t::try_build_2d(send_params_t &send_params) {
                     if (send.is_prefetch_2d()) {
                         skip_send = true;
                     } else {
-                        ok = false;
-                        return;
+                        break;
                     }
                 }
                 y /= h_tstride;
@@ -780,15 +773,13 @@ bool access_builder_t::try_build_2d(send_params_t &send_params) {
         // Check alignment requirements.
         int64_t align = get_max_const_factor(off, ir_ctx_->cset());
         if (align % block_2d_base_alignment(ir_ctx_->hw()) != 0) {
-            ok = false;
-            return;
+            return false;
         }
 
         if (!skip_send) {
             if (!ir_ctx_->cset().can_prove(
                         x % block_2d_x_alignment(send_type.size()) == 0)) {
-                ok = false;
-                return;
+                break;
             }
             auto reg_buf = (send.is_prefetch_2d()
                             ? expr_t()
@@ -798,9 +789,9 @@ bool access_builder_t::try_build_2d(send_params_t &send_params) {
         }
 
         reg_layout_walker_->advance(send.access_size() / mem_type_.size());
-    });
+    }
 
-    return ok;
+    return true;
 }
 
 bool access_builder_t::fixup_send_2d_params(const type_t &send_type, bool vnni,
@@ -851,7 +842,7 @@ bool access_builder_t::fixup_send_2d_params(const type_t &send_type, bool vnni,
 }
 
 bool access_builder_t::check_2d_mask(const tile_t &tile, const coord_t &coord,
-        bool use_virtual_surface, dim_idx_t w_dim_idx, dim_idx_t h_dim_idx,
+        bool use_virtual_surface, size_t w_dim_idx, size_t h_dim_idx,
         expr_t &mask) const {
     auto sub_view = mem_view_.create_sub_view(tile, coord);
     auto mask_tensor = sub_view.create_mask_tensor(ir_ctx_->cset());

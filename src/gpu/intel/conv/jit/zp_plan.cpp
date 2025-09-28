@@ -73,7 +73,7 @@ inline std::ostream &operator<<(std::ostream &out, zp_comp_kind_t kind) {
 }
 
 static bool ends_with(
-        const layout_t &layout, dim_idx_t i0, int b0, bool strict = false) {
+        const layout_t &layout, size_t i0, int b0, bool strict = false) {
     if (layout.nblocks() < 1) return false;
     auto &blocks = layout.blocks();
     if (blocks[0].dim.index() != i0) return false;
@@ -83,7 +83,7 @@ static bool ends_with(
 }
 
 static bool ends_with(
-        const layout_t &layout, dim_idx_t i1, int b1, int i0, int b0) {
+        const layout_t &layout, size_t i1, int b1, size_t i0, int b0) {
     if (!ends_with(layout, i0, b0, /*strict=*/true)) return false;
     if (layout.nblocks() < 2) return false;
     auto &blocks = layout.blocks();
@@ -197,7 +197,7 @@ private:
     public:
         split_t() = default;
         split_t(const layout_t &c, const bmnk_mapper_t &mapper, abc_kind_t abc,
-                int factor, dim_idx_t simd_dim_idx, int simd) {
+                int factor, size_t simd_dim_idx, int simd) {
             gpu_assert(factor > 1);
             bmnk_kind_t split_mn
                     = (abc == abc_kind_t::a ? bmnk_kind_t::m : bmnk_kind_t::n);
@@ -213,7 +213,7 @@ private:
             if (dim % factor != 0) return;
             dim_t subtile_dim = dim / factor;
             dim_t cur_dim = 1;
-            dim_idx_t cur_idx = dim_idx::invalid;
+            size_t cur_idx = dim_idx::invalid;
             for (auto &b : mn_blocks) {
                 if (cur_idx == dim_idx::invalid) {
                     cur_idx = b.dim;
@@ -255,7 +255,7 @@ private:
     private:
         abc_kind_t abc_ = abc_kind_t::undef;
         int factor_ = 0;
-        dim_idx_t dim_idx_ = dim_idx::invalid;
+        size_t dim_idx_ = dim_idx::invalid;
         dim_t subtile_dim_ = -1;
     };
 
@@ -324,7 +324,7 @@ public:
         kw_var = simd_bcast(kw_var);
 
         bool small_ic = is_small(data_type_, ic);
-        dim_idx_t kw_idx = 5; // TODO: support non-forward kw!
+        size_t kw_idx = 5; // TODO: support non-forward kw!
 
         tile_t tile;
         for (auto &b : b_layout_.blocks()) {
@@ -334,14 +334,14 @@ public:
         gpu_assert(tile.elems() % sdepth_size == 0);
         wei_load = simd_bcast(load_t::make(
                 dpas_type(data_type_), (size > 1) ? dpas_buf : wei_buf, 0));
-        b_layout_.for_each_tile(tile, [&](const icoord_t &start) {
+        for (auto &start : b_layout_.iter(tile)) {
             auto off = offset_bytes<int>(b_layout_, start);
             auto mask = (small_ic) ? kw_var < simd_bcast(kw - start.get(kw_idx))
                                    : expr_t();
             for (int i = 0; i < tile.elems(); i += sdepth_size)
                 stmt = stmt.append(store_t::make(dpas_buf, off + i, wei_load,
                         store_t::default_stride, mask, true));
-        });
+        }
         return stmt;
     }
 
@@ -389,7 +389,7 @@ public:
     const layout_t &src_layout() const { return src_layout_; }
     const layout_t &comp_layout() const { return comp_layout_; }
 
-    int ndims() const { return comp_layout_.ndims(); }
+    size_t ndims() const { return comp_layout_.ndims(); }
 
     int fill_reg_buf_size() const {
         return into<int>(size_bytes(src_layout_, grf_size()));
@@ -413,7 +413,7 @@ public:
         if (b_wei.block % factor != 0) return false;
         if (b_wei.block != b_comp.block) return false;
         if (b_wei.dim != b_comp.dim) return false;
-        int dim_idx = b_comp.dim.index();
+        size_t dim_idx = b_comp.dim.index();
         dim_t subtile_dim = comp_layout_.elems(dim_idx);
         if (dim_idx == simd_dim_idx_ && subtile_dim < simd_) return false;
 
@@ -491,8 +491,8 @@ public:
         auto load_wei = simd_bcast(load_t::make(
                 type_t::s16(), (src_buf.is_empty()) ? comp_buf : src_buf, 0));
 
-        comp_layout_.for_each_tile(get_simd_tile(), [&](const icoord_t &start) {
-            if (!in_subtile(start, subtile_idx)) return;
+        for (auto &start : comp_layout_.iter(get_simd_tile())) {
+            if (!in_subtile(start, subtile_idx)) continue;
             auto comp = comp_buf[get_comp_off(start)];
             for (int ck = 0; ck < wei_layout_.elems(ck_idx_); ck += ck_blk) {
                 auto zp = zp_buf[get_zp_off(start, ck)];
@@ -508,7 +508,7 @@ public:
                     : simd_bcast(expr_t(bool(false)));
             comp_buf_fill = comp_buf_fill.append(store_t::make(comp, 0,
                     load_mul * load_wei, store_t::default_stride, mask, true));
-        });
+        }
         auto zp_1x4 = buf_mgr.get("zp_1x4");
         if (zp_1x4) {
             if (zp_layout_.type().is_s8()) {
@@ -574,7 +574,7 @@ private:
 
     bool is_zp_common() const { return zp_layout_.elems() == 1; }
 
-    bool is_wei_Xn4k_x8_zp_common(int &vec_dim_idx, int &simd) const {
+    bool is_wei_Xn4k_x8_zp_common(size_t &vec_dim_idx, int &simd) const {
         if (!wei_layout_.type().is_x8()) return false;
         if (!is_zp_common()) return false;
         for (int cn_blk : {16, 8}) {
@@ -587,7 +587,7 @@ private:
         return false;
     }
 
-    bool is_wei_Xn4k_x8_zp_per_k(int &vec_dim_idx, int &simd) const {
+    bool is_wei_Xn4k_x8_zp_per_k(size_t &vec_dim_idx, int &simd) const {
         if (!wei_layout_.type().is_x8()) return false;
         if (is_zp_common()) return false;
         for (int cn_blk : {16, 8}) {
@@ -600,7 +600,7 @@ private:
         return false;
     }
 
-    bool is_wei_Xy_s16(int y_idx, int &vec_dim_idx, int &simd) const {
+    bool is_wei_Xy_s16(size_t y_idx, size_t &vec_dim_idx, int &simd) const {
         for (int y_blk : {32, 16, 8}) {
             if (y_blk > 16 && hw < ngen::HW::XeHPC) continue;
             if (ends_with(wei_layout_, y_idx, y_blk)) {
@@ -612,11 +612,11 @@ private:
         return false;
     }
 
-    bool is_wei_Xb_s16(int &vec_dim_idx, int &simd) const {
+    bool is_wei_Xb_s16(size_t &vec_dim_idx, int &simd) const {
         return is_wei_Xy_s16(g_idx_, vec_dim_idx, simd);
     }
 
-    bool is_wei_Xn_s16(int &vec_dim_idx, int &simd) const {
+    bool is_wei_Xn_s16(size_t &vec_dim_idx, int &simd) const {
         return is_wei_Xy_s16(cn_idx_, vec_dim_idx, simd);
     }
 
@@ -765,9 +765,9 @@ private:
         return ret;
     }
 
-    dim_idx_t g_idx_ = -1;
-    dim_idx_t cn_idx_ = -1;
-    dim_idx_t ck_idx_ = -1;
+    size_t g_idx_ = dim_idx::invalid;
+    size_t cn_idx_ = dim_idx::invalid;
+    size_t ck_idx_ = dim_idx::invalid;
 
     layout_t zp_layout_;
     layout_t src_layout_;
@@ -775,7 +775,7 @@ private:
     layout_t comp_layout_;
 
     zp_comp_kind_t kind_ = zp_comp_kind_t::undef;
-    int simd_dim_idx_ = -1; // comp layout index.
+    size_t simd_dim_idx_ = dim_idx::invalid; // comp layout index.
     int simd_ = -1;
 
     int split_factor_ = 1;
@@ -783,7 +783,7 @@ private:
 
 struct texpr_t {
     texpr_t() {
-        std::fill(vidxs, vidxs + max_nvargs, -1);
+        std::fill(vidxs, vidxs + max_nvargs, dim_idx::invalid);
         std::fill(vstrides, vstrides + max_nvargs, 0);
     }
 
@@ -796,9 +796,9 @@ struct texpr_t {
     }
 
     expr_t to_expr(const coord_t &vstart, const icoord_t &vstart_inc,
-            const std::vector<expr_t> &vvars, int simd_vidx) const {
-        int ndims = (int)vstart.size();
-        gpu_assert((int)vvars.size() == ndims);
+            const std::vector<expr_t> &vvars, size_t simd_vidx) const {
+        size_t ndims = vstart.size();
+        gpu_assert(vvars.size() == ndims);
         bool non_linear[max_nvdims] = {false};
         if (has_non_linear) {
             auto vars = find_objects<var_t>(base);
@@ -822,7 +822,7 @@ struct texpr_t {
             if (s_inc != 0) ret += s_inc * vstrides[i];
         }
         if (has_non_linear) {
-            for (int i = 0; i < ndims; i++) {
+            for (size_t i = 0; i < ndims; i++) {
                 if (!non_linear[i]) continue;
                 ret = substitute(ret, vvars[i], vstart[i] + vstart_inc.get(i));
             }
@@ -839,7 +839,7 @@ struct texpr_t {
         return to_cpp<int64_t>(base);
     }
 
-    bool has_vidx(int vidx, const std::vector<expr_t> &vvars) const {
+    bool has_vidx(size_t vidx, const std::vector<expr_t> &vvars) const {
         for (int i = 0; i < nvargs(); i++)
             if (vidxs[i] == vidx) return true;
         if (has_non_linear) {
@@ -851,7 +851,7 @@ struct texpr_t {
         return false;
     }
 
-    dim_t vstride(int vidx) const {
+    dim_t vstride(size_t vidx) const {
         for (int i = 0; i < nvargs(); i++)
             if (vidxs[i] == vidx) { return vstrides[i]; }
         gpu_error_not_expected() << "Dimension not found: " << vidx;
@@ -904,7 +904,7 @@ struct texpr_t {
 
     int nvargs() const {
         for (int i = max_nvargs - 1; i >= 0; i--) {
-            if (vidxs[i] != -1) return i + 1;
+            if (vidxs[i] != dim_idx::invalid) return i + 1;
         }
         return 0;
     }
@@ -936,8 +936,8 @@ struct texpr_t {
         return ret;
     }
 
-    static texpr_t create_from_vidx(int vidx) {
-        gpu_assert(vidx != -1);
+    static texpr_t create_from_vidx(size_t vidx) {
+        gpu_assert(vidx != dim_idx::invalid);
         texpr_t ret;
         ret.base = expr_t(0);
         ret.vidxs[0] = vidx;
@@ -949,7 +949,7 @@ struct texpr_t {
     static const int max_nvdims = 16;
 
     expr_t base;
-    int vidxs[max_nvargs];
+    size_t vidxs[max_nvargs];
     int64_t vstrides[max_nvargs];
     bool has_non_linear = false;
 };
@@ -967,7 +967,7 @@ public:
     const texpr_t &rhs() const { return rhs_; }
 
     expr_t normalize(const std::vector<expr_t> &vvars, const coord_t &vstart,
-            const icoord_t &vstart_inc, int simd, int simd_vidx) const {
+            const icoord_t &vstart_inc, int simd, size_t simd_vidx) const {
         auto e_lhs = lhs_.to_expr(vstart, vstart_inc, vvars, simd_vidx);
         auto e_rhs = rhs_.to_expr(vstart, vstart_inc, vvars, simd_vidx);
         e_lhs = shuffle_t::make_broadcast(e_lhs, simd);
@@ -1095,7 +1095,7 @@ public:
         if (subtile_idx > 0) return stmt_t();
 
         stmt_t stmt;
-        mask_layout_.for_each_tile(get_simd_tile(), [&](const icoord_t &start) {
+        for (auto &start : mask_layout_.iter(get_simd_tile())) {
             auto mask = mask_buf[get_mask_off(start)];
             std::vector<expr_t> e_masks;
             for (auto &m : mask_descs_) {
@@ -1110,7 +1110,7 @@ public:
             auto mask_s32 = -cast(cond, s32_type);
             auto store = store_t::make(mask, 0, cast(mask_s32, s32_type));
             stmt = stmt.append(store);
-        });
+        }
         return stmt;
     }
 
@@ -1126,10 +1126,10 @@ public:
 
 private:
     void init_mask_descs(const config_t &cfg, const view_t &a_view) {
-        for (dim_idx_t i = 0; i < a_view.ntdims(); i++) {
+        for (size_t i = 0; i < a_view.ntdims(); i++) {
             auto &tdim = a_view.tdim(i);
             if (tdim.is_identity()) {
-                dim_idx_t vidx = tdim.vidx(0);
+                size_t vidx = tdim.vidx(0);
                 auto &vvar = a_view.vvar(vidx);
                 auto &name = vvar.as<var_t>().name;
                 if (utils::one_of(name, "g", "ic", "oc")) continue;
@@ -1149,10 +1149,10 @@ private:
     void init_mask_layout(
             const layout_t &src_layout, const std::vector<expr_t> &vvars) {
         if (mask_descs_.empty()) return;
-        int ndims = src_layout.ndims();
-        gpu_assert((int)vvars.size() == ndims);
+        size_t ndims = src_layout.ndims();
+        gpu_assert(vvars.size() == ndims);
         std::vector<dim_t> dims(ndims, 1);
-        for (int i = 0; i < ndims; i++) {
+        for (size_t i = 0; i < ndims; i++) {
             for (auto &m : mask_descs_)
                 if (m.lhs().has_vidx(i, vvars)) {
                     dims[i] = src_layout.elems(i);
@@ -1160,7 +1160,7 @@ private:
                 }
         }
         mask_layout_ = layout_t(type_t::s32(), std::vector<dim_t>(ndims, 1));
-        for (int i = 0; i < ndims; i++) {
+        for (size_t i = 0; i < ndims; i++) {
             auto &name = vvars[i].as<var_t>().name;
             if (utils::one_of(name, "mb", "ow", "osp", "iw") && dims[i] != 1) {
                 for (int b : {32, 16, 8}) {
@@ -1172,19 +1172,19 @@ private:
                     }
                 }
                 if (simd_ != 1) {
-                    mask_layout_ = mask_layout_.add_outer_block(i, simd_);
-                    dims[i] = utils::div_up((int)dims[i], simd_);
+                    mask_layout_ = mask_layout_.with_block({i, simd_});
+                    dims[i] = utils::div_up(dims[i], dim_t(simd_));
                     break;
                 }
             }
         }
-        for (int i = 0; i < ndims; i++) {
+        for (size_t i = 0; i < ndims; i++) {
             if (dims[i] != 1)
-                mask_layout_ = mask_layout_.add_outer_block(i, dims[i]);
+                mask_layout_ = mask_layout_.with_block({i, dims[i]});
         }
     }
 
-    bool is_linear_mask(int idx) const {
+    bool is_linear_mask(size_t idx) const {
         for (auto &md : mask_descs_) {
             if (md.lhs().has_non_linear && md.lhs().has_vidx(idx, vvars_))
                 return false;
@@ -1218,7 +1218,7 @@ private:
     coord_t vstart_;
     layout_t mask_layout_;
     int simd_ = 1;
-    int simd_dim_idx_ = 0;
+    size_t simd_dim_idx_ = 0;
 };
 
 class zp_comp_apply_plan_t : public base_plan_t {
@@ -1247,14 +1247,14 @@ public:
         const dim_t kw_dim = comp_layout_.elems(comp_kw_idx_);
         std::vector<int> comp_off;
         std::vector<int> mask_off;
-        c_layout_.for_each_tile(sd.get_simd_tile(), [&](const icoord_t &start) {
-            if (!sd.in_subtile(start, subtile_idx)) return;
+        for (auto &start : c_layout_.iter(sd.get_simd_tile())) {
+            if (!sd.in_subtile(start, subtile_idx)) continue;
             for (int kw = 0; kw < kw_dim; kw++) {
                 comp_off.emplace_back(get_comp_off(start, kw, sd));
                 mask_off.emplace_back(
                         (mask_buf.is_empty()) ? -1 : get_mask_off(start, kw));
             }
-        });
+        }
 
         std::vector<std::pair<int, stmt_t>> precomp;
         for (int i = 0; i < int(comp_off.size()) / kw_dim; i++) {
@@ -1306,38 +1306,34 @@ public:
             const bool do_precomp = (subtile_idx == 0)
                     || ((sd.abc() == abc_kind_t::b) && (sd.factor() > 1));
             int p_iter = -1, t_iter = 0;
-            c_layout_.for_each_tile(
-                    sd.get_simd_tile(), [&](const icoord_t &start) {
-                        if (!sd.in_subtile(start, subtile_idx)) return;
-                        if (precomp[p_iter + 1].first == t_iter++) {
-                            p_iter++;
-                            if (do_precomp)
-                                stmt = stmt.append(precomp[p_iter].second);
-                        }
-                        auto off = comp_off[precomp[p_iter].first * kw_dim];
-                        auto csty = comp_type.with_elems(sd.simd());
-                        auto comp_load = load_t::make(csty, comp_buf[off], 0);
-                        auto c = c_buf[get_c_off(start, 0)];
-                        auto c_load = load_t::make(
-                                c_layout_.type().with_elems(sd.simd()), c, 0);
-                        stmt = stmt.append(store_t::make(c, 0,
-                                (mask_buf.is_empty()) ? (c_load - comp_load)
-                                                      : (c_load + comp_load)));
-                    });
+            for (auto &start : c_layout_.iter(sd.get_simd_tile())) {
+                if (!sd.in_subtile(start, subtile_idx)) continue;
+                if (precomp[p_iter + 1].first == t_iter++) {
+                    p_iter++;
+                    if (do_precomp) stmt = stmt.append(precomp[p_iter].second);
+                }
+                auto off = comp_off[precomp[p_iter].first * kw_dim];
+                auto csty = comp_type.with_elems(sd.simd());
+                auto comp_load = load_t::make(csty, comp_buf[off], 0);
+                auto c = c_buf[get_c_off(start, 0)];
+                auto c_load = load_t::make(
+                        c_layout_.type().with_elems(sd.simd()), c, 0);
+                stmt = stmt.append(store_t::make(c, 0,
+                        (mask_buf.is_empty()) ? (c_load - comp_load)
+                                              : (c_load + comp_load)));
+            }
         } else {
-            c_layout_.for_each_tile(
-                    sd.get_simd_tile(), [&](const icoord_t &start) {
-                        if (!sd.in_subtile(start, subtile_idx)) return;
-                        for (int kw = 0; kw < kw_dim; kw++) {
-                            auto comp = comp_buf[get_comp_off(start, kw, sd)];
-                            auto mask = mask_buf.is_empty()
-                                    ? expr_t()
-                                    : mask_buf[get_mask_off(start, kw)];
-                            auto c = c_buf[get_c_off(start, kw)];
-                            stmt = stmt.append(
-                                    create_tile_stmt(comp, mask, c, sd));
-                        }
-                    });
+            for (auto &start : c_layout_.iter(sd.get_simd_tile())) {
+                if (!sd.in_subtile(start, subtile_idx)) continue;
+                for (int kw = 0; kw < kw_dim; kw++) {
+                    auto comp = comp_buf[get_comp_off(start, kw, sd)];
+                    auto mask = mask_buf.is_empty()
+                            ? expr_t()
+                            : mask_buf[get_mask_off(start, kw)];
+                    auto c = c_buf[get_c_off(start, kw)];
+                    stmt = stmt.append(create_tile_stmt(comp, mask, c, sd));
+                }
+            }
         }
         return stmt;
     }
@@ -1391,7 +1387,7 @@ private:
         // c:    ngcdhw or ngc[osp]
         // mask: ngcdhw[kd][kh][kw] or ngc[osp][kd][kh][kw]
         auto start = _start;
-        int mask_kw_idx = mask_layout_.ndims() - 1;
+        size_t mask_kw_idx = mask_layout_.ndims() - 1;
         start[mask_kw_idx] = kw;
         int off = offset_bytes<int>(mask_layout_, start);
         return off;
@@ -1402,7 +1398,7 @@ private:
         return off;
     }
 
-    dim_idx_t comp_kw_idx_ = dim_idx::invalid;
+    size_t comp_kw_idx_ = dim_idx::invalid;
 
     layout_t comp_layout_;
     layout_t mask_layout_;

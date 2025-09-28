@@ -34,7 +34,10 @@ std::vector<layout_block_t> normalize_blocks(
     for (const layout_block_t &block : blocks) {
         if (remove_size_1_blocks && block.block == 1) continue;
 
-        if (!res.empty() && res.back().can_merge(block)) {
+        auto can_merge = [&](const layout_block_t &a, const layout_block_t &b) {
+            return a.dim == b.dim && a.stride * a.block == b.stride;
+        };
+        if (!res.empty() && can_merge(res.back(), block)) {
             res.back().block *= block.block;
         } else {
             res.emplace_back(block);
@@ -42,6 +45,119 @@ std::vector<layout_block_t> normalize_blocks(
     }
 
     return res;
+}
+
+tile_coord_t split(const layout_t &layout, const grid_info_t &grid_info,
+        grid_info_t *out_grid) {
+    tile_coord_t min_tile_coord = tile_coord_t::invalid();
+    std::vector<dim_t> cur_dims(grid_info.ndims(), 1);
+
+    for (int iter = 0; iter < grid_info.elems(); iter++) {
+        for (dim_idx_t i = 0; i < grid_info.ndims(); i++) {
+            if (++cur_dims[i] <= grid_info.dim(i)) break;
+            cur_dims[i] = 1;
+        }
+        auto sub_grid = grid_info.resize(cur_dims);
+        auto tile_coord = split_exact(layout, sub_grid);
+        if (tile_coord.is_invalid()) continue;
+        if (min_tile_coord.is_invalid()
+                || tile_coord.elems() < min_tile_coord.elems()) {
+            min_tile_coord = std::move(tile_coord);
+            if (out_grid) { *out_grid = std::move(sub_grid); }
+        }
+    }
+    return min_tile_coord;
+}
+
+tile_coord_t split_exact(const layout_t &layout, const grid_info_t &grid) {
+    tile_t tile;
+    if (layout.elems() % grid.elems() != 0) return tile_coord_t::invalid();
+
+    dim_t cur_elems_per_tile = 1;
+    dim_t elems_per_tile = layout.elems() / grid.elems();
+    for (auto &b : layout.blocks()) {
+        dim_t block = std::min(b.block, elems_per_tile / cur_elems_per_tile);
+        tile[b.dim] = tile.get(b.dim, 1) * block;
+        cur_elems_per_tile *= block;
+    }
+    if (cur_elems_per_tile != elems_per_tile) return tile_coord_t::invalid();
+
+    return split(layout, tile, grid);
+}
+
+tile_coord_t split_exact(const layout_t &layout, int factor) {
+    if (factor == 1) return tile_coord_t(layout.tile());
+    if (layout.elems() % factor != 0) return tile_coord_t::invalid();
+    dim_t cur_elems = 1;
+    dim_t split_elems = layout.elems() / factor;
+    std::vector<layout_block_t> split_blocks;
+    for (auto &b : layout.blocks()) {
+        if (cur_elems * b.block > split_elems) {
+            if (split_elems % cur_elems != 0) return tile_coord_t::invalid();
+            auto bb = b;
+            bb.block = split_elems / cur_elems;
+            if (b.block % bb.block != 0) return tile_coord_t::invalid();
+            split_blocks.push_back(bb);
+        } else {
+            split_blocks.push_back(b);
+        }
+        cur_elems *= split_blocks.back().block;
+        if (cur_elems == split_elems) break;
+    }
+    tile_t split_tile;
+    for (auto &b : split_blocks)
+        split_tile[b.dim] = split_tile.get(b.dim, 1) * b.block;
+    return tile_coord_t(split_tile);
+}
+
+tile_coord_t split(const layout_t &layout, const tile_t &tile,
+        const grid_info_t &grid, std::vector<layout_block_t> *outer_blocks) {
+    if (outer_blocks) outer_blocks->resize(0);
+
+    if (grid.elems() == 1) return tile_coord_t(tile);
+
+    dim_t total_elems = layout.elems();
+    dim_t tile_elems = tile.elems();
+
+    grid_splitter_t grid_splitter(grid);
+    gpu_assert(tile_elems * grid.elems() == total_elems)
+            << "Tile/grid dimensions do not match.";
+    MAYBE_UNUSED(total_elems);
+    MAYBE_UNUSED(tile_elems);
+
+    tile_t dims;
+    coord_t start;
+    auto rem_tile = tile;
+    for (auto &b : layout.blocks()) {
+        if (b.block == 1) continue;
+
+        dim_t &e = rem_tile[b.dim];
+        if (e > 1) {
+            if (e % b.block == 0) {
+                e /= b.block;
+            } else if (b.block % e == 0) {
+                auto tmp_layout = layout.split_block(b, e, b.block / e);
+                return split(tmp_layout, tile, grid, outer_blocks);
+            } else {
+                return tile_coord_t::invalid();
+            }
+        } else {
+            dim_t next_chunk = math::gcd(b.block, grid_splitter.cur_block());
+            if (b.block == next_chunk) {
+                auto idx = grid_splitter.pop_block(next_chunk);
+                start[b.dim] += idx * dims[b.dim];
+                if (outer_blocks) outer_blocks->push_back(b);
+            } else if (b.block % next_chunk == 0 && next_chunk != 1) {
+                auto tmp_layout = layout.split_block(
+                        b, next_chunk, b.block / next_chunk);
+                return split(tmp_layout, tile, grid, outer_blocks);
+            } else {
+                return tile_coord_t::invalid();
+            }
+        }
+        dims[b.dim] *= b.block;
+    }
+    return tile_coord_t(tile, start);
 }
 
 memory_desc_t to_md(const layout_t &l, const memory_desc_t &md_hint) {
@@ -266,62 +382,34 @@ layout_t layout_t::split_block(
     return with(new_blocks, false);
 }
 
-layout_t layout_t::split_into_multi_blocks(
-        const std::vector<dim_t> &multi_blocks) const {
-    if (is_empty()) return *this;
-
-    layout_t tmp(*this);
-    std::vector<dim_t> rem_elems = multi_blocks;
-    std::vector<dim_t> cur_elems(rem_elems.size(), 1);
-    for (auto &b : tmp.blocks()) {
-        for (int i = 0; i < int(rem_elems.size()); i++) {
-            auto &e = rem_elems[i];
-            if (e == 1) continue;
-            if (b.block > e) {
-                // Try to split this block.
-                dim_t next_block = utils::max_div(b.block, e);
-                if (next_block == 1) return layout_t();
-                return tmp.split_block(b, next_block, b.block / next_block)
-                        .split_into_multi_blocks(multi_blocks);
+tile_t layout_t::max_subtile(
+        dim_t max, bool is_dense, bool perfectly_divides) const {
+    tile_t subtile;
+    dim_t elems = 1;
+    for (size_t i = 0; i < nblocks(); i++) {
+        auto &b = blocks()[i];
+        gpu_assert(!b.stride.is_undefined());
+        if (is_dense) {
+            if (b.stride.is_unknown()) return subtile;
+            if (i > 0) {
+                auto &b0 = blocks()[i - 1];
+                if (b.stride != b0.block * b0.stride) break;
             }
-            if (e % b.block != 0) return layout_t();
-            e /= b.block;
-            cur_elems[i] *= b.block;
+        }
+        if (b.block * elems >= max) {
+            if (perfectly_divides)
+                subtile[b.dim] *= utils::max_div(b.block, max / elems);
+            else
+                subtile[b.dim] *= max / elems;
             break;
         }
+        subtile[b.dim] *= b.block;
+        elems *= b.block;
     }
-    for (int i = 0; i < int(cur_elems.size()); i++) {
-        if (cur_elems[i] != multi_blocks[i]) { return layout_t(); }
-    }
-    return tmp;
+    return subtile;
 }
 
-tile_t layout_t::split_into_max_tile(
-        dim_t max_tile_elems, bool is_dense_tile) const {
-    stride_t dense_stride = 1;
-    std::vector<dim_t> tile_dims(ndims(), 1);
-    dim_t cur_elems = 1;
-    for (auto &b : blocks()) {
-        if (b.block == 1) continue;
-        if (b.block * cur_elems <= max_tile_elems) {
-            if (is_dense_tile) {
-                if (b.stride.is_unknown()) break;
-                if (dense_stride != b.stride) break;
-                dense_stride = b.block * b.stride;
-            }
-            cur_elems *= b.block;
-            tile_dims[b.dim] *= b.block;
-            continue;
-        }
-        dim_t max_block = utils::max_div(b.block, max_tile_elems / cur_elems);
-        if (max_block == 1) break;
-        auto tmp_layout = split_block(b, max_block, b.block / max_block);
-        return tmp_layout.split_into_max_tile(max_tile_elems, is_dense_tile);
-    }
-    return tile_t(tile_dims);
-}
-
-void layout_t::align_layouts(layout_t &a, layout_t &b) {
+void align_layouts(layout_t &a, layout_t &b) {
     for (auto &d : a.tile()) {
         auto a_blocks = a.blocks();
         auto b_blocks = b.blocks();
@@ -367,11 +455,15 @@ void layout_t::sanity_check() const {
 #endif
     if (is_empty()) return;
 
-    for (auto &b : blocks_) {
-        gpu_assert(b.block > 0) << "Incorrect block size.";
-        MAYBE_UNUSED(b);
+    for (size_t i = 0; i < blocks_.size(); i++) {
+        gpu_assert(blocks_[i].block > 0) << "Incorrect block size.";
+        if (i > 0)
+            gpu_assert(blocks_[i].stride > blocks_[i - 1].stride)
+                    << "Block " << blocks_[i]
+                    << " is incorrectly sorted when compared with "
+                    << blocks_[i - 1];
     }
-    if (with_ndims()) gpu_assert(ndims() <= max_ndims);
+    gpu_assert(has_ndims() || ndims_ == max_ndims);
 }
 
 expr_t grid_splitter_t::pop_block(dim_t size) {
@@ -526,8 +618,8 @@ layout_t view_t::create_pseudo_vlayout(
 layout_t dim_assignment_t::map(const layout_t &layout) const {
     std::vector<layout_block_t> new_blocks;
     for (auto &b : layout.blocks()) {
-        int new_idx = assignments_[b.dim];
-        if (new_idx == -1) continue; // Drop this block.
+        size_t new_idx = assignments_[b.dim];
+        if (new_idx == dim_idx::invalid) continue; // Drop this block.
         auto new_b = b;
         new_b.dim = new_idx;
         new_blocks.push_back(new_b);
@@ -543,19 +635,19 @@ layout_t dim_assignment_t::map(const layout_t &layout) const {
 
 layout_t spatials_to_3d(const layout_t &layout, bool with_groups,
         const std::array<int, 3> &dhw_map) {
-    const int old_ndims = layout.ndims();
-    const int old_sp_ndims = old_ndims - (with_groups ? 3 : 2);
-    const int new_ndims = old_ndims - old_sp_ndims + 3;
+    const size_t old_ndims = layout.ndims();
+    const size_t old_sp_ndims = old_ndims - (with_groups ? 3 : 2);
+    const size_t new_ndims = old_ndims - old_sp_ndims + 3;
 
     dim_assignment_t to_3d(old_ndims, new_ndims);
-    for (int i = 0; i < old_ndims; i++) {
+    for (size_t i = 0; i < old_ndims; i++) {
         if (i < old_ndims - old_sp_ndims) {
             // Non-spatial dimensions.
             to_3d.assign(i, i);
         } else {
             // Spatial dimensions.
-            int old_sp_idx = 3 - (old_ndims - i);
-            int new_sp_idx = dhw_map[old_sp_idx];
+            size_t old_sp_idx = 3 - (old_ndims - i);
+            size_t new_sp_idx = dhw_map[old_sp_idx];
             to_3d.assign(i, new_ndims - (3 - new_sp_idx));
         }
     }
