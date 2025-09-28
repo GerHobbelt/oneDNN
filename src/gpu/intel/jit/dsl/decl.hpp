@@ -18,6 +18,7 @@
 #define GPU_INTEL_JIT_DSL_DECL_HPP
 
 #include "gpu/intel/jit/ir/include/ir.hpp"
+#include "gpu/intel/jit/utils/utils.hpp"
 
 namespace dnnl {
 namespace impl {
@@ -25,6 +26,9 @@ namespace gpu {
 namespace intel {
 namespace jit {
 namespace dsl {
+
+using jit::operator<<;
+using jit::ir_utils::operator<<;
 
 static type_t _bool = type_t::_bool();
 static type_t s8 = type_t::s8();
@@ -40,6 +44,7 @@ static type_t f16 = type_t::f16();
 static type_t bf16 = type_t::bf16();
 
 using expr_t = jit::expr_t;
+using type_t = jit::type_t;
 
 } // namespace dsl
 } // namespace jit

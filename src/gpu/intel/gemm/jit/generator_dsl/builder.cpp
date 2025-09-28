@@ -96,12 +96,11 @@ struct transform_t {
 
         switch (normalized) {
             case kind_t::none:
-                return layout_t(
-                        type, 0, {{col_var, col, 1}, {row_var, row, col}});
+                return layout_t(type, {{col_var, col, 1}, {row_var, row, col}});
 
             case kind_t::block: {
                 int col_outer = (int)(col / col_inner);
-                return layout_t(type, 0,
+                return layout_t(type,
                         {{col_var, col_inner, 1}, {row_var, row, col_inner},
                                 {col_var, col_outer, row * col_inner}});
             }
@@ -110,7 +109,7 @@ struct transform_t {
                 int row_inner = 4 / t;
                 int row_outer = (int)(row / row_inner);
                 int col_outer = (int)(col / col_inner);
-                return layout_t(type, 0,
+                return layout_t(type,
                         {{row_var, row_inner, 1},
                                 {col_var, col_inner, row_inner},
                                 {row_var, row_outer, col_inner * row_inner},
@@ -281,7 +280,7 @@ void apply_post_ops(const dnnl::impl::gpu::intel::gpu_post_ops_t &ops,
                 }
             }
 
-            tensor_t src = def(src_layout, "binary" + i_s + "_blk");
+            tensor_t src = def("binary" + i_s + "_blk", src_layout);
             std::cout << "src_g: " << src_g.str() << "\n";
             std::cout << "src: " << src.str() << "\n";
             load(src, src_g);
@@ -458,9 +457,8 @@ struct generator_dsl_t {
         ir::tile_t C_dims {{{m_var, m_blk}, {n_var, n_blk}}};
         auto C_store_transform = get_transform(strategy.C, C_vars);
 
-        tensor_t C
-                = def(C_store_transform.get_layout(C_dims, into_ir(problem.Tc)),
-                        "C_blk", 0);
+        tensor_t C = def("C_blk",
+                C_store_transform.get_layout(C_dims, into_ir(problem.Tc)), 0);
 
         idx_t subgroup_dim = C.layout.blocks()[0].dim;
         int m_group_idx = strategy.loopOrder[0] == LoopM ? 0 : 1;
@@ -475,7 +473,7 @@ struct generator_dsl_t {
                         + local_id(n_group_idx))
                         * (subgroup_dim == n_var ? n_blk / strategy.subgroupSize
                                                  : n_blk));
-        auto k_idx = def(k.type(), "k_idx", 0);
+        auto k_idx = def("k_idx", k.type(), 0);
 
         auto offset_A = arg("offset_A");
         auto offset_B = arg("offset_B");
@@ -630,8 +628,8 @@ struct generator_dsl_t {
         auto kloop_it = cfg.kloop_it;
         auto &C = cfg.C;
 
-        tensor_t A = def(cfg.A_load.layout, "A_blk");
-        tensor_t B = def(cfg.B_load.layout, "B_blk");
+        tensor_t A = def("A_blk", cfg.A_load.layout);
+        tensor_t B = def("B_blk", cfg.B_load.layout);
 
         int mma_k_blk
                 = std::min(cfg.A_load.tile[k_var], cfg.B_load.tile[k_var]);
@@ -657,7 +655,7 @@ struct generator_dsl_t {
             int idx = pipeline_idx(k_unroll_idx, cfg.A_load_warmup(),
                     cfg.A_load.layout.dim(k_var));
             if (idx % A_load_blk != 0) return;
-            load(A.sub({{k_var, idx}}, cfg.A_load.tile), kloop_it.A_load(),
+            load(A.sub(cfg.A_load.tile, {{k_var, idx}}), kloop_it.A_load(),
                     {{k_var, 0}}, {cfg.A_load.transform.cache_hint});
             kloop_it.A_load_inc(A_load_blk);
         };
@@ -679,7 +677,7 @@ struct generator_dsl_t {
             int idx = pipeline_idx(k_unroll_idx, cfg.B_load_warmup(),
                     cfg.B_load.layout.dim(k_var));
             if (idx % B_load_blk != 0) return;
-            load(B.sub({{k_var, idx}}, cfg.B_load.tile), kloop_it.B_load(),
+            load(B.sub(cfg.B_load.tile, {{k_var, idx}}), kloop_it.B_load(),
                     {{k_var, 0}}, {cfg.B_load.transform.cache_hint});
             kloop_it.B_load_inc(B_load_blk);
         };

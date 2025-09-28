@@ -130,7 +130,7 @@ public:
                 gpu_assert(type.is_f32()) << "Expected f32: " << mem_buf();
                 reg_buf_ = mem_buf();
                 reg_layout_ = layout_t(
-                        type, 0, std::vector<dim_t>(mem_view().nvdims(), 1));
+                        type, std::vector<dim_t>(mem_view().nvdims(), 1));
             }
         }
     }
@@ -226,13 +226,11 @@ public:
     bool do_preload() const { return do_preload_; }
 
     tile_coord_t apply_mask(const tile_coord_t &tile_coord) const {
-        gpu_assert(mem_view().nvdims() == tile_coord.size());
-
         auto ret = tile_coord;
-        for (dim_idx_t i = 0; i < tile_coord.size(); i++) {
+        for (dim_idx_t i = 0; i < mem_view().nvdims(); i++) {
             if (!is_broadcast_dim(i)) continue;
-            ret.coord[i] = expr_t(0);
-            ret.tile[i] = 1;
+            if (ret.coord.has(i)) ret.coord[i] = expr_t(0);
+            if (ret.tile.has(i)) ret.tile[i] = 1;
         }
         return ret;
     }
