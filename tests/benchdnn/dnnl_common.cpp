@@ -385,7 +385,9 @@ int execute_and_wait(perf_function_t &exec_func, const dnnl_engine_t &engine,
         BENCHDNN_PRINT(
                 2, "%s\n", "[INFO] Using experimental SYCL graph execution.");
         sycl::ext::oneapi::experimental::command_graph graph {
-                queue.get_context(), queue.get_device()};
+                queue.get_context(), queue.get_device(),
+                {sycl::ext::oneapi::experimental::property::graph::
+                                assume_buffer_outlives_graph {}}};
 
         graph.begin_recording(queue);
         status = exec_func(stream, dnnl_args);
@@ -799,6 +801,20 @@ void skip_unimplemented_sum_po(const attr_t &attr, res_t *res,
                 res->reason = skip_reason::case_not_supported;
                 return;
             }
+        }
+    }
+}
+
+void skip_unimplemented_binary_po(const attr_t &attr, res_t *res) {
+    const auto &po = attr.post_ops;
+    if (po.is_def()) return;
+
+    if (is_gpu()) {
+        const int select_idx = po.find(attr_t::post_ops_t::kind_t::SELECT);
+        if (select_idx != -1) {
+            res->state = SKIPPED;
+            res->reason = skip_reason::case_not_supported;
+            return;
         }
     }
 }
