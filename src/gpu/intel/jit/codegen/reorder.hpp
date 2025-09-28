@@ -207,8 +207,6 @@ bool try_emit_batched_reorder_1d_tile(ngen::HW hw, GeneratorT *host,
             auto t = tmp.subregister(
                     dst_off + (ii - i_beg), esize, 4, small_type)(4);
             ngen::InstructionModifier mod = esize;
-            if (src_type == ngen::DataType::f && hw == ngen::HW::Gen9)
-                host->rnde(esize, s(1), s(1));
             if (dst_type == small_type) mod |= host->sat;
             plan(mov, mod, t, s(1));
             ii += esize;
@@ -305,9 +303,7 @@ void emit_reorder_1d_tile(ngen::HW hw, GeneratorT *host,
             if (f_to_xf) step = 8;
 
         //dpasw as well as potential bank conflict allocation permutes registers; -> so use register granularity
-        if (hw < ngen::HW::XeHPC
-                && (!src.check_bounds(0, 64, /*is_dense=*/true)
-                        || !dst.check_bounds(0, 64, /*is_dense=*/true)))
+        if (hw < ngen::HW::XeHPC && (!src.is_dense(64) || !dst.is_dense(64)))
             step = 8;
 
         if (src_df || dst_df) step = 8;
@@ -1081,14 +1077,6 @@ void emit_reorder_1d_tile(ngen::HW hw, GeneratorT *host,
             auto t2 = tmp2.subregister(t2_offset, dst_type);
 
             if (esize == 1) {
-                if (hw == ngen::HW::Gen9) {
-                    auto t1_f = tmp1.subregister(ngen::DataType::f);
-                    plan(mov, 1, t1_f, s);
-                    host->rnde(1, t1_f, t1_f);
-                    auto t2_h = tmp2.subregister(t1_offset, ngen::DataType::hf);
-                    plan(mov, 1, t2_h, t1_f);
-                    s = t2_h;
-                }
                 plan(mov, 2 | host->sat, t1(tmp_stride), s);
                 plan(mov, 1, d, t1);
                 continue;
@@ -1096,27 +1084,11 @@ void emit_reorder_1d_tile(ngen::HW hw, GeneratorT *host,
 
             // Operands are already dword aligned as required by F-pipe
             if (dst_stride >= tmp_stride) {
-                if (hw != ngen::HW::Gen9) {
-                    plan(mov, esize | host->sat, d(dst_stride), s(src_stride));
-                } else {
-                    gpu_assert(dst_stride % tmp_stride == 0);
-                    auto d_f = dst.format(i, esize, dst_stride / tmp_stride,
-                            ngen::DataType::f);
-                    plan(mov, esize, d_f, s(src_stride));
-                    host->rnde(esize, d_f, d_f);
-                    plan(mov, esize | host->sat, d(dst_stride), d_f);
-                }
+                plan(mov, esize | host->sat, d(dst_stride), s(src_stride));
                 continue;
             }
 
-            if (hw != ngen::HW::Gen9) {
-                plan(mov, esize | host->sat, t1(tmp_stride), s(src_stride));
-            } else {
-                auto t1_f = tmp1.format(t1_offset, esize, 1, ngen::DataType::f);
-                plan(mov, esize, t1_f, s(src_stride));
-                host->rnde(esize, t1_f, t1_f);
-                plan(mov, esize | host->sat, t1(tmp_stride), t1_f);
-            }
+            plan(mov, esize | host->sat, t1(tmp_stride), s(src_stride));
             if (t1_offset != t2_offset)
                 plan(mov, esize, t2(tmp_stride), t1(tmp_stride));
             else
@@ -1267,8 +1239,6 @@ void emit_reorder_1d_tile(ngen::HW hw, GeneratorT *host,
             auto d = dst.subregister(i, esize, dst_stride);
             if (src_d || src_f) {
                 // d -> b.
-                if (src_f && hw == ngen::HW::Gen9)
-                    host->rnde(esize, s(src_stride), s(src_stride));
                 if (esize == 1) {
                     // relaxed F-pipe alignment requirements for f32 broadcast
                     auto t = tmp1.subregister(dst_type);
@@ -1338,18 +1308,13 @@ void emit_reorder_1d_tile(ngen::HW hw, GeneratorT *host,
     // allowed then fix regioning by switching to integer pipe which has
     // less limitations.
     if (src_xf || dst_xf) {
-        // forcing floats if on Gen9, for RNDE only works with floats there
-        auto real_type_bits = (src_xf && !src_f && hw == ngen::HW::Gen9)
-                ? ngen::getBits(ngen::DataType::f)
-                : dst_type_bits;
-
         bool local_src_f = src_f;
         bool local_src_hf = src_hf;
         bool local_src_bf = src_bf;
         auto local_src_type = src_type;
 
         int step = get_step();
-        auto tmp_regs = utils::div_up(step * real_type_bits, grf_bits);
+        auto tmp_regs = utils::div_up(step * dst_type_bits, grf_bits);
         auto tmp = lex_scope.alloc_reg_buf_data(tmp_regs);
         for (int i = 0; i < width; i += step) {
             step = std::min(step, width - i);
@@ -1360,21 +1325,6 @@ void emit_reorder_1d_tile(ngen::HW hw, GeneratorT *host,
             auto d = dst.format(i * dst_stride, esize, dst_stride);
             auto d_old = d;
 
-            if (hw == ngen::HW::Gen9) {
-                auto t = tmp.format(0, esize, 1, ngen::DataType::f);
-                if (src_f)
-                    host->rnde(esize, t, s);
-                else if (src_xf) {
-                    plan(mov, esize, t, s);
-                    host->rnde(esize, t, t);
-                }
-                if (src_xf) {
-                    s = std::move(t);
-                    local_src_f = true;
-                    local_src_hf = local_src_bf = false;
-                    local_src_type = ngen::DataType::f;
-                }
-            }
             bool do_d0_align = false;
             if (esize > 1 && dst_bf) {
                 bool d_0_aligned = (d.byte_offset() == 0);
@@ -1623,7 +1573,7 @@ class reorder_2d_impl_t {
     struct reorder_step_t;
 
 public:
-    reorder_2d_impl_t(ngen::HW hw, tensor_t tile, const layout_t &src_layout,
+    reorder_2d_impl_t(ngen::HW hw, tile_t tile, const layout_t &src_layout,
             const layout_t &dst_layout)
         : hw_(hw), tile_(std::move(tile)) {
         gpu_assert(src_layout.type() == dst_layout.type());
@@ -1645,7 +1595,7 @@ public:
         path_ = find_min_cost_path(hw_, src_ab, dst_ab, tile_a, tile_b);
     }
 
-    const tensor_t &tile() const { return tile_; }
+    const tile_t &tile() const { return tile_; }
     const std::vector<reorder_step_t> &path() const { return path_; }
 
     template <typename GeneratorT>
@@ -1684,17 +1634,16 @@ public:
             int x_stride = (x_blocks.empty() ? 1 : int(x_blocks[0].stride));
             int y_stride = (y_blocks.empty() ? 1 : int(y_blocks[0].stride));
             int width = int(tile.elems()) * orig_type.size() / type.size();
-            next_layout->for_each_tile(
-                    tile, [&](const std::vector<dim_t> &start) {
-                        int prev_off = int(prev_layout->offset(start))
-                                * orig_type.bitsize() / type.bitsize();
-                        int next_off = int(next_layout->offset(start))
-                                * orig_type.bitsize() / type.bitsize();
-                        auto x_sub = prev_rd.format(prev_off, to_ngen(type));
-                        auto y_sub = next_rd.format(next_off, to_ngen(type));
-                        emit_reorder_1d_tile(hw_, host, scope, width, x_sub,
-                                x_stride, y_sub, y_stride);
-                    });
+            next_layout->for_each_tile(tile, [&](const icoord_t &start) {
+                int prev_off = prev_layout->offset<int>(start)
+                        * orig_type.bitsize() / type.bitsize();
+                int next_off = next_layout->offset<int>(start)
+                        * orig_type.bitsize() / type.bitsize();
+                auto x_sub = prev_rd.format(prev_off, to_ngen(type));
+                auto y_sub = next_rd.format(next_off, to_ngen(type));
+                emit_reorder_1d_tile(hw_, host, scope, width, x_sub, x_stride,
+                        y_sub, y_stride);
+            });
             prev_layout = next_layout;
             prev_rd = std::move(next_rd);
         }
@@ -1708,7 +1657,7 @@ private:
         edge_t() = default;
         edge_t(int idx, int a, int b) : idx(idx), a(a), b(b) {}
 
-        tensor_t tile() const { return tensor_t({a, b}); }
+        tile_t tile() const { return tile_t(std::vector<dim_t> {a, b}); }
 
         std::string str() const {
             std::ostringstream oss;
@@ -1764,7 +1713,7 @@ private:
         // - Assume at most one block (maybe with non-dense stride)
         // - Horizontal stride must be <= 4 for GRF region
         // - GRF region can't span more than 2 registers
-        bool can_reorder(const tensor_t &tile, const type_t &type) const {
+        bool can_reorder(const tile_t &tile, const type_t &type) const {
             auto ab_layout = layout.map(tile).reinterpret(type);
             int nblocks = int(ab_layout.blocks().size());
             if (nblocks == 0) return true;
@@ -1837,23 +1786,23 @@ private:
     // Represents a reorder step.
     struct reorder_step_t {
         reorder_step_t() = default;
-        reorder_step_t(const layout_t &layout, const tensor_t &tile,
-                const type_t &type)
+        reorder_step_t(
+                const layout_t &layout, const tile_t &tile, const type_t &type)
             : layout(layout), tile(tile), type(type) {}
 
         layout_t layout; // Destination layout.
-        tensor_t tile; // Tile corresponding to one instruction.
+        tile_t tile; // Tile corresponding to one instruction.
         type_t type; // Registers should be reinterpreted to `type` for reorder.
     };
 
     // Extracts dimension sizes and their indices from a multidimensional
     // tensor.
-    static void tile_to_2d_dims(const tensor_t &tile, dim_idx_t &a_idx,
+    static void tile_to_2d_dims(const tile_t &tile, dim_idx_t &a_idx,
             dim_idx_t &b_idx, int &a, int &b) {
         a_idx = dim_idx::invalid;
         b_idx = dim_idx::invalid;
-        for (dim_idx_t i = 0; i < tile.ndims(); i++) {
-            if (tile.dims()[i] == 1) continue;
+        for (dim_idx_t i = 0; i < tile.size(); i++) {
+            if (tile[i] == 1) continue;
             if (a_idx == dim_idx::invalid) {
                 a_idx = i;
                 continue;
@@ -1865,7 +1814,7 @@ private:
             gpu_error_not_expected();
         }
 
-        for (dim_idx_t i = 0; i < tile.ndims(); i++) {
+        for (dim_idx_t i = 0; i < tile.size(); i++) {
             if (utils::one_of(i, a_idx, b_idx)) continue;
             if (a_idx == dim_idx::invalid) {
                 a_idx = i;
@@ -1879,8 +1828,8 @@ private:
 
         if (a_idx > b_idx) std::swap(a_idx, b_idx);
 
-        a = tile.dims()[a_idx];
-        b = tile.dims()[b_idx];
+        a = tile[a_idx];
+        b = tile[b_idx];
     }
 
     // Finds the optimal sequence of reorders between src and dst layouts.
@@ -2062,7 +2011,7 @@ private:
     }
 
     ngen::HW hw_;
-    tensor_t tile_;
+    tile_t tile_;
     layout_t src_;
     layout_t dst_;
     std::vector<reorder_step_t> path_;
@@ -2103,9 +2052,9 @@ private:
         int tile_elems = int(tile.elems());
         auto &src_type = src_layout_.type();
         auto &dst_type = dst_layout_.type();
-        dst_layout_.for_each_tile(tile, [&](const std::vector<dim_t> &start) {
-            int src_off = src_layout_(start);
-            int dst_off = dst_layout_(start);
+        dst_layout_.for_each_tile(tile, [&](const icoord_t &start) {
+            int src_off = src_layout_.offset<int>(start);
+            int dst_off = dst_layout_.offset<int>(start);
             auto sub_src = src_rd.format(src_off, to_ngen(src_type));
             auto sub_dst = dst_rd.format(dst_off, to_ngen(dst_type));
 
@@ -2115,9 +2064,9 @@ private:
         });
     }
 
-    static std::vector<tensor_t> find_2d_dense_tiles(
+    static std::vector<tile_t> find_2d_dense_tiles(
             const layout_t &a, const layout_t &b) {
-        using tile_pair_t = std::array<tensor_t, 2>;
+        using tile_pair_t = std::array<tile_t, 2>;
         static constexpr int max_tile_blocks
                 = reorder_2d_impl_t::max_tile_blocks;
         auto dense_2d_blocks = []() {
@@ -2137,17 +2086,16 @@ private:
             };
         };
 
-        auto take_smaller = [](const tensor_t &a, const tensor_t &b) {
+        auto take_smaller = [](const tile_t &a, const tile_t &b) {
             return a.elems() <= b.elems();
         };
 
-        auto equal_tiles
-                = [](const tile_pair_t &p) { return p[0].is_equal(p[1]); };
+        auto equal_tiles = [](const tile_pair_t &p) { return p[0] == p[1]; };
 
         auto to_single_tile = [](const tile_pair_t &p) { return p[0]; };
 
-        auto all_dims_pow2 = [](const tensor_t &tile) {
-            for (auto d : tile.dims())
+        auto all_dims_pow2 = [](const tile_t &tile) {
+            for (auto d : tile.values())
                 if (!math::is_pow2(d)) return false;
             return true;
         };
@@ -2158,7 +2106,7 @@ private:
                 b.blocks() | filter(dense_2d_blocks()), b.ndims());
         auto tiles = merge(a_tiles, b_tiles, take_smaller) | filter(equal_tiles)
                 | transform(to_single_tile) | filter(all_dims_pow2);
-        std::vector<tensor_t> ret;
+        std::vector<tile_t> ret;
         for (const auto &tile : tiles)
             ret.insert(ret.begin(), tile);
         return ret;
@@ -2177,7 +2125,7 @@ private:
 
         const auto type = to_ngen(src_layout_.type());
         for (const auto &tile : find_2d_dense_tiles(src_layout_, dst_layout_)) {
-            if (tile.ndims() < 2) continue;
+            if (tile.size() < 2) continue;
             if (tile.elems() < 4) break;
             auto src_tile_layout = src_layout_.map(tile);
             auto dst_tile_layout = dst_layout_.map(tile);
@@ -2207,23 +2155,21 @@ private:
             // Skip any 2d reorder that attempts scalar moves
             if (!tile_ok) continue;
 
-            src_layout_.for_each_tile(
-                    tile, [&](const std::vector<dim_t> &start) {
-                        auto src_off = src_layout_.offset<dim_t>(start);
-                        auto dst_off = dst_layout_.offset<dim_t>(start);
-                        auto src_tile_rd = src_rd.format(int(src_off), type);
-                        auto dst_tile_rd = dst_rd.format(int(dst_off), type);
+            src_layout_.for_each_tile(tile, [&](const icoord_t &start) {
+                auto src_off = src_layout_.offset<dim_t>(start);
+                auto dst_off = dst_layout_.offset<dim_t>(start);
+                auto src_tile_rd = src_rd.format(int(src_off), type);
+                auto dst_tile_rd = dst_rd.format(int(dst_off), type);
 
-                        ngen_register_scope_t tile_scope(
-                                scope.register_allocator());
-                        r.emit(host, tile_scope, src_tile_rd, dst_tile_rd);
-                    });
+                ngen_register_scope_t tile_scope(scope.register_allocator());
+                r.emit(host, tile_scope, src_tile_rd, dst_tile_rd);
+            });
             return true;
         }
         return false;
     }
 
-    static tensor_t find_max_tile_with_fixed_stride(const layout_t &src,
+    static tile_t find_max_tile_with_fixed_stride(const layout_t &src,
             const layout_t &dst, int &src_stride, int &dst_stride) {
         // 1. Split layouts to have aligned blocks.
         auto a = src;
@@ -2254,7 +2200,7 @@ private:
             dst_cur_stride = int(bb.block * bb.stride);
             tile_dims[ab.dim_idx] *= ab.block;
         }
-        return tensor_t(tile_dims);
+        return tile_t(tile_dims);
     }
 
     ngen::HW hw_;

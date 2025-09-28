@@ -385,7 +385,7 @@ private:
     }
 
     ngen_register_scope_t register_scope() {
-        return ngen_register_scope_t(host_->ra_);
+        return ngen_register_scope_t(host_->ra());
     }
 
 #ifdef DNNL_DEV_MODE
@@ -439,7 +439,7 @@ private:
             it->second.retain();
             return it->second.get_reg_buf(alloc.buf);
         }
-        auto bca = bank_conflict_allocation_t::create(host_->ra_, bc_attr);
+        auto bca = bank_conflict_allocation_t::create(host_->ra(), bc_attr);
         if (bca.is_empty()) return {};
 
         auto ret = bc_allocations_.emplace(bc_attr, std::move(bca));
@@ -577,19 +577,7 @@ private:
             gpu_assert(dst.byte_offset() == src0.getByteOffset())
                     << "dst/src0 must be aligned to the same GRF offset.";
             align_src_dst_offset(host_, scope, mod, dst, src1, src2);
-            if (hw() < ngen::HW::XeLP
-                    && (ngen_is_dw(to_ngen(mad_func.dst_type))
-                            || mad_func.dst_type == type_t::f64()
-                            || (src1_width == 1 && src2_width == 1))) {
-                // On Gen9 int is not supported; f64 supports broadcast only with exec size 2.
-                // Use mul/add sequence instead.
-                auto tmp = scope.alloc_range(
-                        (mad_func.exec_size * mad_func.dst_type.size())
-                        / ngen::GRF::bytes(hw()));
-                auto reg = tmp[0].setType(to_ngen(mad_func.dst_type));
-                host_->mul(mod, reg, src1, src2);
-                host_->add(mod, dst, reg, src0);
-            } else if (mad_func.dst_type == type_t::f64()
+            if (mad_func.dst_type == type_t::f64()
                     && src1.reg_data().getHS() == 0
                     && src1.reg_data().getVS() == 0) {
                 // Workaround for sporadic f64 mad errors with broadcast src1 on XeHPC.
@@ -796,8 +784,8 @@ private:
         auto &data_op = eltwise_t::arg_data(args);
         const auto &data_rd = data_op.reg_buf_data();
 
-        eltwise_injector_f32_t<ngen_generator_t> inj(
-                host_, func.alg_kind, func.alpha, func.beta, func.scale);
+        eltwise_injector_f32_t<typename ngen_generator_t::RootCodeGenerator>
+                inj(host_, func.alg_kind, func.alpha, func.beta, func.scale);
         auto scratch = scope.alloc_range(inj.preferred_scratch_regs());
         inj.set_scratch(scratch);
         inj.prepare();
@@ -1003,7 +991,7 @@ public:
             default: {
                 // Some cases require pre-allocated register regions with
                 // special strides for a/b.
-                auto scope = ngen_register_scope_t(host_->ra_);
+                auto scope = ngen_register_scope_t(host_->ra());
                 auto a_out_op = maybe_alloc_strided_op(obj.type, obj.a, scope);
                 auto b_out_op = maybe_alloc_strided_op(obj.type, obj.b, scope);
                 bool is_mul = obj.op_kind == op_kind_t::_mul;
@@ -1011,23 +999,6 @@ public:
                 auto src0_op = eval(obj.a, a_out_op);
                 auto src1_op = eval(obj.b, b_out_op);
 
-                // XXX: (q x d) case is not supported. Try to downgrade it to
-                // (d x d) based on the previous assignments.
-                if (obj.op_kind == op_kind_t::_mul && obj.a.type().is_x64()) {
-                    type_t orig_type;
-                    if (is_int_up_convert(obj.a, orig_type)) {
-                        src0_op = src0_op.reinterpret(orig_type);
-                        // XXX: sync workaround is to fix an issue with
-                        // mul(q, d, d) instruction on XeHP. For some reason
-                        // the result is incorrect when dst and src0 are
-                        // accessed from the same register.
-                        if (hw() > ngen::HW::XeLP)
-                            host_->sync(ngen::SyncFunction::nop,
-                                    ngen::SWSB<uint64_t>(1));
-                    } else {
-                        gpu_error_not_expected();
-                    }
-                }
                 ebinary(obj, mod, dst_op, src0_op, src1_op);
                 break;
             }
@@ -1683,12 +1654,6 @@ void convert_ir_to_ngen(const stmt_t &body, ngen_generator_t *host,
     convert_ir_to_ngen_impl(body, host, kernel_grid_walk_order);
 }
 
-REG_GEN9_ISA(template void convert_ir_to_ngen(const stmt_t &body,
-        ir_kernel_t<ngen::HW::Gen9> *host,
-        const walk_order_t *kernel_grid_walk_order));
-REG_GEN11_ISA(template void convert_ir_to_ngen(const stmt_t &body,
-        ir_kernel_t<ngen::HW::Gen11> *host,
-        const walk_order_t *kernel_grid_walk_order));
 REG_XELP_ISA(template void convert_ir_to_ngen(const stmt_t &body,
         ir_kernel_t<ngen::HW::XeLP> *host,
         const walk_order_t *kernel_grid_walk_order));

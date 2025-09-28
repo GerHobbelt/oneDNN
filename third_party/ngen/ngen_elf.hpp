@@ -37,8 +37,7 @@ public:
     explicit ELFCodeGenerator(int stepping_ = 0, DebugConfig debugConfig = {}) : BinaryCodeGenerator<hw>(stepping_, debugConfig) {}
     explicit ELFCodeGenerator(DebugConfig debugConfig) : ELFCodeGenerator(0, debugConfig) {}
 
-protected:
-    NEOInterfaceHandler interface_{hw};
+    const NEOInterfaceHandler &interface() {return interface_;}
 
     void externalName(const std::string &name)                           { interface_.externalName(name); }
 
@@ -108,6 +107,9 @@ protected:
         bool hasSLM = (interface_.getSLMSize() > 0);
         BinaryCodeGenerator<hw>::epilogue(GRFCount, hasSLM, r0_info);
     }
+
+protected:
+    NEOInterfaceHandler interface_{hw};
 
     inline std::vector<uint8_t> getBinary(const std::vector<uint8_t> &code);
 
@@ -455,6 +457,19 @@ private:
 
             auto ctPatches = interface_.getCTPatchOffsets();
             int nrel = 0;
+
+// Workaround correctness issue when ZET_ENABLE_PROGRAM_DEBUGGING is enabled.
+#if !defined(NGEN_DISABLE_GETENV) && !defined(_WIN32)
+            static const bool emit_relocation = [&]() {
+                if(auto e = ::getenv("ZET_ENABLE_PROGRAM_DEBUGGING"))
+                    if (e[0] != '0')
+                        return false;
+                return true;
+            }();
+#else
+            static const bool emit_relocation = true;
+#endif
+
             for (auto &o: ctPatches) {
                 if (!o) continue;
                 relocations[nrel].offset = o;
@@ -462,7 +477,7 @@ private:
                 nrel++;
             }
 
-            if (nrel > 0) {
+            if (nrel > 0 && emit_relocation) {
                 sectionHeaders[13].name = offsetof(StringTable, snRelText);
                 sectionHeaders[13].type = SectionHeader::Type::Relocation;
                 sectionHeaders[13].offset = offsetof(ZebinELF, relocations);
