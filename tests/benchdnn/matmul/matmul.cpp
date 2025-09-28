@@ -641,8 +641,10 @@ void skip_unimplemented_prb(const prb_t *prb, res_t *res) {
             return;
         }
 
-        if (((prb->src_dt() == dnnl_f8_e4m3 || prb->dst_dt() == dnnl_f8_e4m3)
+        if (((prb->src_dt() == dnnl_f8_e4m3 || prb->wei_dt() == dnnl_f8_e4m3
+                     || prb->dst_dt() == dnnl_f8_e4m3)
                     || (prb->src_dt() == dnnl_f8_e5m2
+                            || prb->wei_dt() == dnnl_f8_e5m2
                             || prb->dst_dt() == dnnl_f8_e5m2))
                 && (!po.is_def() || !prb->attr.scales.is_def())) {
             BENCHDNN_PRINT(2,
@@ -830,7 +832,9 @@ int init_ref_memory_args(dnn_mem_map_t &ref_mem_map, dnn_mem_map_t &mem_map,
     // must be meaningful, otherwise a jump to a random memory location outside
     // of allocated bytes will happen.
     // If there's a sparse memory, non-sparse memory and non-metadata handles
-    // will not reach the filling.
+    // will not reach the filling, unless it's a `packed` encoding. In such case
+    // the reference f32 counterpart must be mapped and allowed to reach the
+    // reorder because metadata needed will be filled as a part of the reorder.
     const bool map_has_sparse_mem = has_sparse_md(mem_map);
     if (has_bench_mode_modifier(mode_modifier_t::no_ref_memory)
             && !map_has_sparse_mem)
@@ -905,6 +909,12 @@ int init_ref_memory_args(dnn_mem_map_t &ref_mem_map, dnn_mem_map_t &mem_map,
         }
         auto &ref_mem = ref_mem_map[exec_arg];
 
+        // See the comment at the beginning of the function.
+        if (has_bench_mode_modifier(mode_modifier_t::no_ref_memory)
+                && is_sparse_wei_packed) {
+            ref_mem.map();
+        }
+
         switch (exec_arg) {
             case DNNL_ARG_SRC:
                 SAFE(fill_data(SRC, prb, cfg, mem, ref_mem, res), WARN);
@@ -969,6 +979,9 @@ int checkit(std::vector<benchdnn_dnnl_wrapper_t<dnnl_primitive_t>> &v_prim,
             if (res_copy.state == SKIPPED) {
                 v_prim[1].reset(nullptr);
                 SAFE(check_total_size(res), WARN);
+            } else {
+                // Copy estimations back to original `res`.
+                *res = res_copy;
             }
         } else {
             SAFE(check_total_size(res), WARN);
@@ -991,6 +1004,8 @@ std::vector<data_kind_t> get_kinds_to_check(const prb_t *prb) {
 
 int doit(const std::vector<benchdnn_dnnl_wrapper_t<dnnl_primitive_t>> &v_prim,
         const prb_t *prb, res_t *res) {
+    set_zmalloc_max_expected_size(res->mem_size_args.zmalloc_expected_size);
+
     const auto &prim = v_prim[0];
     const auto &prim_ref = v_prim[1];
 
@@ -1005,7 +1020,7 @@ int doit(const std::vector<benchdnn_dnnl_wrapper_t<dnnl_primitive_t>> &v_prim,
     SAFE(execute_and_wait(prim, args, res), WARN);
 
     check_correctness(prb, get_kinds_to_check(prb), args, ref_args, setup_cmp,
-            res, prim_ref);
+            res, prb->dir, prim_ref);
     SAFE(check_bitwise(prim, get_kinds_to_check(prb), args, prb->attr,
                  prb->inplace, res),
             WARN);
