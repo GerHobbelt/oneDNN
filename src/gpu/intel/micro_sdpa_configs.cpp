@@ -605,8 +605,8 @@ sdpa_config_t *choose_config(compute::gpu_arch_t arch, dim_t head_size,
     if (arch == compute::gpu_arch_t::xe_hpg && is_fma && !is_f32
             && is_quantized)
         return nullptr;
-    // f32 fma on MTL requires too many registers for head sizes >= 256
-    if (arch == compute::gpu_arch_t::xe_hpg && is_fma && is_f32
+    // f32 and fma on MTL requires too many registers for head sizes >= 256
+    if (arch == compute::gpu_arch_t::xe_hpg && (is_fma || is_f32)
             && head_size > 256)
         return nullptr;
     // no valid quantized configs w/head size = 512 on xe2
@@ -624,7 +624,7 @@ sdpa_config_t *choose_config(compute::gpu_arch_t arch, dim_t head_size,
             static_cast<int>(seq), query_properties);
     auto it = find(begin(sorted_configs), end(sorted_configs), query);
     if (it != end(sorted_configs)) {
-        std::stringstream ss;
+        stringstream_t ss;
         ss << " {query " << query << "} -> {config " << it->criteria << ":"
            << it->config << " }";
         VDEBUGINFO(4, primitive, sdpa, "config search: %s,", ss.str().c_str());
