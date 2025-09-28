@@ -107,13 +107,13 @@ public:
     }
 
     void bind_dst(const expr_t &expr, const ngen_operand_t &operand) {
-        gpu_assert(!expr.is_empty());
+        gpu_assert(expr);
         auto ret = expr2dst_.insert({expr, operand});
         gpu_assert(ret.second) << "Already bound: " << expr;
     }
 
     void unbind_dst(const expr_t &expr) {
-        gpu_assert(!expr.is_empty());
+        gpu_assert(expr);
         auto it = expr2dst_.find(expr);
         gpu_assert(it != expr2dst_.end());
         expr2dst_.erase(it);
@@ -161,7 +161,7 @@ public:
     }
 
     void unbind(const expr_t &expr) {
-        gpu_assert(!expr.is_empty());
+        gpu_assert(expr);
 
         auto it = expr2operand_.find(expr);
         gpu_assert(it != expr2operand_.end());
@@ -179,6 +179,14 @@ class expr_evaluator_t;
 
 template <typename ngen_generator_t>
 class ir_to_ngen_t;
+
+struct setup_flags_t {
+    bool has_send_atomics;
+    bool has_dpas;
+    bool has_signal_header;
+};
+
+setup_flags_t get_setup_flags(const stmt_t &s);
 
 template <typename ngen_generator_t>
 class ir_kernel_base_t : public ngen_generator_t {
@@ -212,6 +220,7 @@ public:
 
     const kernel_iface_t &kernel_iface() const { return kernel_iface_; }
     const exec_config_t &exec_cfg() const { return exec_cfg_; }
+    const hw_t &hw_info() const { return exec_cfg_.hw(); }
 
     reg_allocator_t &ra() { return ra_; };
     const reg_allocator_t &ra() const { return ra_; };
@@ -237,12 +246,6 @@ public:
         }
         // Enable IEEE f32 -> s32 rounding and f64/f32/f16 denormals.
         or_(1, ngen_generator_t::cr0, ngen_generator_t::cr0, uint16_t(0x14C0));
-
-        // Allocate and initialize signal header for future use.
-        if (exec_cfg_.require_signal_header()) {
-            signal_header_ = ra_.alloc();
-            ngen_generator_t::barrierheader(signal_header_);
-        }
     }
 
     void bind_external_vars(
@@ -253,7 +256,7 @@ public:
         int r0_sub_idxs[] = {1, 6, 7};
         for (int i = 0; i < 3; i++) {
             auto tg_idx = alloc_mgr.find_let(ir_builder_t::tg_idx(i), true);
-            if (!tg_idx.is_empty()) {
+            if (tg_idx) {
                 auto tmp = ra_.template alloc_sub<int32_t>();
                 mov(1, tmp, ngen_generator_t::r0.ud(r0_sub_idxs[i]));
                 expr_binding.bind(tg_idx, tmp);
@@ -263,9 +266,15 @@ public:
         // Bind local IDs.
         for (int i = 0; i < 3; i++) {
             auto local_id = alloc_mgr.find_let(ir_builder_t::local_id(i), true);
-            if (!local_id.is_empty()) {
+            if (local_id) {
                 expr_binding.bind(
                         local_id, ngen_generator_t::getLocalID(i).uw(0));
+            }
+            auto local_size
+                    = alloc_mgr.find_let(ir_builder_t::local_size(i), true);
+            if (local_size) {
+                expr_binding.bind(
+                        local_size, ngen_generator_t::getLocalSize(i).uw(0));
             }
         }
 
@@ -287,7 +296,14 @@ public:
 
         // Bind SLM buffer (SLM loads/stores use 0-based offsets).
         auto slm_buf = alloc_mgr.find_buffer("slm", /*allow_empty=*/true);
-        if (!slm_buf.is_empty()) expr_binding.bind(slm_buf, to_ngen(expr_t(0)));
+        if (slm_buf) expr_binding.bind(slm_buf, to_ngen(expr_t(0)));
+
+        auto setup_flags = get_setup_flags(kernel_body);
+        // Allocate and initialize signal header for future use.
+        if (setup_flags.has_signal_header) {
+            signal_header_ = ra_.alloc();
+            ngen_generator_t::barrierheader(signal_header_);
+        }
     }
 
     void bind_kernel_grid_walk_order_blocked(const ngen::Subregister &id,
@@ -431,6 +447,8 @@ public:
             nop();
     }
 
+    const ngen::GRF &signal_header() { return signal_header_; }
+
     void emov(const ngen::InstructionModifier &mod, const ngen_operand_t &dst,
             const ngen_operand_t &src0) {
         if (dst.is_reg_data()) {
@@ -521,26 +539,6 @@ public:
                 }
             }
         } else {
-            auto &src1_imm = src1.immediate();
-            if (ngen_is_qw(dst.type()) || ngen_is_w(src1_imm.getType())) {
-                emul(mod, dst.reg_data(), src0.reg_data(), src1.immediate());
-                return;
-            }
-            if (ngen_is_dw(src1_imm.getType())) {
-                gpu_assert(mod.getExecSize() == 1);
-                auto tmp = ra_.alloc_sub<int64_t>();
-                if (ngen_is_w(src0.type())) {
-                    auto tmp_src1 = ra_.alloc_sub<int32_t>();
-                    emov(mod, tmp_src1.d(0), src0.reg_data());
-                    emul(mod, tmp.q(0), tmp_src1.d(0), src1_imm);
-                    ra_.safeRelease(tmp_src1);
-                } else {
-                    emul(mod, tmp.q(0), src0.reg_data(), src1_imm);
-                }
-                emov(mod, dst.reg_data(), tmp.reinterpret(0, dst.type()));
-                ra_.safeRelease(tmp);
-                return;
-            }
             emul(mod, dst.reg_data(), src0.reg_data(), src1.immediate());
         }
     }
@@ -1185,8 +1183,14 @@ public:
         elf_generator_t::requireGRF(base::exec_cfg().regs());
         elf_generator_t::requireSIMD(base::exec_cfg().simd());
         elf_generator_t::requireBarrier();
-        if (require_dpas_) elf_generator_t::requireDPAS();
-        if (has_send_atomics(kernel_body))
+        auto setup_flags = get_setup_flags(kernel_body);
+
+        // On XeHPG hardware, there is some setup overhead when switching
+        // between dpas and non-dpas kernels. The require_dpas_ parameter is to
+        // enable better kernel chaining on this platform.
+        if (require_dpas_ || setup_flags.has_dpas)
+            elf_generator_t::requireDPAS();
+        if (setup_flags.has_send_atomics)
             elf_generator_t::requireGlobalAtomics();
 
         for (int i = 0; i < base::kernel_iface().nargs(); i++) {
@@ -1201,7 +1205,7 @@ public:
             }
         }
 
-        if (!kernel_body.is_empty() && local_range_) {
+        if (kernel_body && local_range_) {
             int slm_size = alloc_manager_t(kernel_body)
                                    .total_size(alloc_kind_t::slm);
             int max_slm_size = compute::device_info_t::max_slm_size_per_tg(
@@ -1274,6 +1278,9 @@ public:
         return interface_.getArgument(name);
     }
     ngen::GRF getLocalID(int dim) const { return interface_.getLocalID(dim); }
+    ngen::Subregister getLocalSize(int dim) const {
+        return interface_.getLocalSize(dim);
+    }
     std::string str() {
         std::ostringstream oss;
         getCode(oss);

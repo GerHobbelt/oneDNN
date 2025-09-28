@@ -213,12 +213,10 @@ public:
 
     stmt_t iter_stmt() const {
         stmt_t stmt;
-        bool use_prefetch = !prefetch_stmt_.is_empty();
-        bool use_slm = !g2s_load_stmt_.is_empty();
-        if (use_prefetch) {
+        if (prefetch_stmt_) {
             stmt = stmt.append(stmt_group_t::make(
                     stmt_label_t::prefetch(), prefetch_stmt_));
-        } else if (use_slm) {
+        } else if (g2s_load_stmt_) {
             stmt = stmt.append(stmt_group_t::make(
                     stmt_label_t::g2s_load(), g2s_load_stmt_));
             stmt = stmt.append(funcs::barrier());
@@ -534,7 +532,7 @@ private:
                 gemm_schedule, force_c_reorder, post_op_ctx, thr_tile_coord,
                 c_thr_reg_layout, cp_buf_, c_buf, c_buf_size);
         (void)buf_mgr_.get("c", c_buf_size);
-        if (!reduce_cond.is_empty()) stmt = if_t::make(reduce_cond, stmt);
+        if (reduce_cond) stmt = if_t::make(reduce_cond, stmt);
         c_store_stmt_ = c_store_stmt_.append(stmt);
     }
 
@@ -551,9 +549,9 @@ private:
         cond &= (kw == 0);
         cond &= (ic == 0);
         loop_kind_t filter = loop_kind_t::kernel_grid;
-        if (!plan_.slm.has_b()) filter = filter | loop_kind_t::tg_grid;
+        if (!plan_.slm.x_reduce) filter = filter | loop_kind_t::tg_grid;
         cond = gemm_schedule.expand(cond, /*expand_trivial_vars=*/true, filter);
-        if (plan_.slm.has_b()) {
+        if (plan_.slm.x_reduce) {
             cond = add_grid_guard(
                     cond, cfg_.thread_group_grid(), plan_.slm.b_grid);
         }
@@ -574,8 +572,9 @@ private:
                 x_reduce_dummy_buf,
                 use_atomic ? send_op_t::atomic_fadd : send_op_t::store,
                 send_address_t::a64);
-        auto x_reduce_type = (plan_.slm ? plan_.slm.x_reduce.dst.type()
-                                        : plan_.x2r.x_reduce.dst.type());
+        auto x_reduce_type = plan_.slm.x_reduce.dst.type();
+        if (x_reduce_type.is_undef())
+            x_reduce_type = plan_.x2r.x_reduce.dst.type();
         layout_t x_reduce_reg_layout
                 = r2g.reg_layout().retype(x_reduce_type).make_dense();
         stmt_t stmt = r2g.stmt();

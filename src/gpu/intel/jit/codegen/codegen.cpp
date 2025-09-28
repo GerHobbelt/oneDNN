@@ -58,7 +58,7 @@ public:
         : host_(host)
         , expr_binding_(expr_binding)
         , simd_size_(host->getSIMD())
-        , with_atomic_fp64_(host->exec_cfg().hw().has_fp64_atomic_support()) {}
+        , with_atomic_fp64_(host->hw_info().has_fp64_atomic_support()) {}
 
     ~ir_to_ngen_t() override
 #ifdef DNNL_DEV_MODE
@@ -211,7 +211,7 @@ public:
         gpu_assert(obj.cond.type().elems() == simd_size_);
         host_->comment(obj.line_str());
 
-        bool has_else = !obj.else_body.is_empty();
+        bool has_else = bool(obj.else_body);
         auto scope = register_scope();
         auto cond_op = eval(obj.cond, scope);
 
@@ -456,9 +456,8 @@ private:
 
     void signal(const func_call_attr_t &attr) {
         ngen::InstructionModifier mod;
-        if (!attr.is_empty())
-            mod = mod | attr.as<instruction_modifier_attr_t>().mod;
-        host_->barriermsg(mod, host_->signal_header_);
+        if (attr) mod = mod | attr.as<instruction_modifier_attr_t>().mod;
+        host_->barriermsg(mod, host_->signal_header());
     }
 
     void barrier_wait() { host_->barrierwait(); }
@@ -467,8 +466,7 @@ private:
         auto scope = register_scope();
         auto tmp = scope.alloc();
         ngen::InstructionModifier mod;
-        if (!attr.is_empty())
-            mod = mod | attr.as<instruction_modifier_attr_t>().mod;
+        if (attr) mod = mod | attr.as<instruction_modifier_attr_t>().mod;
 
         host_->slmfence(mod, tmp, host_->r0);
         host_->fencewait();
@@ -478,12 +476,11 @@ private:
         auto scope = register_scope();
         auto tmp = scope.alloc();
         ngen::InstructionModifier mod;
-        if (!attr.is_empty())
-            mod = mod | attr.as<instruction_modifier_attr_t>().mod;
+        if (attr) mod = mod | attr.as<instruction_modifier_attr_t>().mod;
 
         host_->slmfence(mod, tmp, host_->r0);
         host_->fencewait();
-        host_->barriermsg(mod, host_->signal_header_);
+        host_->barriermsg(mod, host_->signal_header());
         host_->barrierwait();
     }
 
@@ -518,8 +515,7 @@ private:
                 0, src2_width, src2_stride, to_ngen(dpas_func.src2_type));
 
         ngen::InstructionModifier mod = esize;
-        if (!attr.is_empty())
-            mod = mod | attr.as<instruction_modifier_attr_t>().mod;
+        if (attr) mod = mod | attr.as<instruction_modifier_attr_t>().mod;
         check_bank_conflicts(mod, src0, src1, src2, /*is_dpas=*/true);
         if (dpas_func.is_dpasw) {
             host_->dpasw(mod, dpas_func.sdepth, dpas_func.rcount, dst, src0,
@@ -567,8 +563,7 @@ private:
                 to_ngen(mad_func.src2_type));
 
         ngen::InstructionModifier mod = mad_func.exec_size;
-        if (!attr.is_empty())
-            mod = mod | attr.as<instruction_modifier_attr_t>().mod;
+        if (attr) mod = mod | attr.as<instruction_modifier_attr_t>().mod;
 
         check_bank_conflicts(mod, src0, src1, src2, /*is_dpas=*/false);
         if (src0.isNull()) {
@@ -723,7 +718,7 @@ private:
 
         ngen::InstructionModifier mod = send_func.nmasks();
         gpu_assert(math::is_pow2(mod.getExecSize()));
-        if (!attr.is_empty()) mod |= attr.as<instruction_modifier_attr_t>().mod;
+        if (attr) mod |= attr.as<instruction_modifier_attr_t>().mod;
         if (!mask_op.is_invalid()) mod |= mask_op.flag_register_mod();
 
         // Zero-out inactive channels unless told not to.
@@ -1612,6 +1607,31 @@ private:
 
     object_eq_map_t<expr_t, type_t> int_up_converts_;
 };
+
+class setup_visitor_t : public ir_visitor_t {
+public:
+    void _visit(const func_call_t &obj) override {
+        auto &func = obj.func;
+        auto *dpas = func.as_ptr<dpas_t>();
+        auto *send = func.as_ptr<send_t>();
+        if (dpas)
+            flags.has_dpas = true;
+        else if (send && send->is_atomic())
+            flags.has_send_atomics = true;
+        else if (func.is_same(funcs::signal_func()))
+            flags.has_signal_header = true;
+        else if (func.is_same(funcs::barrier_func()))
+            flags.has_signal_header = true;
+    }
+
+    setup_flags_t flags = {};
+};
+
+setup_flags_t get_setup_flags(const stmt_t &s) {
+    setup_visitor_t visitor;
+    visitor.visit(s);
+    return visitor.flags;
+}
 
 template <typename ngen_generator_t>
 void convert_ir_to_ngen_impl(const stmt_t &body, ngen_generator_t *host,

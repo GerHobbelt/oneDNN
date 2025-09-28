@@ -315,7 +315,7 @@ public:
         //
         // tmp0.s32            -> tmp0_0.u64
         // tmp1.s32 = tmp0.s32 -> tmp1.s32 = tmp0_0.u64
-        if (!value.is_empty()) {
+        if (value) {
             auto value_type = expr_t(value).type();
             if (var.as<var_t>().type != value_type) {
                 auto var_old = var;
@@ -785,7 +785,7 @@ expr_t make_buffer(const std::string &name) {
 
 // Returns number of occurrences of `obj` in `root` (based on identity equality).
 int count_object(const object_t &root, const object_t &obj) {
-    gpu_assert(!obj.is_empty());
+    gpu_assert(obj);
 
     std::vector<object_t> found;
     do {
@@ -927,22 +927,6 @@ int get_peak_regs(
     grf_usage_visitor_t visitor(grf_size, external_regs, skip_let);
     visitor.visit(stmt);
     return utils::div_up(visitor.peak_regs(), grf_size);
-}
-
-class has_send_atomics_visitor_t : public ir_visitor_t {
-public:
-    void _visit(const func_call_t &obj) override {
-        auto *send = obj.func.as_ptr<send_t>();
-        if (send && send->is_atomic()) found = true;
-    }
-
-    bool found = false;
-};
-
-bool has_send_atomics(const stmt_t &s) {
-    has_send_atomics_visitor_t visitor;
-    visitor.visit(s);
-    return visitor.found;
 }
 
 bool relation_t::implies(const relation_t &other) const {
@@ -1197,8 +1181,16 @@ void constraint_set_t::add_constraint(const expr_t &e) {
         return;
     }
 
-    // Propagate constraints from y for (x == y) equalities.
     auto *binary_op = e.as_ptr<binary_op_t>();
+
+    // Propagate constraints from chained ands like a & b & c
+    if (binary_op && binary_op->op_kind == op_kind_t::_and) {
+        add_constraint(binary_op->a);
+        add_constraint(binary_op->b);
+        return;
+    }
+
+    // Propagate constraints from y for (x == y) equalities.
     if (binary_op && binary_op->op_kind == op_kind_t::_eq) {
         auto &a = binary_op->a;
         auto &b = binary_op->b;
@@ -1262,7 +1254,7 @@ bool constraint_set_t::is_single_value(const expr_t &e, expr_t &value) const {
         }
         if (do_break) break;
     }
-    bool ret = !lo.is_empty() && lo.is_equal(hi);
+    bool ret = lo && lo.is_equal(hi);
     if (ret) value = std::move(lo);
     return ret;
 }
