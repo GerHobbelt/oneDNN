@@ -27,6 +27,7 @@
 #include "gpu/intel/jit/ir/hw.hpp"
 #include "gpu/intel/jit/ir/message.hpp"
 #include "gpu/intel/jit/pass/simplify.hpp"
+#include "gpu/intel/logging.hpp"
 
 namespace dnnl {
 namespace impl {
@@ -1354,7 +1355,7 @@ private:
 
     void init_base() {
         if (send_kind_ == send_kind_t::_2d) {
-            auto vstart = view_.vstart();
+            const auto &vstart = view_.vstart();
             auto tstart
                     = view_.cvt_vargs_to_targs(vstart, /*ignore_vstart=*/true);
             auto &p2d = send_2d_params_;
