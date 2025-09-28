@@ -61,10 +61,14 @@ struct ref_t : public primitive_t {
                             | smask_t::scales_groups | smask_t::dropout
                             | smask_t::zero_points_data_type
                             | smask_t::zero_points_groups | smask_t::post_ops
-                            | smask_t::fpmath_mode | smask_t::rounding_mode),
+                            | smask_t::accumulation_mode | smask_t::fpmath_mode
+                            | smask_t::rounding_mode
+                            | smask_t::precomputed_reductions),
                     VERBOSE_UNSUPPORTED_ATTR);
             VDISPATCH_MATMUL(attr_scales_ok(), VERBOSE_UNSUPPORTED_SCALES_CFG);
             VDISPATCH_MATMUL(zero_points_ok(), VERBOSE_UNSUPPORTED_ZP_CFG);
+            VDISPATCH_MATMUL(
+                    precomputed_reductions_ok(), VERBOSE_UNSUPPORTED_PR_CFG);
             VDISPATCH_MATMUL(set_default_formats(), VERBOSE_UNSUPPORTED_TAG);
             VDISPATCH_MATMUL(IMPLICATION(has_blocks(), dst_md()->ndims < 6),
                     VERBOSE_BAD_NDIMS, "dst", dst_md()->ndims);
@@ -189,6 +193,27 @@ struct ref_t : public primitive_t {
             }
             return true;
         }
+        bool precomputed_reductions_ok() const {
+            const auto &pr = attr()->precomputed_reductions_;
+            if (pr.has_default_values(DNNL_ARG_SRC)) return true;
+
+            const auto &sc = attr()->scales_;
+            const auto &zp = attr()->zero_points_;
+            auto sgw = (!sc.has_default_groups(DNNL_ARG_WEIGHTS))
+                    ? sc.get(DNNL_ARG_WEIGHTS).get_group(0)
+                    : K();
+            auto sgs = (!sc.has_default_groups(DNNL_ARG_SRC))
+                    ? sc.get(DNNL_ARG_SRC).get_group(1)
+                    : K();
+            auto zgw = (!zp.has_default_groups(DNNL_ARG_WEIGHTS))
+                    ? zp.get(DNNL_ARG_WEIGHTS).get_group(0)
+                    : K();
+            auto pgs = (!pr.has_default_groups(DNNL_ARG_SRC))
+                    ? pr.get(DNNL_ARG_SRC).get_group(1)
+                    : K();
+            // all other groups should be divisible by the precomp group
+            return (sgw % pgs == 0) && (sgs % pgs == 0) && (zgw % pgs == 0);
+        }
     };
 
     status_t init(impl::engine_t *engine) override {
@@ -211,6 +236,10 @@ struct ref_t : public primitive_t {
         CHECK(def_attr_info(kernel_ctx, pd()->attr_info_,
                 pd()->attr()->post_ops_, *pd()->dst_md()));
 
+        if (!pd()->attr()->precomputed_reductions_.has_default_values(
+                    DNNL_ARG_SRC))
+            kernel_ctx.define_int("WITH_SRC_GROUP_SUMS", 1);
+
         bool runtime_dims = pd()->has_runtime_dims_or_strides() || ndims > 5;
         if (!runtime_dims) {
             const memory_desc_wrapper src_d(pd()->src_md(0));
@@ -226,26 +255,22 @@ struct ref_t : public primitive_t {
             kernel_ctx.define_int("NDIMS", ndims);
         }
         kernel_ctx.define_int("RUNTIME_DIMS", runtime_dims);
-        kernel_ctx.define_int("HOST_SRC_SCALE",
-                pd()->attr()->scales_.get(DNNL_ARG_SRC).is_host_scalar());
-        kernel_ctx.define_int("HOST_WEI_SCALE",
-                pd()->attr()->scales_.get(DNNL_ARG_WEIGHTS).is_host_scalar());
-        kernel_ctx.define_int("HOST_DST_SCALE",
-                pd()->attr()->scales_.get(DNNL_ARG_DST).is_host_scalar());
-        kernel_ctx.define_int("HOST_SRC_ZP",
-                pd()->attr()->zero_points_.get(DNNL_ARG_SRC).is_host_scalar());
-        kernel_ctx.define_int("HOST_WEI_ZP",
-                pd()->attr()
-                        ->zero_points_.get(DNNL_ARG_WEIGHTS)
-                        .is_host_scalar());
-        kernel_ctx.define_int("HOST_DST_ZP",
-                pd()->attr()->zero_points_.get(DNNL_ARG_DST).is_host_scalar());
 
         def_data_type(kernel_ctx, pd()->src_dt_, "SRC");
         def_data_type(kernel_ctx, pd()->wei_dt_, "WEI");
         def_data_type(kernel_ctx, pd()->dst_dt_, "DST");
         def_data_type(kernel_ctx, pd()->bia_dt_, "BIA");
-        def_data_type(kernel_ctx, pd()->desc()->accum_data_type, "ACC");
+        data_type_t acc_type = pd()->desc()->accum_data_type;
+        switch (pd()->attr()->acc_mode_) {
+            case accumulation_mode::strict:
+            case accumulation_mode::relaxed:
+            case accumulation_mode::any: break;
+            case accumulation_mode::f16: acc_type = data_type::f16; break;
+            case accumulation_mode::f32: acc_type = data_type::f32; break;
+            case accumulation_mode::s32: acc_type = data_type::s32; break;
+            default: break;
+        }
+        def_data_type(kernel_ctx, acc_type, "ACC");
         def_data_type(kernel_ctx,
                 pd()->attr()->scales_.get_data_type(DNNL_ARG_WEIGHTS),
                 "WEI_SCALES");
@@ -258,6 +283,10 @@ struct ref_t : public primitive_t {
         def_data_type(kernel_ctx,
                 pd()->attr()->zero_points_.get_data_type(DNNL_ARG_SRC),
                 "SRC_ZP");
+        def_data_type(kernel_ctx,
+                pd()->attr()->precomputed_reductions_.get_data_type(
+                        DNNL_ARG_SRC),
+                "SRC_GS");
         def_data_type(kernel_ctx,
                 pd()->attr()->scales_.get_data_type(DNNL_ARG_DST),
                 "DST_SCALES");
