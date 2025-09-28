@@ -24,6 +24,7 @@
 #include "gpu/intel/jit/gemm/gen_gemm_kernel_db.hpp"
 #include "gpu/intel/jit/utils/ngen_type_bridge.hpp"
 #include "gpu/intel/utils.hpp"
+#include "kernel_selector.hpp"
 
 namespace dnnl {
 namespace impl {
@@ -32,6 +33,16 @@ namespace intel {
 namespace jit {
 
 using namespace gemmstone;
+
+namespace {
+void entryObserver(
+        const kcatalog::Entry *entry, double score, EvaluateAuxOutput aux) {
+    if (get_verbose(verbose_t::debuginfo) >= 5) {
+        dnnl::impl::verbose_printf("info,gpu,gemm,consider:%s,score:%f\n",
+                entry->str().c_str(), score);
+    }
+};
+} // anonymous namespace
 
 status_t gen_gemm_kernel_desc_t::create_generator(
         const compute::compute_engine_t &engine,
@@ -130,18 +141,31 @@ status_t gen_gemm_kernel_desc_t::finalize(const char *tags) {
 
         ovr_strategy = ss.str().substr(ss.tellg()); // remaining string
         parseStrategy(ovr_strategy.c_str(), hw_, problem_, strategy_);
+
+        // TODO: override derived values in aux_params_ in a way that's
+        // consistent with the kernel evaluator (typically requires extra
+        // benchmarking data not supplied with the kernel override string)
+        // Currently: assume the W model because it's simple
+        if (strategy_.wg[LoopK] > 0) {
+            aux_params_.k0
+                    = utils::rnd_up(utils::div_up(k_, strategy_.wg[LoopK]),
+                            strategy_.unroll[LoopK]);
+            aux_params_.wgK = std::max(1,
+                    std::min(strategy_.wg[LoopK],
+                            int(utils::div_up(k_, aux_params_.k0))));
+        }
     } else {
 #endif
         strategy_.unroll[LoopM] = entry_->driverInfo.unroll[LoopM];
         strategy_.unroll[LoopN] = entry_->driverInfo.unroll[LoopN];
         parseStrategy(entry_->strategy, hw_, problem_, strategy_);
+        modifyStrategy(strategy_, aux_params_);
 #ifdef DNNL_DEV_MODE
     }
 #endif
     strategy_.panelCheck
             |= (isPacked(problem_.A.layout) || isPacked(problem_.B.layout));
     adjustStrategy(hw_, problem_, strategy_, tags);
-    modifyStrategy(strategy_, aux_params_);
 
     // Align k slice size and quantization group size
     if (strategy_.kParallelLocal) {
@@ -255,21 +279,6 @@ status_t gen_gemm_kernel_desc_t::finalize(const char *tags) {
             = std::min(strategy_.kInterleaveChunk, (int)aux_params_.k0);
     if (strategy_.kInterleave) aux_params_.wgK = strategy_.wg[LoopK];
     update_driver_info();
-
-#ifdef DNNL_DEV_MODE
-    if (!ovr_strategy.empty()) {
-        // TODO: override in a way that's consistent with the kernel evaluator
-        // (typically requires extra benchmarking data not supplied with
-        // the kernel override string)
-        // Currently: assume the W model because it's simple
-        aux_params_.k0
-                = utils::rnd_up(utils::div_up(k_, driver_info_.wg[LoopK]),
-                        driver_info_.unroll[LoopK]);
-        aux_params_.wgK = std::max(1,
-                std::min(driver_info_.wg[LoopK],
-                        int(utils::div_up(k_, aux_params_.k0))));
-    }
-#endif
 
     return status::success;
 }
@@ -607,8 +616,9 @@ status_t gen_gemm_nocopy_kernel_desc_t::select_kernel(compute::gpu_arch_t arch,
     eval_params.batch = (batch_dims > 0);
     eval_params.deterministic = (mode & mode_deterministic);
 
+    SelectionObserver observer = entryObserver;
     entry_ = select(catalog(), static_cast<int>(match_params.size()),
-            match_params.data(), eval_params, aux_params_);
+            match_params.data(), eval_params, aux_params_, &observer);
 
     if (!entry_) return status::unimplemented;
 
@@ -752,7 +762,9 @@ status_t gen_gemm_xe_systolic_kernel_desc_t::select_kernel(
     eval_params.cConvert = (acc_type != c_type);
     eval_params.batch = (batch_dims > 0);
 
-    entry_ = select(catalog(), match_params, eval_params, aux_params_);
+    SelectionObserver observer = entryObserver;
+    entry_ = select(
+            catalog(), match_params, eval_params, aux_params_, &observer);
 
     if (!entry_) return status::unimplemented;
 

@@ -90,11 +90,6 @@ struct gen_gemm_t : public gpu_gemm_t {
 
             const auto d = desc();
 
-            VDISPATCH_GEMM(IMPLICATION(utils::one_of(d->a_type(), f8_e5m2,
-                                               f8_e4m3, f4_e2m1, f4_e3m0),
-                                   arch_ >= arch_t::xe_hpc),
-                    VERBOSE_UNSUPPORTED_DT); /* temporary; pending gemmstone pulldown */
-
             CHECK(set_default_formats(false));
 
             with_sround_ = attr()->rounding_mode_.get(DNNL_ARG_DST)
@@ -110,6 +105,11 @@ struct gen_gemm_t : public gpu_gemm_t {
                     || (d->transa() == dnnl_trans));
             swap_ab_ = (d->m() == 1 && d->ldc() == 1 && check_lda)
                     || d->transc() == dnnl_trans;
+
+            // We cannot swap A/B if we don't have kernels to support the
+            // swapped data type/alignment requirements
+            swap_ab_ &= !(utils::one_of(d->a_type(), f8_e5m2, f8_e4m3)
+                    && d->b_type() == bf16);
 
             if (swap_ab_) {
                 std::swap(eff_lda_, eff_ldb_);
@@ -173,11 +173,6 @@ struct gen_gemm_t : public gpu_gemm_t {
                                                    d->b_type()),
                                        dev_info_->has_native(f64)),
                         VERBOSE_UNSUPPORTED_DT);
-                VDISPATCH_GEMM(
-                        IMPLICATION(utils::one_of(f8_e5m2, f8_e4m3, d->a_type(),
-                                            d->b_type(), d->c_type()),
-                                arch_ >= arch_t::xe_hpc),
-                        VERBOSE_ISA_DT_MISMATCH);
             }
 
             VDISPATCH_GEMM(!has_blocks(), VERBOSE_BLOCKING_FAIL, "");
@@ -325,17 +320,21 @@ struct gen_gemm_t : public gpu_gemm_t {
             CHECK(gpu_post_ops_t::make(gpu_post_ops, post_ops_, dst_md(),
                     get_post_op_specializations()));
 
-            CHECK(kernel_desc_.select_kernel(arch_, stepping,
-                    dev_info_->eu_count(), has_systolic, is_integrated, mode,
-                    batch_dims(), eff_transa(), eff_transb(), eff_trans_bias(),
-                    swap_ab(), ao_dims_, bo_dims_, asc_dims_, bsc_dims_,
-                    with_sround_, a_q2d_group_k_, b_q2d_group_k_,
-                    with_c_zero_points(), with_bias(), eff_sum_ab(), alpha(),
-                    beta(), eff_a_type(), eff_b_type(), desc()->c_type(),
-                    ao_type, bo_type, a_scales_type_, b_scales_type_, co_type,
-                    acc_type, eff_align_a(), eff_align_b(), align_c(), eff_m(),
-                    eff_n(), d->k(), eff_lda(), eff_ldb(), d->ldc(), d->batch(),
-                    std::move(gpu_post_ops)));
+            VDISPATCH_GEMM_SC(
+                    kernel_desc_.select_kernel(arch_, stepping,
+                            dev_info_->eu_count(), has_systolic, is_integrated,
+                            mode, batch_dims(), eff_transa(), eff_transb(),
+                            eff_trans_bias(), swap_ab(), ao_dims_, bo_dims_,
+                            asc_dims_, bsc_dims_, with_sround_, a_q2d_group_k_,
+                            b_q2d_group_k_, with_c_zero_points(), with_bias(),
+                            eff_sum_ab(), alpha(), beta(), eff_a_type(),
+                            eff_b_type(), desc()->c_type(), ao_type, bo_type,
+                            a_scales_type_, b_scales_type_, co_type, acc_type,
+                            eff_align_a(), eff_align_b(), align_c(), eff_m(),
+                            eff_n(), d->k(), eff_lda(), eff_ldb(), d->ldc(),
+                            d->batch(), std::move(gpu_post_ops)),
+                    VERBOSE_UNSUPPORTED_FEATURE,
+                    "matching kernel not found in catalog");
 
             // Global k-parallel kernels don't support post-ops or non-f32/s32
             //   accumulation unless fusion is enabled.
