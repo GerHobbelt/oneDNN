@@ -191,7 +191,6 @@ status_t gen_desc_t::finalize(const char *tags) {
 #endif
     strategy_.panelCheck
             |= (isPacked(problem_.A.layout) || isPacked(problem_.B.layout));
-    adjustStrategy(hw_, problem_, strategy_, tags);
 
     if (enable_generator_dsl()) { fixup_dsl_strategy(strategy_); }
 
@@ -293,6 +292,7 @@ status_t gen_desc_t::finalize(const char *tags) {
     strategy_.systolicAvailable &= !disable_systolic_;
     if (problem_.needsAGroupSums() || problem_.needsBGroupSums())
         problem_.autoTypeConversions(hw_, strategy_.systolicAvailable);
+    adjustStrategy(hw_, problem_, strategy_, tags);
     try {
         strategy_.preflight(hw_, problem_);
     } catch (...) { return status::unimplemented; }
@@ -644,18 +644,18 @@ status_t gen_nocopy_desc_t::select_kernel(compute::gpu_arch_t arch,
     bool fpmath_f16 = mode & mode_f16x1;
 
     auto add_matches = [&](MatchParams start, const char *(*match)(Type)) {
-        if (match(problem_.Ta)) {
+        if (match(problem_.Ta_ext)) {
             match_params.push_back(start);
-            match_params.back().selector.precisions[0] = match(problem_.Ta);
+            match_params.back().selector.precisions[0] = match(problem_.Ta_ext);
         }
-        if (match(problem_.Tb)) {
+        if (match(problem_.Tb_ext)) {
             match_params.push_back(start);
-            match_params.back().selector.precisions[1] = match(problem_.Tb);
+            match_params.back().selector.precisions[1] = match(problem_.Tb_ext);
         }
-        if (match(problem_.Ta) && match(problem_.Tb)) {
+        if (match(problem_.Ta_ext) && match(problem_.Tb_ext)) {
             match_params.push_back(start);
-            match_params.back().selector.precisions[0] = match(problem_.Ta);
-            match_params.back().selector.precisions[1] = match(problem_.Tb);
+            match_params.back().selector.precisions[0] = match(problem_.Ta_ext);
+            match_params.back().selector.precisions[1] = match(problem_.Tb_ext);
         }
     };
 
