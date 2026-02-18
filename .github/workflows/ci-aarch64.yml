@@ -77,9 +77,10 @@ jobs:
     runs-on: ubuntu-22.04-arm
     steps:
       - name: Checkout oneDNN
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
-            path: oneDNN
+          persist-credentials: false
+          path: oneDNN
 
       - name: Build oneDNN
         uses: ./oneDNN/.github/actions/build-onednn-aarch64
@@ -104,8 +105,9 @@ jobs:
     runs-on: ${{ matrix.config.label }}
     steps:
       - name: Checkout oneDNN
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
+          persist-credentials: false
           path: oneDNN
 
       - name: Read version file
@@ -170,8 +172,9 @@ jobs:
     runs-on: ${{ matrix.config.label }}
     steps:
       - name: Checkout oneDNN
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
+          persist-credentials: false
           path: oneDNN
 
       - name: Read version file
@@ -195,7 +198,7 @@ jobs:
           sudo apt install -y libomp-dev g++-${{ fromJson(steps.get-versions.outputs.output).dependencies.gcc }}
 
       - name: Download oneDNN
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: onednn-unit
           path: oneDNN_pkg
@@ -224,9 +227,10 @@ jobs:
     runs-on: ${{ matrix.config.label }}
     steps:
       - name: Checkout oneDNN
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
-            path: oneDNN
+          persist-credentials: false
+          path: oneDNN
 
       - name: Read version file
         id: get-versions
@@ -249,7 +253,7 @@ jobs:
             pip install scipy statistics gitpython
 
       - name: Download oneDNN base
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: onednn-perf-base
           path: oneDNN_pkg
@@ -261,7 +265,7 @@ jobs:
           patchelf --add-rpath ${{ github.workspace }}/oneDNN_base/ComputeLibrary/build ${{ github.workspace }}/oneDNN_base/oneDNN/build/src/libdnnl.so.3
 
       - name: Download oneDNN new
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: onednn-perf-new
           path: oneDNN_pkg
@@ -297,7 +301,9 @@ jobs:
     runs-on: windows-11-arm
     steps:
       - name: Checkout oneDNN
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Build Tools
         run: choco install ninja --force --limit-output --no-progress
