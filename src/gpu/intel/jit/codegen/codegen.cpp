@@ -19,15 +19,16 @@
 #pragma clang diagnostic ignored "-Wimplicit-int-conversion"
 #endif
 
-#include "gpu/intel/jit/codegen/codegen.hpp"
+#include <typeinfo>
+
 #include "gpu/intel/jit/codegen/bank_conflict_allocation.hpp"
+#include "gpu/intel/jit/codegen/codegen.hpp"
+#include "gpu/intel/jit/codegen/extensions.hpp"
 #include "gpu/intel/jit/codegen/kernel.hpp"
 #include "gpu/intel/jit/codegen/reduce.hpp"
 #include "gpu/intel/jit/codegen/register_scope.hpp"
 #include "gpu/intel/jit/codegen/reorder.hpp"
 #include "gpu/intel/jit/codegen/send.hpp"
-#include "gpu/intel/jit/eltwise_injector.hpp"
-#include "gpu/intel/jit/ir/eltwise.hpp"
 #include "gpu/intel/jit/ir/fma.hpp"
 #include "ngen.hpp"
 #ifdef WITH_SYCL_RUNTIME
@@ -60,13 +61,10 @@ inline ngen::ConditionModifier cmp_op_to_ngen(op_kind_t op_kind) {
 
 // Lowers IR to nGEN.
 template <typename ngen_generator_t>
-class ir_to_ngen_t : public ir_visitor_t {
+class ir_to_ngen_t final : public codegen_extension_iface_t,
+                           public ir_visitor_t {
 public:
-    ir_to_ngen_t(ngen_generator_t *host, const expr_binding_t &expr_binding)
-        : host_(host)
-        , expr_binding_(expr_binding)
-        , simd_size_(host->getSIMD())
-        , with_atomic_fp64_(host->hw_info().has_fp64_atomic_support()) {}
+    ir_to_ngen_t(ngen_generator_t *host) : host_(host) {}
 
     ~ir_to_ngen_t() override
 #ifdef DNNL_DEV_MODE
@@ -79,6 +77,31 @@ public:
 #else
             = default;
 #endif
+
+    host_t root_code_generator() const override {
+        return {static_cast<typename ngen_generator_t::RootCodeGenerator *>(
+                        host_),
+                typeid(typename ngen_generator_t::RootCodeGenerator),
+                host_->getHardware()};
+    }
+    const kernel::options_t &options() const override {
+        return host_->options();
+    }
+    reg_allocator_t &allocator() override { return host_->ra(); }
+
+    std::vector<ngen_operand_t> evaluate(const std::vector<expr_t> &exprs,
+            ngen_register_scope_t &scope) override {
+        expr_evaluator_t<ngen_generator_t> expr_evaluator(host_, scope);
+        return expr_evaluator.eval(exprs);
+    }
+
+    // Not currently provided via codegen_extension_iface_t due to no users
+    ngen_operand_t evaluate(const expr_t &e, ngen_register_scope_t &scope,
+            const ngen_operand_t &dst_operand = ngen_operand_t(),
+            bool fill_mask0 = false) const {
+        expr_evaluator_t<ngen_generator_t> expr_evaluator(host_, scope);
+        return expr_evaluator.eval(e, dst_operand, fill_mask0);
+    }
 
     ngen::HW hw() const { return host_->getHardware(); }
 
@@ -107,12 +130,12 @@ public:
                 auto &attr = obj.get_attr<grf_permute_attr_t>();
                 rbd.set_grf_permutation(*attr.grf_perm);
             }
-            expr_binding_.bind(obj.buf, rbd);
+            host_->expr_binding().bind(obj.buf, rbd);
         }
-        host_->comment(
-                obj.line_str() + " -> " + expr_binding_.get(obj.buf).str());
+        host_->comment(obj.line_str() + " -> "
+                + host_->expr_binding().get(obj.buf).str());
         visit(obj.body);
-        if (do_alloc) expr_binding_.unbind(obj.buf);
+        if (do_alloc) host_->expr_binding().unbind(obj.buf);
         if (use_bc_alloc) release_bank_conflict_allocation(obj);
     }
 
@@ -121,13 +144,13 @@ public:
         auto scope = register_scope();
         auto var_op = scope.alloc_reg_data(obj.var.type());
         bool dynamic_loop = !is_const(obj.init) || !is_const(obj.bound);
-        auto init_op = eval(obj.init, scope);
-        auto bound_op = eval(obj.bound, scope);
-        auto step_op = eval(obj.step, scope);
+        auto init_op = evaluate(obj.init, scope);
+        auto bound_op = evaluate(obj.bound, scope);
+        auto step_op = evaluate(obj.step, scope);
 
-        expr_binding_.bind(obj.var, var_op);
-        host_->comment(
-                obj.var.str() + " -> " + expr_binding_.get(obj.var).str());
+        host_->expr_binding().bind(obj.var, var_op);
+        host_->comment(obj.var.str() + " -> "
+                + host_->expr_binding().get(obj.var).str());
 
         host_->emov(1, var_op, init_op);
 
@@ -154,7 +177,7 @@ public:
             host_->jmpi(1 | host_->f0[0], loop_label);
         }
 
-        expr_binding_.unbind(obj.var);
+        host_->expr_binding().unbind(obj.var);
         host_->comment("end " + obj.line_str());
     }
 
@@ -164,10 +187,10 @@ public:
 
         auto &func = obj.func;
         if (func.is<dpas_t>()) {
-            auto arg_ops = eval(obj.args, scope);
+            auto arg_ops = evaluate(obj.args, scope);
             dpas(func.as<dpas_t>(), arg_ops, obj.attr);
         } else if (func.is<mad_t>()) {
-            auto arg_ops = eval(obj.args, scope);
+            auto arg_ops = evaluate(obj.args, scope);
             mad(scope, func.as<mad_t>(), arg_ops, obj.attr);
         } else if (func.is<send_t>()) {
             auto &send_func = func.as<send_t>();
@@ -176,29 +199,26 @@ public:
             // If all channels are disabled for writing, quick return.
             if (all_of(mask, expr_t(false))) {
                 if (send_func.is_load() || send_func.is_load_2d()) {
-                    auto reg_buf_op = eval(send_t::arg_reg_buf(args), scope);
+                    auto reg_buf_op
+                            = evaluate(send_t::arg_reg_buf(args), scope);
                     auto pattern_op
-                            = eval(send_t::arg_fill_pattern(args), scope);
+                            = evaluate(send_t::arg_fill_pattern(args), scope);
                     fill_buf(reg_buf_op, send_func.payload_size(), pattern_op);
                 }
                 return;
             }
             // If all channels are enabled, do not use mask.
             if (all_of(mask, expr_t(true))) mask = expr_t();
-            auto arg_ops = eval(args, scope);
+            auto arg_ops = evaluate(args, scope);
             send(scope, func.as<send_t>(), arg_ops, obj.attr);
         } else if (func.is<reorder_t>()) {
-            auto arg_ops = eval(obj.args, scope);
+            auto arg_ops = evaluate(obj.args, scope);
             gpu_assert(obj.attr.is_empty()) << "Unexpected attribute.";
             reorder(scope, func.as<reorder_t>(), arg_ops);
         } else if (func.is<reduce_t>()) {
-            auto arg_ops = eval(obj.args, scope);
+            auto arg_ops = evaluate(obj.args, scope);
             gpu_assert(obj.attr.is_empty()) << "Unexpected attribute.";
             reduce(scope, func.as<reduce_t>(), arg_ops);
-        } else if (func.is<eltwise_t>()) {
-            auto &eltwise_func = func.as<eltwise_t>();
-            auto arg_ops = eval(obj.args, scope);
-            eltwise(scope, eltwise_func, arg_ops);
         } else if (func.is_same(funcs::barrier_func())) {
             barrier(obj.attr);
         } else if (func.is_same(funcs::barrier_wait_func())) {
@@ -208,43 +228,45 @@ public:
         } else if (func.is_same(funcs::slm_fence_func())) {
             slm_fence(obj.attr);
         } else if (func.is_same(funcs::zero_out_func())) {
-            auto buf_op = eval(obj.args[0], scope);
+            auto buf_op = evaluate(obj.args[0], scope);
             fill_buf(buf_op.reg_buf_data(), to_cpp<int>(obj.args[1]));
+        } else if (options().extension_handler()) {
+            options().extension_handler()(obj, *this);
         } else {
             gpu_error_not_expected() << object_t(obj);
         }
     }
 
     void _visit(const if_t &obj) override {
-        gpu_assert(obj.cond.type().elems() == simd_size_);
+        gpu_assert(obj.cond.type().elems() == host_->getSIMD());
         host_->comment(obj.line_str());
 
         bool has_else = bool(obj.else_body);
         auto scope = register_scope();
-        auto cond_op = eval(obj.cond, scope);
+        auto cond_op = evaluate(obj.cond, scope);
 
         ngen::Label l_else;
         ngen::Label l_endif;
-        host_->if_(simd_size_ | cond_op.flag_register(),
+        host_->if_(host_->getSIMD() | cond_op.flag_register(),
                 has_else ? l_else : l_endif, l_endif);
         visit(obj.body);
         if (has_else) {
             host_->comment("else // " + obj.line_str());
-            host_->else_(simd_size_, l_endif, l_endif);
+            host_->else_(host_->getSIMD(), l_endif, l_endif);
             host_->mark(l_else);
             visit(obj.else_body);
         }
         host_->mark(l_endif);
-        host_->endif(simd_size_);
+        host_->endif(host_->getSIMD());
         host_->comment("end " + obj.line_str());
     }
 
     void _visit(const let_t &obj) override {
         if (obj.value.is_empty()) {
-            auto var_op = expr_binding_.get(obj.var);
+            auto var_op = host_->expr_binding().get(obj.var);
             host_->comment(obj.line_str() + " -> " + var_op.str());
             // External variable, must be already bound.
-            gpu_assert(expr_binding_.is_bound(obj.var))
+            gpu_assert(host_->expr_binding().is_bound(obj.var))
                     << "Variable is not defined: " << obj.var;
             visit(obj.body);
             return;
@@ -258,14 +280,15 @@ public:
             auto var_op = (var_type.is_bool())
                     ? ngen_operand_t(scope.alloc_flag(var_type.elems()))
                     : ngen_operand_t(scope.alloc_reg_data(var_type));
-            eval(obj.value, scope, ngen_operand_t(var_op, var_type.elems()));
-            expr_binding_.bind(obj.var, var_op);
+            evaluate(
+                    obj.value, scope, ngen_operand_t(var_op, var_type.elems()));
+            host_->expr_binding().bind(obj.var, var_op);
         } else {
-            auto value_op = eval(obj.value, scope);
-            expr_binding_.bind(obj.var, value_op);
+            auto value_op = evaluate(obj.value, scope);
+            host_->expr_binding().bind(obj.var, value_op);
         }
 
-        auto var_op = expr_binding_.get(obj.var);
+        auto var_op = host_->expr_binding().get(obj.var);
         host_->comment(obj.var.str() + " -> " + var_op.str());
 
         // At this point the scope contains allocations for temporary
@@ -294,15 +317,15 @@ public:
         }
 
         visit(obj.body);
-        expr_binding_.unbind(obj.var);
+        host_->expr_binding().unbind(obj.var);
     }
 
     void _visit(const store_t &obj) override {
         host_->comment(obj.line_str());
         auto scope = register_scope();
-        auto buf_op = eval(obj.buf, scope);
+        auto buf_op = evaluate(obj.buf, scope);
         auto off = to_cpp<int>(obj.off);
-        auto mask_op = eval(obj.mask, scope);
+        auto mask_op = evaluate(obj.mask, scope);
 
         auto &type = obj.value.type();
         auto base_type = type.base();
@@ -320,7 +343,8 @@ public:
         auto dst_rbd = buf_op.reg_buf_data().format(off / base_type.size(),
                 type.elems(), stride, to_ngen(base_type));
         ngen_operand_t dst(dst_rbd, mod);
-        eval(obj.value, scope, dst, obj.fill_mask0 && !mask_op.is_invalid());
+        evaluate(
+                obj.value, scope, dst, obj.fill_mask0 && !mask_op.is_invalid());
     }
 
     void _visit(const while_t &obj) override {
@@ -331,7 +355,7 @@ public:
         ngen::Label loop_begin_label;
 
         host_->mark(loop_begin_label);
-        auto cond_op = eval(obj.cond, scope);
+        auto cond_op = evaluate(obj.cond, scope);
         host_->jmpi(1 | ~cond_op.flag_register_mod(), loop_end_label);
         visit(obj.body);
         host_->jmpi(1, loop_begin_label);
@@ -753,7 +777,8 @@ private:
         }
         if ((hw() <= ngen::HW::XeLP && send_func.is_atomic())
                 || (hw() == ngen::HW::XeHPG && send_func.is_atomic()
-                        && send_func.type.is_qword() && !with_atomic_fp64_)) {
+                        && send_func.type.is_qword()
+                        && !(host_->hw_info().has_fp64_atomic_support()))) {
             send_atomic_add_emu(
                     scope, send_func, mask_op, mod, mem_off_op.reg_data(), rd);
         } else {
@@ -776,87 +801,12 @@ private:
         auto &src_op = reduce_t::arg_src_buf(args);
         auto &dst_op = reduce_t::arg_dst_buf(args);
 
-        reduce_impl_t reduce_impl(hw(), reduce_func, simd_size_);
+        reduce_impl_t reduce_impl(hw(), reduce_func, host_->getSIMD());
         reduce_impl.emit(
                 host_, scope, src_op.reg_buf_data(), dst_op.reg_buf_data());
     }
 
-    void eltwise(ngen_register_scope_t &scope, const eltwise_t &func,
-            const std::vector<ngen_operand_t> &args) {
-        int elems = to_cpp<int>(hw(), eltwise_t::arg_elems(args));
-        auto &data_op = eltwise_t::arg_data(args);
-        const auto &data_rd = data_op.reg_buf_data();
-
-        eltwise_injector_f32_t<typename ngen_generator_t::RootCodeGenerator>
-                inj(host_, func.alg_kind, func.alpha, func.beta, func.scale);
-        auto scratch = scope.alloc_range(inj.preferred_scratch_regs());
-        inj.set_scratch(scratch);
-        inj.prepare();
-
-        int grf_size = ngen::GRF::bytes(hw());
-        int f_size = sizeof(float);
-        int step = 2 * grf_size / f_size;
-
-        auto do_eltwise = [&](const reg_buf_data_t &r, const int count) {
-            if (func.alg_kind == alg_kind::eltwise_stochastic_round) {
-                gpu_assert(args.size() == 3);
-                const auto &seed = args[2].reg_buf_data();
-                inj.compute(ngen::GRFRange(r.base(), count),
-                        seed.reg_data().getBase(), seed.reg_data().getOffset(),
-                        func.dst_dt);
-            } else if (func.alg_kind == alg_kind::eltwise_mx_scale) {
-                gpu_assert(args.size() == 3);
-                const auto &scales_dst = args[2].reg_buf_data();
-                inj.compute(ngen::GRFRange(r.base(), count),
-                        scales_dst.reg_data().getBase(),
-                        scales_dst.reg_data().getOffset(), func.dst_dt);
-            } else {
-                inj.compute(ngen::GRFRange(r.base(), count));
-            }
-        };
-        for (int i = 0; i < elems; i += step) {
-            ngen_register_scope_t i_scope(scope.register_allocator());
-            step = std::min(step, elems - i);
-            step = utils::rnd_down_pow2(step);
-            int cur_elems = step;
-            auto rd = data_rd.format(i, ngen::DataType::f);
-            // Use temporary storage when needed to ensure:
-            // - Eltwise is applied to full register
-            // - Data is aligned to GRF boundary
-            if ((cur_elems * f_size) % grf_size != 0 || rd.byte_offset() != 0) {
-                int full_elems
-                        = utils::rnd_up(cur_elems * f_size, grf_size) / f_size;
-                auto tmp = i_scope.alloc_reg_data(type_t::f32(full_elems));
-                emit_reorder_1d_tile(host_, i_scope, cur_elems, rd, 1, tmp, 1);
-                do_eltwise(tmp, full_elems * f_size / grf_size);
-                emit_reorder_1d_tile(host_, i_scope, cur_elems, tmp, 1, rd, 1);
-            } else {
-                do_eltwise(rd, cur_elems * f_size / grf_size);
-            }
-        }
-    }
-
-protected:
-    ngen_operand_t eval(const expr_t &e, ngen_register_scope_t &scope,
-            const ngen_operand_t &dst_operand = ngen_operand_t(),
-            bool fill_mask0 = false) const {
-        expr_evaluator_t<ngen_generator_t> expr_evaluator(
-                host_, expr_binding_, scope);
-        return expr_evaluator.eval(e, dst_operand, fill_mask0);
-    }
-
-    std::vector<ngen_operand_t> eval(const std::vector<expr_t> &exprs,
-            ngen_register_scope_t &scope) const {
-        expr_evaluator_t<ngen_generator_t> expr_evaluator(
-                host_, expr_binding_, scope);
-        return expr_evaluator.eval(exprs);
-    }
-
-private:
     ngen_generator_t *host_;
-    expr_binding_t expr_binding_;
-    int simd_size_;
-    bool with_atomic_fp64_;
 
 #ifdef DNNL_DEV_MODE
     int bank_conflicts_ = 0;
@@ -873,9 +823,8 @@ private:
 template <typename ngen_generator_t>
 class expr_evaluator_t : public ir_visitor_t {
 public:
-    expr_evaluator_t(ngen_generator_t *host, const expr_binding_t &expr_binding,
-            ngen_register_scope_t &scope)
-        : host_(host), expr_binding_(expr_binding), scope_(scope) {}
+    expr_evaluator_t(ngen_generator_t *host, ngen_register_scope_t &scope)
+        : host_(host), expr_binding_(host->expr_binding()), scope_(scope) {}
 
     constexpr ngen::HW hw() const { return host_->getHardware(); }
 
@@ -1663,57 +1612,36 @@ setup_flags_t get_setup_flags(const stmt_t &s) {
     return visitor.flags;
 }
 
+// This interface is relied on by the oneDNN ir_kernel_t extensions. Do not
+// modify without propagating this change.
 template <typename GeneratorT>
 void convert_ir_to_ngen(const stmt_t &body, GeneratorT &host,
         const walk_order_t *kernel_grid_walk_order = nullptr) {
-    expr_binding_t expr_binding(host.getHardware());
     host.comment("Prologue");
     host.generate_prologue();
 
-    host.bind_external_vars(body, expr_binding, kernel_grid_walk_order);
+    host.bind_external_vars(body, kernel_grid_walk_order);
     if (kernel_grid_walk_order)
-        host.bind_kernel_grid_walk_order(*kernel_grid_walk_order, expr_binding);
+        host.bind_kernel_grid_walk_order(*kernel_grid_walk_order);
 
     host.comment("IR");
-    ir_to_ngen_t<GeneratorT> visitor(&host, expr_binding);
+    ir_to_ngen_t<GeneratorT> visitor(&host);
     visitor.visit(body);
 
     host.comment("Epilogue");
     host.generate_epilogue();
 }
 
-template <typename GeneratorT>
-std::string get_ngen_str(const stmt_t &body, GeneratorT *host,
-        const walk_order_t *kernel_grid_walk_order) {
 #ifdef NGEN_ASM
-    ir_to_ngen_generator_t<ngen_asm_code_generator_with_interface_t> host_asm(
-            host->kernel_iface(), host->options(), {});
-    host_asm.set_interface(host->getInterface());
-
-    try {
-        convert_ir_to_ngen(body, host_asm, kernel_grid_walk_order);
-        return host_asm.str();
-    } catch (std::runtime_error &e) {
-        return "IR to nGEN Exception: " + std::string(e.what());
-    }
-#else
-    return "";
+template void convert_ir_to_ngen<ir_asm_generator_t>(const stmt_t &body,
+        ir_asm_generator_t &host, const walk_order_t *kernel_grid_walk_order);
 #endif
-}
 
-template <typename GeneratorT>
-void generate_from_ir(const stmt_t &kernel_body, GeneratorT *host,
-        const walk_order_t *kernel_grid_walk_order, int &peak_regs) {
-    gpu_trace() << get_ngen_str(kernel_body, host, kernel_grid_walk_order);
-    convert_ir_to_ngen(kernel_body, *host, kernel_grid_walk_order);
-#ifdef DNNL_DEV_MODE
-    peak_regs = host->ra().get_peak_regs();
-#endif
-}
-
+// This interface is relied on by the oneDNN ir_kernel_t extensions. Do not
+// modify without propagating this change.
 ngen::NEOInterfaceHandler generate_ngen_interface(
         const kernel::iface_t &kernel_iface, const kernel::options_t &options,
-        bool require_dpas, const stmt_t &kernel_body) {
+        const stmt_t &kernel_body) {
 
     ngen::NEOInterfaceHandler interface(options.hw());
     interface.externalName(kernel_iface.kernel_name());
@@ -1725,7 +1653,7 @@ ngen::NEOInterfaceHandler generate_ngen_interface(
     auto setup_flags = get_setup_flags(kernel_body);
 
     // Allow dpas override to avoid context switch overhead on XeHPG
-    if (setup_flags.has_dpas || require_dpas) interface.requireDPAS();
+    if (setup_flags.has_dpas || options.require_dpas()) interface.requireDPAS();
     if (setup_flags.has_send_atomics) interface.requireGlobalAtomics();
 
     for (size_t i = 0; i < kernel_iface.nargs(); i++) {
@@ -1746,52 +1674,41 @@ ngen::NEOInterfaceHandler generate_ngen_interface(
     return interface;
 }
 
-void ir_kernel_t::generate_from_ir(
-        const stmt_t &kernel_body, const walk_order_t *kernel_grid_walk_order) {
-    gpu_assert(!generator_)
-            << "ir_kernel_t::generate_from_ir() was called already.";
-
-    ngen::NEOInterfaceHandler interface = generate_ngen_interface(
-            kernel_iface_, options_, require_dpas_, kernel_body);
-
-    if (local_range_) {
-        size_t max_slm_size = compute::device_info_t::max_slm_size_per_tg(
-                convert_ngen_arch_to_dnnl(options_.hw()), thread_group_size(),
-                options_.regs() > 128);
-        if (interface.getSLMSize() > max_slm_size) {
-            gpu_trace() << "SLM size limit exceeded: " << interface.getSLMSize()
-                        << " > " << max_slm_size;
-            gpu_except_not_implemented("SLM size limit is exceeded.");
-        }
-    }
-
-#define GPU_HW_CASE(hw) \
-    using gen_type = ir_to_ngen_generator_t<generator_t<(hw)>>; \
-    generator_ = utils::make_unique<gen_type>( \
-            kernel_iface_, options_, debug_config_); \
-    auto *gen = static_cast<gen_type *>(generator_.get()); \
-    gen->setInterface(generate_ngen_interface( \
-            kernel_iface_, options_, require_dpas_, kernel_body)); \
-    if (force_emulate64_) gen->force_emulate64(); \
-    jit::generate_from_ir(kernel_body, gen, kernel_grid_walk_order, peak_regs_);
-
-    GPU_HW_SWITCH(options_.hw().ngen_hw());
-
-#undef GPU_HW_CASE
-}
-
 #ifdef WITH_SYCL_RUNTIME
-::sycl::kernel make_kernel(const kernel::iface_t &iface, const stmt_t &body,
-        const kernel::options_t &options, const ngen::DebugConfig &debug_cfg,
-        ::sycl::context ctx, ::sycl::device dev) {
+template <ngen::HW hw>
+using sycl_gen_t = ir_to_ngen_generator_t<ngen::SYCLCodeGenerator<hw>>;
+REG_XELP_ISA(template void convert_ir_to_ngen<sycl_gen_t<ngen::HW::XeLP>>(
+        const stmt_t &body, sycl_gen_t<ngen::HW::XeLP> &host,
+        const walk_order_t *kernel_grid_walk_order));
+REG_XEHP_ISA(template void convert_ir_to_ngen<sycl_gen_t<ngen::HW::XeHP>>(
+        const stmt_t &body, sycl_gen_t<ngen::HW::XeHP> &host,
+        const walk_order_t *kernel_grid_walk_order));
+REG_XEHPG_ISA(template void convert_ir_to_ngen<sycl_gen_t<ngen::HW::XeHPG>>(
+        const stmt_t &body, sycl_gen_t<ngen::HW::XeHPG> &host,
+        const walk_order_t *kernel_grid_walk_order));
+REG_XEHPC_ISA(template void convert_ir_to_ngen<sycl_gen_t<ngen::HW::XeHPC>>(
+        const stmt_t &body, sycl_gen_t<ngen::HW::XeHPC> &host,
+        const walk_order_t *kernel_grid_walk_order));
+REG_XE2_ISA(template void convert_ir_to_ngen<sycl_gen_t<ngen::HW::Xe2>>(
+        const stmt_t &body, sycl_gen_t<ngen::HW::Xe2> &host,
+        const walk_order_t *kernel_grid_walk_order));
+REG_XE3_ISA(template void convert_ir_to_ngen<sycl_gen_t<ngen::HW::Xe3>>(
+        const stmt_t &body, sycl_gen_t<ngen::HW::Xe3> &host,
+        const walk_order_t *kernel_grid_walk_order));
+
+::sycl::kernel make_kernel(
+        const kernel_t &ir_kernel, ::sycl::context ctx, ::sycl::device dev) {
+    auto &iface = ir_kernel.iface;
+    auto &options = ir_kernel.options;
+    auto &body = ir_kernel.body;
+    auto &debug_cfg = ir_kernel.debug_cfg;
 
     ngen::NEOInterfaceHandler interface = generate_ngen_interface(
-            iface, options, false, body);
+            iface, options, body);
     std::optional<::sycl::kernel> kernel;
 
 #define GPU_HW_CASE(hw) \
-    ir_to_ngen_generator_t<ngen::SYCLCodeGenerator<(hw)>> g( \
-            iface, options, debug_cfg); \
+    sycl_gen_t<(hw)> g(iface, options, debug_cfg); \
     g.setInterface(interface); \
     convert_ir_to_ngen(body, g); \
     kernel = g.getKernel(ctx, dev); \
@@ -1803,15 +1720,39 @@ void ir_kernel_t::generate_from_ir(
 }
 #endif
 #ifdef WITH_OPENCL_RUNTIME
-cl_kernel make_kernel(const kernel::iface_t &iface, const stmt_t &body,
-        const kernel::options_t &options, const ngen::DebugConfig &debug_cfg,
-        cl_context ctx, cl_device_id dev) {
+template <ngen::HW hw>
+using ocl_gen_t = ir_to_ngen_generator_t<ngen::OpenCLCodeGenerator<hw>>;
+REG_XELP_ISA(template void convert_ir_to_ngen<ocl_gen_t<ngen::HW::XeLP>>(
+        const stmt_t &body, ocl_gen_t<ngen::HW::XeLP> &host,
+        const walk_order_t *kernel_grid_walk_order));
+REG_XEHP_ISA(template void convert_ir_to_ngen<ocl_gen_t<ngen::HW::XeHP>>(
+        const stmt_t &body, ocl_gen_t<ngen::HW::XeHP> &host,
+        const walk_order_t *kernel_grid_walk_order));
+REG_XEHPG_ISA(template void convert_ir_to_ngen<ocl_gen_t<ngen::HW::XeHPG>>(
+        const stmt_t &body, ocl_gen_t<ngen::HW::XeHPG> &host,
+        const walk_order_t *kernel_grid_walk_order));
+REG_XEHPC_ISA(template void convert_ir_to_ngen<ocl_gen_t<ngen::HW::XeHPC>>(
+        const stmt_t &body, ocl_gen_t<ngen::HW::XeHPC> &host,
+        const walk_order_t *kernel_grid_walk_order));
+REG_XE2_ISA(template void convert_ir_to_ngen<ocl_gen_t<ngen::HW::Xe2>>(
+        const stmt_t &body, ocl_gen_t<ngen::HW::Xe2> &host,
+        const walk_order_t *kernel_grid_walk_order));
+REG_XE3_ISA(template void convert_ir_to_ngen<ocl_gen_t<ngen::HW::Xe3>>(
+        const stmt_t &body, ocl_gen_t<ngen::HW::Xe3> &host,
+        const walk_order_t *kernel_grid_walk_order));
+
+cl_kernel make_kernel(
+        const kernel_t &ir_kernel, cl_context ctx, cl_device_id dev) {
+    auto &iface = ir_kernel.iface;
+    auto &options = ir_kernel.options;
+    auto &body = ir_kernel.body;
+    auto &debug_cfg = ir_kernel.debug_cfg;
+
     ngen::NEOInterfaceHandler interface = generate_ngen_interface(
-            iface, options, false, body);
+            iface, options, body);
 
 #define GPU_HW_CASE(hw) \
-    ir_to_ngen_generator_t<ngen::OpenCLCodeGenerator<(hw)>> g( \
-            iface, options, debug_cfg); \
+    ocl_gen_t<(hw)> g(iface, options, debug_cfg); \
     g.setInterface(std::move(interface)); \
     convert_ir_to_ngen(body, g); \
     return g.getKernel(ctx, dev);

@@ -848,17 +848,12 @@ status_t jit_avx512_core_amx_convolution_bwd_data_t::execute_backward(
     const memory_desc_wrapper diff_dst_d(pd()->diff_dst_md());
     const memory_desc_wrapper weights_d(pd()->weights_md(0));
 
-    // unused in kernel for bf16, but attributes have scales buffer by default
-    // and using it here simplifies the shared `execute_backward_loop`.
-    DEFINE_ARG_SCALES_BUFFER(src_scales, DNNL_ARG_SRC);
-    DEFINE_ARG_SCALES_BUFFER(wei_scales, DNNL_ARG_WEIGHTS);
-    DEFINE_ARG_SCALES_BUFFER(dst_scales, DNNL_ARG_DST);
-
-    const int wei_scale_mask = pd()->attr()->scales_.get_mask(DNNL_ARG_WEIGHTS);
-    const float *oscales = scale_utils::precompute_scales(
-            ctx.get_scratchpad_grantor(), src_scales, wei_scales, pd()->IC(),
-            pd()->OC(), false, wei_scale_mask > 0, pd()->attr(),
-            jit_scale_precompute_.get());
+    const void *src_scales
+            = CTX_IN_MEM(const void *, DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC);
+    const void *wei_scales
+            = CTX_IN_MEM(const void *, DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS);
+    const void *dst_scales
+            = CTX_IN_MEM(const void *, DNNL_ARG_ATTR_SCALES | DNNL_ARG_DST);
 
     const auto &jcp = pd()->jcp_;
     assert(jcp.nb_ic % jcp.nb_ic_blocking == 0);
@@ -875,7 +870,7 @@ status_t jit_avx512_core_amx_convolution_bwd_data_t::execute_backward(
             key_conv_amx_inp_buffer);
     auto wsp = ctx.get_scratchpad_grantor().template get<int32_t>(
             key_conv_amx_wsp_buffer);
-    auto tcfg = ctx.get_scratchpad_grantor().template get<char>(
+    auto global_tcfg = ctx.get_scratchpad_grantor().template get<char>(
             key_conv_amx_tilecfg);
 
     const int ic_chunks = jcp.nb_ic / jcp.nb_ic_blocking;
@@ -883,9 +878,6 @@ status_t jit_avx512_core_amx_convolution_bwd_data_t::execute_backward(
     const int work_amount
             = jcp.mb * jcp.ngroups * jcp.id * ih_chunks * jcp.nb_iw * ic_chunks;
 
-    // Initialize the tile configuration in memory, so that each thread can
-    // load this configuration from memory via `amx_tile_configure(tcfg)`.
-    if (tcfg) kernel_->tile_configure(tcfg);
     const bool is_1d = jcp.ndims == 3;
     const bool is_3d = jcp.ndims == 5;
 
@@ -894,8 +886,23 @@ status_t jit_avx512_core_amx_convolution_bwd_data_t::execute_backward(
         balance211(work_amount, nthr, ithr, start, end);
 
         auto p = jit_conv_args_t();
+
+        char *const __restrict tcfg = global_tcfg + ithr * AMX_PALETTE_SIZE;
+        kernel_->tile_configure(tcfg);
         amx_tile_configure(tcfg);
+
         amx_utils::spatial_features_3d_t sfd(jcp);
+
+        float *dst_scales_inv_ptr = nullptr;
+        if (jcp.with_dst_scales) {
+            const float *dst_scales_ptr
+                    = static_cast<const float *>(dst_scales);
+            dst_scales_inv_ptr
+                    = ctx.get_scratchpad_grantor().template get<float>(
+                              key_conv_dst_scales)
+                    + ithr;
+            dst_scales_inv_ptr[0] = 1.f / dst_scales_ptr[0];
+        }
 
         int mb {0}, g {0}, id_s {0}, ihc {0}, iwb {0}, icc {0};
         nd_iterator_init(start, mb, jcp.mb, g, jcp.ngroups, id_s, jcp.id, ihc,
@@ -1000,8 +1007,12 @@ status_t jit_avx512_core_amx_convolution_bwd_data_t::execute_backward(
                                 * (g * wei_g_shift + icc * wei_ic_shift
                                         + d_lo * wht_d_stride);
                 p.bias = nullptr;
-                p.scales = &oscales[jcp.is_ic_scale * ic];
-                p.dst_scale = &dst_scales[0];
+                p.src_scales = src_scales;
+                p.wei_scales = jcp.with_wei_scales
+                        ? static_cast<const float *>(wei_scales)
+                                + jcp.is_ic_scale * ic
+                        : nullptr;
+                p.dst_scales = dst_scales_inv_ptr;
                 p.acc_s32 = wsp + ithr * jcp.wsp_buffer_size;
                 p.last_h = (ih + ih_step <= ih_e);
                 p.iwb = iwb;
@@ -2165,15 +2176,16 @@ void jit_avx512_core_amx_convolution_bwd_weights_t::execute_backward_weights(
         const exec_ctx_t &ctx) const {
     prepare_scratchpad_data(ctx);
 
-    auto tcfg = ctx.get_scratchpad_grantor().template get<char>(
+    auto global_tcfg = ctx.get_scratchpad_grantor().template get<char>(
             key_conv_amx_tilecfg);
-    kernel_->tile_configure(tcfg);
 
     const auto &jcp = pd()->jcp_;
     parallel(nthr_, [&](const int ithr, const int nthr) {
         assert(nthr_ == nthr);
         assert(utils::one_of(pd()->ndims(), 3, 4, 5));
 
+        char *const __restrict tcfg = global_tcfg + ithr * AMX_PALETTE_SIZE;
+        kernel_->tile_configure(tcfg);
         amx_tile_configure(tcfg);
 
         thread_info_t thread_info(this, ctx, ithr);

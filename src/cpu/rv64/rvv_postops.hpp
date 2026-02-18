@@ -1,5 +1,6 @@
 /*******************************************************************************
 * Copyright 2019 Intel Corporation
+* Copyright 2025 ZTE Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -85,6 +86,8 @@ struct rvv_postops_t {
 
         return status::success;
     }
+
+    explicit rvv_postops_t(alg_kind_t alg) : alg_(alg) {}
 
     static bool post_ops_ok(const post_ops_t &po) {
         if (po.len() == 0) return true;
