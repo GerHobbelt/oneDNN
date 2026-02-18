@@ -77,7 +77,7 @@ jobs:
     runs-on: ubuntu-22.04-arm
     steps:
       - name: Checkout oneDNN
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
           path: oneDNN
@@ -105,7 +105,7 @@ jobs:
     runs-on: ${{ matrix.config.label }}
     steps:
       - name: Checkout oneDNN
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
           path: oneDNN
@@ -138,7 +138,7 @@ jobs:
 
       - if: ${{ (contains(matrix.config.label,'ubuntu') && (matrix.config.toolset == 'clang')) }}
         name: Install clang
-        uses: KyleMayes/install-llvm-action@98e68e10c96dffcb7bfed8b2144541a66b49aa02 # v2.0.8
+        uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2.0.9
         with:
           version: ${{ fromJson(steps.get-versions.outputs.output).dependencies.clang }}
 
@@ -172,7 +172,7 @@ jobs:
     runs-on: ${{ matrix.config.label }}
     steps:
       - name: Checkout oneDNN
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
           path: oneDNN
@@ -227,7 +227,7 @@ jobs:
     runs-on: ${{ matrix.config.label }}
     steps:
       - name: Checkout oneDNN
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
           path: oneDNN
@@ -301,7 +301,7 @@ jobs:
     runs-on: windows-11-arm
     steps:
       - name: Checkout oneDNN
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 

@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "common/c_types_map.hpp"
+#include "gemmstone/problem.hpp"
 #include "gpu/intel/gemm/config.hpp"
 #include "gpu/intel/post_ops.hpp"
 #include "gpu/intel/primitive_conf.hpp"
@@ -47,8 +48,30 @@ struct quant_params {
     bool zp_host_scalar = false;
 };
 
+status_t transfer_post_ops(gemmstone::GEMMProblem &problem,
+        gpu_post_ops_t &&post_ops_, bool swap_ab);
+
 struct pd_t : public gemm::pd_t {
     using gemm::pd_t::pd_t;
+
+    // Assumes desc() was already initialized with default formats
+    status_t init(impl::engine_t *engine) {
+
+        with_sround_ = attr()->rounding_mode_.get(DNNL_ARG_DST)
+                == rounding_mode::stochastic;
+
+        eff_lda_ = desc()->lda();
+        eff_ldb_ = desc()->ldb();
+        eff_transa_ = desc()->transa() == dnnl_trans;
+        eff_transb_ = desc()->transb() == dnnl_trans;
+
+        VDISPATCH_GEMM_SC(init_attrs(), VERBOSE_UNSUPPORTED_TAG);
+        VDISPATCH_GEMM(scales_ok(), VERBOSE_UNSUPPORTED_SCALES_CFG);
+        VDISPATCH_GEMM(zp_ok(), VERBOSE_UNSUPPORTED_ZP_CFG);
+        VDISPATCH_GEMM(gs_ok(), VERBOSE_UNSUPPORTED_PR_CFG);
+        VDISPATCH_GEMM_SC(init_post_ops(), VERBOSE_UNSUPPORTED_POSTOP);
+        return status::success;
+    }
 
     struct binary_src_t {
         enum type_t { none, scales, bias, binary, prelu } type;
@@ -84,6 +107,9 @@ struct pd_t : public gemm::pd_t {
         return binary_srcs_;
     }
     bool valid_2d_mask(int mask, int ndims, bool per_tensor_ok = true);
+
+    status_t init_GEMMProblem(gemmstone::GEMMProblem &problem,
+            const intel::engine_t *engine) const;
 
     float beta_ = 0.0f;
 
