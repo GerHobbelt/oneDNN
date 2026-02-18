@@ -27,7 +27,6 @@
 #include "common/c_types_map.hpp"
 #include "common/float16.hpp"
 #include "common/math_utils.hpp"
-#include "gpu/intel/jit/codegen/register_allocator.hpp"
 #include "gpu/intel/jit/ir/include/ir.hpp"
 #include "gpu/intel/jit/utils/utils.hpp"
 
@@ -86,25 +85,15 @@
         return args[index]; \
     }
 
-#if defined(__GNUC__)
-// clang-format off
-// Defines dump() method for debugging purposes, to pretty print the object.
-#define IR_DEFINE_DUMP() \
-    __attribute__((noinline)) \
-    __attribute__((used)) \
-    void dump() const { \
-        printf("%s\n", str().c_str()); \
-    }
-// clang-format on
-#else
-#define IR_DEFINE_DUMP()
-#endif
-
 namespace dnnl {
 namespace impl {
 namespace gpu {
 namespace intel {
 namespace jit {
+
+namespace dsl {
+bool is_subset(const type_t &a, const type_t &b);
+}
 
 template <typename T>
 type_t from_cpp() {
@@ -132,8 +121,6 @@ template <typename T>
 bool is_cpp(const type_t &t) {
     return t == from_cpp<T>();
 }
-
-bool is_subset(const type_t &a, const type_t &b);
 
 // clang-tidy doesn't like the semicolon next to the class name.
 #define CLASS_DECLARATION(name) class name
@@ -288,15 +275,6 @@ inline const type_t &expr_t::type() const {
 inline bool is_var(const expr_t &e);
 inline bool is_ref(const expr_t &e);
 inline bool all_of(const expr_t &e, const expr_t &value);
-inline bool is_zero(const expr_t &e) {
-    return is_const(e, 0);
-}
-inline bool is_one(const expr_t &e) {
-    return is_const(e, 1);
-}
-inline bool is_minus_one(const expr_t &e) {
-    return is_const(e, -1);
-}
 
 // Unary and binary operators.
 enum class op_kind_t {
@@ -1249,12 +1227,6 @@ public:
         return attrs[0].as<T>();
     }
 
-    int register_alloc_size(int grf_size) const {
-        return (kind == alloc_kind_t::grf)
-                ? into<int>(utils::rnd_up(size, grf_size))
-                : 0;
-    }
-
     std::string line_str() const {
         ostringstream_t out;
         out << "alloc " << buf.as<var_t>().name << "[" << size << "]";
@@ -1507,13 +1479,6 @@ public:
     size_t get_hash() const override {
         return ir_utils::get_hash(var, value, body);
     }
-
-    int register_alloc_size() const {
-        // Empty objects are allocated in reserved space
-        // nGEN only claims subregisters at dword granularity
-        if (value.is_empty()) return 0;
-        return utils::rnd_up(var.type().size(), reg_allocator_t::granularity);
-    };
 
     std::string line_str() const {
         ostringstream_t out;

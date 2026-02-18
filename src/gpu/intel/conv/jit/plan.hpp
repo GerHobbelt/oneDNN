@@ -56,7 +56,7 @@ struct reorder_plan_t : public base_plan_t {
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 };
 
 struct reduce_plan_t : public base_plan_t {
@@ -80,7 +80,7 @@ struct reduce_plan_t : public base_plan_t {
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 };
 
 struct slm_plan_t : public base_plan_t {
@@ -108,7 +108,7 @@ struct slm_plan_t : public base_plan_t {
     }
     std::string str() const;
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 };
 
 struct prefetch_plan_t : public base_plan_t {
@@ -127,7 +127,7 @@ struct prefetch_plan_t : public base_plan_t {
     int estimate_regs(bool reuse_headers) const;
     std::string str() const;
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 };
 
 struct x2r_plan_t : public base_plan_t {
@@ -165,7 +165,7 @@ struct x2r_plan_t : public base_plan_t {
     int estimate_regs(bool reuse_headers) const;
     std::string str() const;
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 };
 
 struct fma_plan_t : public base_plan_t {
@@ -201,17 +201,19 @@ struct fma_plan_t : public base_plan_t {
     int bmnk_start_idx(bmnk_kind_t bmnk, int subtile_idx) const;
     int bmnk_stop_idx(bmnk_kind_t bmnk, int subtile_idx) const;
 
-    std::vector<func_t> create_fma_funcs(const hw_t &hw) const;
+    std::vector<func_t> create_fma_funcs(
+            const hw_t &hw, type_t a_override, type_t b_override) const;
     static stmt_t create_fma_block(const std::vector<func_t> &fmas,
             const expr_t &a, const expr_t &b, const expr_t &c);
     stmt_t create_stmt(ir_context_t &ir_ctx, buffer_manager_t &buf_mgr,
             const std::string &a, const std::string &b, const std::string &c,
-            int subtile_idx) const;
+            int subtile_idx, dsl::type_t a_override = dsl::type_t::undef(),
+            dsl::type_t b_override = dsl::type_t::undef()) const;
 
     int estimate_regs() const;
     std::string str() const;
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 };
 
 struct plan_t : public base_plan_t {
@@ -251,7 +253,7 @@ struct plan_t : public base_plan_t {
     void reset();
     std::string str() const;
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 };
 
 class config_t;

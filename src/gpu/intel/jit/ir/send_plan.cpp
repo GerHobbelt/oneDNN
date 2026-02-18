@@ -175,7 +175,7 @@ public:
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 
 private:
     std::vector<int64_t> vec_;
@@ -236,7 +236,7 @@ public:
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 
 private:
     std::vector<vec_off_t> vec_;
@@ -360,7 +360,7 @@ public:
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 
 private:
     static int to_lg2(int64_t v) {
@@ -464,7 +464,7 @@ public:
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 
 private:
     static modulus_t to_base(const tdim_t &tdim,
@@ -595,7 +595,7 @@ public:
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 
 private:
     // Mask in the general form:
@@ -783,7 +783,7 @@ struct send_2d_params_t {
     }
 
     layout_t reg_layout(
-            int grf_size, size_t ndims, const type_t &mem_type) const {
+            int grf_size, size_t ndims, const dsl::type_t &mem_type) const {
         layout_t l(type, std::vector<dim_t>(ndims, 1));
         dim_t cur_stride = 1;
         enum class pad_kind_t {
@@ -850,11 +850,11 @@ struct send_2d_params_t {
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 
     bool is_valid = false;
     send_op_t send_op = send_op_t::undef;
-    type_t type;
+    dsl::type_t type;
     bool use_xy = true;
     bool transpose = false;
     bool vnni = false;
@@ -883,7 +883,7 @@ struct send_block_t {
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 
     int64_t addr_inc = 0;
     int64_t x_inc = 0;
@@ -924,7 +924,7 @@ int get_max_block_size(const hw_t &hw, const send_params_t &params) {
 class split_bounds_t {
 public:
     split_bounds_t(const layout_t &layout, int factor) {
-        gpu_assert(is_zero(layout.offset())) << layout;
+        gpu_assert(layout.offset().is(0)) << layout;
         auto tile_coord = split_exact(layout, factor);
         if (tile_coord.is_invalid()) return;
 
@@ -1060,7 +1060,7 @@ struct send_group_t {
                 cur_size = std::min(cur_size, type_size - i);
                 cur_size = utils::rnd_down_pow2(cur_size);
                 gpu_assert(cur_size >= 16);
-                auto type = type_t::oword(cur_size / 16);
+                auto type = dsl::type_t::oword(cur_size / 16);
                 type = fixup_type(type, send_params);
                 auto f = send_t::make(hw, send_params.send_op,
                         send_params.send_address, type, 1,
@@ -1070,7 +1070,7 @@ struct send_group_t {
             }
         } else if (is_scattered()) {
             int cur_slots = max_slots;
-            auto type = type_t::u(type_size * 8);
+            auto type = dsl::type_t::u(type_size * 8);
             for (int i = 0; i < slots; i += cur_slots) {
                 cur_slots = std::min(cur_slots, slots - i);
                 uint32_t slot_mask = send_t::default_slot_mask;
@@ -1128,18 +1128,19 @@ struct send_group_t {
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 
-    type_t fixup_type(
-            const type_t &type, const send_params_t &send_params) const {
+    dsl::type_t fixup_type(
+            const dsl::type_t &type, const send_params_t &send_params) const {
         if (hw >= ngen::HW::XeHPC) return type;
 
         bool is_slm = (send_params.send_address == send_address_t::slm);
         bool is_atomic = (send_params.send_op == send_op_t::atomic_fadd);
-        if (!is_slm && type == type_t::oword(16)) return type_t::hword(8);
-        if (is_atomic && type.size() == 4) return type_t::dword();
-        if (type.size() <= 4) return type_t::byte(type.size());
-        if (type.size() == 8) return type_t::qword();
+        if (!is_slm && type == dsl::type_t::oword(16))
+            return dsl::type_t::hword(8);
+        if (is_atomic && type.size() == 4) return dsl::type_t::dword();
+        if (type.size() <= 4) return dsl::type_t::byte(type.size());
+        if (type.size() == 8) return dsl::type_t::qword();
 
         return type;
     }
@@ -1412,8 +1413,8 @@ private:
         mod_info_ = mod_info_t(view_, tdims_);
         std::vector<modulus_t> vmods(view_.nvdims());
         for (dim_idx_t i = 0; i < view_.nvdims(); i++)
-            vmods[i] = modulus_t(
-                    is_zero(view_.vstart()[i]) ? 0 : view_.vdims()[i]);
+            vmods[i]
+                    = modulus_t(view_.vstart()[i].is(0) ? 0 : view_.vdims()[i]);
         mod_info_.set_vmods(vmods);
     }
 
@@ -1453,7 +1454,7 @@ private:
             return;
         }
         vlayout_ = split_layout_inner(vlayout_, inner_idx_);
-        const type_t &type = vlayout_.type();
+        const dsl::type_t &type = vlayout_.type();
         int inner_elems = 1;
         int total_elems = into<int>(vlayout_.elems());
         auto &blocks = vlayout_.blocks();
@@ -1521,7 +1522,7 @@ private:
         }
         gpu_assert(send_kind_ == send_kind_t::scattered);
 
-        const type_t &type = layout.type();
+        const dsl::type_t &type = layout.type();
         int inner_elems = 1;
         int total_elems = into<int>(vlayout_.elems());
 
@@ -2140,7 +2141,7 @@ public:
         return expr_t();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 
 private:
     const layout_t &message_layout() const override { return message_layout_; }
@@ -2329,8 +2330,10 @@ public:
             send_params_t &send_params)
         : send_params_(send_params)
         , ir_ctx_(options, cset_)
-        , dummy_mem_buf_(var_t::make(type_t::byte(type::attr_t::ptr), "mem"))
-        , dummy_reg_buf_(var_t::make(type_t::byte(type::attr_t::ptr), "reg"))
+        , dummy_mem_buf_(
+                  var_t::make(dsl::type_t::byte(dsl::type::attr_t::ptr), "mem"))
+        , dummy_reg_buf_(
+                  var_t::make(dsl::type_t::byte(dsl::type::attr_t::ptr), "reg"))
         , access_(make_access_builder(
                   ir_ctx_, view, dummy_mem_buf_, dummy_reg_buf_, send_params))
         , reg_layout_(access_.reg_layout()) {
@@ -2767,7 +2770,7 @@ send_plan_t create_send_plan(const kernel::options_t &options,
         auto &last = reg_layout.blocks().back();
         stride = (dim_t)last.stride * last.size;
     }
-    const type_t &type = reg_layout.type();
+    const dsl::type_t &type = reg_layout.type();
     stride = utils::rnd_up(
             stride, base_group.pad_bytes * type.packing() / type.size());
     for (size_t i = outer_idx; i < blocks.size(); i++) {

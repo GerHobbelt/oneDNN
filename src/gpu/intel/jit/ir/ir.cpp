@@ -22,6 +22,7 @@
 
 #include "common/math_utils.hpp"
 #include "common/optional.hpp"
+#include "gpu/intel/jit/codegen/allocation_size.hpp"
 #include "gpu/intel/jit/ir/core.hpp"
 #include "gpu/intel/jit/pass/simplify.hpp"
 
@@ -47,7 +48,7 @@ public:
 
     void _visit(const alloc_t &obj) override {
         auto grf_size = 1; // Assume all objects are grf aligned
-        auto guard = mem_usage_guard(obj.register_alloc_size(grf_size));
+        auto guard = mem_usage_guard(register_alloc_size(obj, grf_size));
         print_indent();
         out_ << obj.line_str() << "(mem_usage: " << mem_usage_bytes_ << ")\n";
         visit(obj.body);
@@ -135,7 +136,7 @@ public:
     }
 
     void _visit(const let_t &obj) override {
-        int size = obj.register_alloc_size();
+        int size = register_alloc_size(obj);
         auto guard = mem_usage_guard(size);
         print_indent();
         out_ << obj.line_str() << "\n";
@@ -143,20 +144,20 @@ public:
     }
 
     void _visit(const linear_t &obj) override {
-        if (obj.nargs() == 0 && is_zero(obj.c)) {
+        if (obj.nargs() == 0 && obj.c.is(0)) {
             out_ << "0";
             return;
         }
         out_ << "(";
         for (int i = 0; i < obj.nargs(); i++) {
             if (i > 0) out_ << " + ";
-            if (is_one(obj.u_vec[i])) {
+            if (obj.u_vec[i].is(1)) {
                 out_ << obj.v_vec[i];
             } else {
                 out_ << obj.u_vec[i] << " * " << obj.v_vec[i];
             }
         }
-        if (!is_zero(obj.c)) {
+        if (!obj.c.is(0)) {
             if (obj.nargs() != 0) out_ << " + ";
             out_ << obj.c;
         }
@@ -902,12 +903,12 @@ public:
         : grf_size_(grf_size), skip_let_(skip_let), regs_(external_regs) {}
 
     void _visit(const alloc_t &obj) override {
-        auto guard = grf_usage_guard(obj.register_alloc_size(grf_size_));
+        auto guard = grf_usage_guard(register_alloc_size(obj, grf_size_));
         ir_visitor_t::_visit(obj);
     }
 
     void _visit(const let_t &obj) override {
-        int size = skip_let_ ? 0 : obj.register_alloc_size();
+        int size = skip_let_ ? 0 : register_alloc_size(obj);
         auto guard = grf_usage_guard(size);
         ir_visitor_t::_visit(obj);
     }
@@ -987,7 +988,7 @@ expr_t relation_t::normalize(const expr_t &e) {
 bool modulus_info_t::is_modulus_constraint(const expr_t &e) {
     auto *binary_op = e.as_ptr<binary_op_t>();
     if (!binary_op) return false;
-    if (!is_zero(binary_op->b)) return false;
+    if (!binary_op->b.is(0)) return false;
     if (binary_op->op_kind != op_kind_t::_eq) return false;
 
     auto *mod_op = binary_op->a.as_ptr<binary_op_t>();

@@ -24,8 +24,10 @@
 
 #include "common/c_types_map.hpp"
 #include "common/primitive_exec_types.hpp"
+#include "gpu/intel/jit/ir/core.hpp"
 #include "gpu/intel/jit/ir/include/kernel.hpp"
 #include "gpu/intel/jit/ir/kernel_desc.hpp"
+#include "gpu/intel/jit/utils/type_bridge.hpp"
 #include "gpu/intel/primitive.hpp"
 #include "ngen_interface.hpp"
 
@@ -148,7 +150,7 @@ public:
         return args_[idx].var;
     }
 
-    const type_t &arg_type(int idx) const { return arg_var(idx).type(); }
+    const dsl::type_t &arg_type(int idx) const { return arg_var(idx).type(); }
 
     expr_t find_arg(const std::string &name, bool allow_empty = false) const {
         auto *arg = find_arg_impl(name);
@@ -241,7 +243,7 @@ public:
     void set_args(compute::kernel_arg_list_t &arg_list,
             const std::vector<memory_storage_wrapper_t> &storage_list) const {
 #define CASE_IF(type, ir_type, cpp_type) \
-    if ((type) == type_t::ir_type()) { \
+    if ((type) == dsl::type_t::ir_type()) { \
         CASE(cpp_type); \
         break; \
     }

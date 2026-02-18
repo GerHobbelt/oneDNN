@@ -154,21 +154,21 @@ void init_fwd(const config_t &cfg_, gemm_schedule_t &gemm_schedule,
     auto &dst_layout = cfg_.dst_layout().compute();
 
     // Initialize views.
-    auto mb = var_t::make(type_t::s32(), "mb");
-    auto ic = var_t::make(type_t::s32(), "ic");
-    auto oc = var_t::make(type_t::s32(), "oc");
-    auto kd = var_t::make(type_t::s32(), "kd");
-    auto kh = var_t::make(type_t::s32(), "kh");
-    auto kw = var_t::make(type_t::s32(), "kw");
-    auto g = var_t::make(type_t::s32(), "g");
+    auto mb = var_t::make(dsl::type_t::s32(), "mb");
+    auto ic = var_t::make(dsl::type_t::s32(), "ic");
+    auto oc = var_t::make(dsl::type_t::s32(), "oc");
+    auto kd = var_t::make(dsl::type_t::s32(), "kd");
+    auto kh = var_t::make(dsl::type_t::s32(), "kh");
+    auto kw = var_t::make(dsl::type_t::s32(), "kw");
+    auto g = var_t::make(dsl::type_t::s32(), "g");
 
     expr_t ow, oh, od;
     bool check_od = false;
     bool check_oh = false;
     bool check_ow = false;
-    od = var_t::make(type_t::s32(), "od");
-    oh = var_t::make(type_t::s32(), "oh");
-    ow = var_t::make(type_t::s32(), "ow");
+    od = var_t::make(dsl::type_t::s32(), "od");
+    oh = var_t::make(dsl::type_t::s32(), "oh");
+    ow = var_t::make(dsl::type_t::s32(), "ow");
     check_ow = (prb_.ow < cfg_.padded_dim(pvars::ow));
 
     // Initialize masks.
@@ -311,16 +311,16 @@ void init_bwd_d(const config_t &cfg_, gemm_schedule_t &gemm_schedule,
     auto &dst_layout = cfg_.dst_layout().compute();
 
     // Initialize views.
-    auto g = var_t::make(type_t::s32(), "g");
-    auto mb = var_t::make(type_t::s32(), "mb");
-    auto ic = var_t::make(type_t::s32(), "ic");
-    auto oc = var_t::make(type_t::s32(), "oc");
-    auto id = var_t::make(type_t::s32(), "id");
-    auto ih = var_t::make(type_t::s32(), "ih");
-    auto iw = var_t::make(type_t::s32(), "iw");
-    auto kd = var_t::make(type_t::s32(), "kd");
-    auto kh = var_t::make(type_t::s32(), "kh");
-    auto kw = var_t::make(type_t::s32(), "kw");
+    auto g = var_t::make(dsl::type_t::s32(), "g");
+    auto mb = var_t::make(dsl::type_t::s32(), "mb");
+    auto ic = var_t::make(dsl::type_t::s32(), "ic");
+    auto oc = var_t::make(dsl::type_t::s32(), "oc");
+    auto id = var_t::make(dsl::type_t::s32(), "id");
+    auto ih = var_t::make(dsl::type_t::s32(), "ih");
+    auto iw = var_t::make(dsl::type_t::s32(), "iw");
+    auto kd = var_t::make(dsl::type_t::s32(), "kd");
+    auto kh = var_t::make(dsl::type_t::s32(), "kh");
+    auto kw = var_t::make(dsl::type_t::s32(), "kw");
 
     // Initialize masks.
     expr_t od_mask(true), oh_mask(true), ow_mask(true);
@@ -518,16 +518,16 @@ void init_bwd_w(const config_t &cfg_, gemm_schedule_t &gemm_schedule,
     auto &bia_layout = cfg_.bia_layout().compute();
 
     // Initialize thread group views.
-    auto g = var_t::make(type_t::s32(), "g");
-    auto mb = var_t::make(type_t::s32(), "mb");
-    auto ic = var_t::make(type_t::s32(), "ic");
-    auto oc = var_t::make(type_t::s32(), "oc");
-    auto od = var_t::make(type_t::s32(), "od");
-    auto oh = var_t::make(type_t::s32(), "oh");
-    auto ow = var_t::make(type_t::s32(), "ow");
-    auto kd = var_t::make(type_t::s32(), "kd");
-    auto kh = var_t::make(type_t::s32(), "kh");
-    auto kw = var_t::make(type_t::s32(), "kw");
+    auto g = var_t::make(dsl::type_t::s32(), "g");
+    auto mb = var_t::make(dsl::type_t::s32(), "mb");
+    auto ic = var_t::make(dsl::type_t::s32(), "ic");
+    auto oc = var_t::make(dsl::type_t::s32(), "oc");
+    auto od = var_t::make(dsl::type_t::s32(), "od");
+    auto oh = var_t::make(dsl::type_t::s32(), "oh");
+    auto ow = var_t::make(dsl::type_t::s32(), "ow");
+    auto kd = var_t::make(dsl::type_t::s32(), "kd");
+    auto kh = var_t::make(dsl::type_t::s32(), "kh");
+    auto kw = var_t::make(dsl::type_t::s32(), "kw");
 
     // Initialize masks.
     expr_t id_mask(true), ih_mask(true), iw_mask(true);
@@ -986,7 +986,7 @@ int fma_plan_t::bmnk_stop_idx(bmnk_kind_t bmnk, int subtile_idx) const {
 
 stmt_t fma_plan_t::create_stmt(ir_context_t &ir_ctx, buffer_manager_t &buf_mgr,
         const std::string &a, const std::string &b, const std::string &c,
-        int subtile_idx) const {
+        int subtile_idx, type_t a_override, type_t b_override) const {
     int c_buf_size = into<int>(size_bytes(c_layout, ir_ctx.grf_size()));
     auto a_buf = buf_mgr.get(a);
     auto b_buf = buf_mgr.get(b);
@@ -1004,7 +1004,7 @@ stmt_t fma_plan_t::create_stmt(ir_context_t &ir_ctx, buffer_manager_t &buf_mgr,
     icoord_t b_idx(3);
     icoord_t c_idx(3);
 
-    auto fma_funcs = create_fma_funcs(ir_ctx.hw());
+    auto fma_funcs = create_fma_funcs(ir_ctx.hw(), a_override, b_override);
 
     stmt_t stmt;
     for (int b = b0; b < b1; b += b_blk) {
@@ -1049,11 +1049,14 @@ stmt_t fma_plan_t::create_fma_block(const std::vector<func_t> &fmas,
     return ret;
 }
 
-std::vector<func_t> fma_plan_t::create_fma_funcs(const hw_t &hw) const {
-    auto &a = a_layout;
-    auto &b = b_layout;
+std::vector<func_t> fma_plan_t::create_fma_funcs(
+        const hw_t &hw, type_t a_override, type_t b_override) const {
+    auto a = (a_override.is_undef()) ? a_layout : a_layout.with(a_override);
+    auto b = (b_override.is_undef()) ? b_layout : b_layout.with(b_override);
     auto &c = c_layout;
     std::vector<func_t> ret;
+    gpu_assert(a.type().bitsize() == a_layout.type().bitsize());
+    gpu_assert(b.type().bitsize() == b_layout.type().bitsize());
     switch (fma_kind) {
         case fma_kind_t::mad: {
             int simd = max_bmn_blk();
@@ -1255,17 +1258,17 @@ std::string plan_t::str() const {
     return jit::add_indent("conv_plan", oss.str());
 }
 
-type_t get_accumulation_type(
-        const config_t &cfg, const type_t &a, const type_t &b) {
-    if (a.is_int()) return type_t::s32();
-    if (a.is_f64()) return type_t::f64();
+dsl::type_t get_accumulation_type(
+        const config_t &cfg, const dsl::type_t &a, const dsl::type_t &b) {
+    if (a.is_int()) return dsl::type_t::s32();
+    if (a.is_f64()) return dsl::type_t::f64();
     if (cfg.fma_kind() == fma_kind_t::mad && a.is_f16() && b.is_f16()
             && !cfg.prb().is_bwd_w) {
         // FIXME: f16 must use f32 accumulator according to documentation.
         // Temporarily keeping f16 to avoid regressions.
-        return type_t::f16();
+        return dsl::type_t::f16();
     }
-    return type_t::f32();
+    return dsl::type_t::f32();
 }
 
 layout_t make_with_block(const layout_t &base, const layout_t &inner) {
@@ -1319,29 +1322,29 @@ struct fma_context_t {
             bool is_a, const layout_t &layout) const {
         // mad with s8/u8 is not supported, promote to strided s16.
         if (layout.type().is_x8())
-            return make_strided(layout.with(type_t::s16()), 2);
+            return make_strided(layout.with(dsl::type_t::s16()), 2);
         // mad with f16 requires aligned regioning for src1/src2.
         if (a_type.is_f16() && acc_type.is_f16()) {
             return layout.make_dense();
         }
         if (layout.type().is_bf16() && !hw.systolic_support())
-            return layout.with(type_t::f32()).make_dense();
+            return layout.with(dsl::type_t::f32()).make_dense();
         if (a_type.is_bf16()) {
             // bf16 mixed mode requires src1 to be converted to f32 when it's
             // broadcasted.
             if (is_a && is_src1_broadcast)
-                return layout.with(type_t::f32()).make_dense();
+                return layout.with(dsl::type_t::f32()).make_dense();
             // bf16 mixed mode mad requires src1 to be packed
             if (is_a) return layout.make_dense();
             // bf16 mixed mode mad requires src2 to be f32.
-            return layout.with(type_t::f32()).make_dense();
+            return layout.with(dsl::type_t::f32()).make_dense();
         }
         bool is_a_xf8_or_xf16_or_xf4 = (a_type.is_fp4() || a_type.is_fp8()
                 || a_type.is_bf16() || a_type.is_f16());
         bool is_b_xf8_or_xf16_or_xf4 = (b_type.is_fp4() || b_type.is_fp8()
                 || b_type.is_bf16() || b_type.is_f16());
         if (is_a_xf8_or_xf16_or_xf4 || is_b_xf8_or_xf16_or_xf4) {
-            return layout.with(type_t::f32()).make_dense();
+            return layout.with(dsl::type_t::f32()).make_dense();
         }
         return layout;
     }
@@ -1378,7 +1381,7 @@ struct fma_context_t {
                     = make_with_block(bmnk_layout, layout_t(type, blocks));
             auto abc_layout
                     = mapper.map_from_bmnk(abc, bmnks, fma_layout, layout);
-            if (cvt_f16) return abc_layout.with(type_t::f16());
+            if (cvt_f16) return abc_layout.with(dsl::type_t::f16());
             return abc_layout;
         }
 
@@ -1486,9 +1489,9 @@ struct fma_context_t {
     int simd;
     int vec_size;
     fma_kind_t fma;
-    type_t a_type;
-    type_t b_type;
-    type_t acc_type;
+    dsl::type_t a_type;
+    dsl::type_t b_type;
+    dsl::type_t acc_type;
     bool is_src1_broadcast;
     bool ab_swap_transpose_;
     fma_layout_hint_t a_layout_hint;
@@ -1788,8 +1791,8 @@ private:
             std::vector<expr_t> ret;
             ret.reserve(max_nvdims);
             for (int i = 0; i < max_nvdims; i++)
-                ret.push_back(
-                        var_t::make(type_t::s32(), "_" + std::to_string(i)));
+                ret.push_back(var_t::make(
+                        dsl::type_t::s32(), "_" + std::to_string(i)));
             return ret;
         }());
 
@@ -1854,7 +1857,7 @@ std::array<pvar_t, 2> dpas_dims(bool transpose) {
 bool is_dpas_src1_compatible(int simd, bool transpose, const layout_t &layout) {
     const int sdepth = 8;
     auto &type = layout.type();
-    auto c_type = (type.is_int() ? type_t::s32() : type_t::f32());
+    auto c_type = (type.is_int() ? dsl::type_t::s32() : dsl::type_t::f32());
     auto func = dpas_t::make(
             /*is_dpasw=*/false, simd, sdepth, /*rcount=*/1, c_type, type, type);
     auto &dpas = func.as<dpas_t>();
@@ -1866,7 +1869,7 @@ bool is_dpas_src1_compatible(int simd, bool transpose, const layout_t &layout) {
 bool is_dpas_src2_compatible(int simd, bool transpose, const layout_t &layout) {
     const int sdepth = 8;
     auto &type = layout.type();
-    auto c_type = (type.is_int() ? type_t::s32() : type_t::f32());
+    auto c_type = (type.is_int() ? dsl::type_t::s32() : dsl::type_t::f32());
     auto func = dpas_t::make(
             /*is_dpasw=*/false, simd, sdepth, /*rcount=*/1, c_type, type, type);
     auto &dpas = func.as<dpas_t>();
@@ -2354,7 +2357,7 @@ private:
         auto &bmnk_mapper = gemm_schedule_.bmnk_mapper();
         object_map_t<expr_t, pvar_t> k_vars;
         auto k_sub_layout = [&](abc_kind_t abc_kind, const layout_t &l) {
-            layout_t k_layout = layout_t(type_t::u8());
+            layout_t k_layout = layout_t(dsl::type_t::u8());
             for (auto &b : l.blocks()) {
                 auto bmnk_kind = bmnk_mapper.bmnk_kind(abc_kind, b.idx);
                 if (bmnk_kind != bmnk_kind_t::k) continue;
@@ -2502,7 +2505,7 @@ private:
         bool requires_fadd
                 = prb_.is_bwd_w && gemm_schedule_.with_kernel_grid_k_slicing();
         if (!cfg_.hw().has_fp64_atomic_support() && requires_fadd
-                && c_layout.elems() % 8 != 0 && c_type == type_t::f64()) {
+                && c_layout.elems() % 8 != 0 && c_type == dsl::type_t::f64()) {
             return plan_status_t::invalid_c_layout;
         }
 
@@ -2544,7 +2547,7 @@ private:
 
         const auto src_zp_type = (cfg_.zp_cfg().do_src_compensation)
                 ? cfg_.zp_cfg().src_zp_type
-                : type_t::s32();
+                : dsl::type_t::s32();
         layout_t zp_layout(
                 src_zp_type, std::vector<dim_t> {zp_g_dim, zp_ic_dim}, zp_off);
         view_t zp_view(zp_layout);

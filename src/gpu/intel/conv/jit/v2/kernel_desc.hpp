@@ -92,7 +92,7 @@ struct specialization_t {
     prb_reqs_t reqs() const;
 
     std::string str() const;
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 
 #if __cplusplus >= 202002L
     bool operator==(const specialization_t &other) const = default;
@@ -123,7 +123,7 @@ struct loop_desc_entry_t {
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 
 #if __cplusplus >= 202002L
     bool operator==(const loop_desc_entry_t &other) const = default;
@@ -172,7 +172,7 @@ public:
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 
 #if __cplusplus >= 202002L
     bool operator==(const loop_desc_t &other) const = default;
@@ -217,7 +217,7 @@ struct prefetch_desc_t {
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 
 #if __cplusplus >= 202002L
     bool operator==(const prefetch_desc_t &other) const = default;
@@ -252,7 +252,7 @@ struct extensions_t {
     void add(extension_kind_t kind);
     bool has(extension_kind_t kind) const;
     std::string str() const;
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
     void stringify(std::ostream &out) const { out << str(); }
     void parse(std::istream &in);
 
@@ -269,7 +269,7 @@ public:
     layout_tag_t src_tag;
     layout_tag_t wei_tag;
     layout_tag_t dst_tag;
-    type_t bias_type;
+    dsl::type_t bias_type;
     specialization_t spec;
     hw_desc_t hw_desc;
     fma_kind_t fma = fma_kind_t::undef;
@@ -304,7 +304,7 @@ public:
     std::string brief_str() const;
     std::string str() const;
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 
     static const parse_iface_t<kernel_desc_t> &parse_iface();
     static void init_parse_iface(parse_iface_t<kernel_desc_t> *iface);
@@ -325,9 +325,15 @@ public:
         }
         return src_tag;
     }
-    const type_t &a_type() const { return layout_tag(tensor_kind_t::a).type(); }
-    const type_t &b_type() const { return layout_tag(tensor_kind_t::b).type(); }
-    const type_t &c_type() const { return layout_tag(tensor_kind_t::c).type(); }
+    const dsl::type_t &a_type() const {
+        return layout_tag(tensor_kind_t::a).type();
+    }
+    const dsl::type_t &b_type() const {
+        return layout_tag(tensor_kind_t::b).type();
+    }
+    const dsl::type_t &c_type() const {
+        return layout_tag(tensor_kind_t::c).type();
+    }
     bool with_bias_fwd() const {
         return prop == prop_kind::forward && !bias_type.is_undef();
     }
@@ -390,7 +396,7 @@ public:
     grid_t() = default;
     grid_t(std::string (*genname)(int)) {
         for (int i = 0; i < N; i++)
-            entries_[i].idx_var = var_t::make(type_t::s32(), genname(i));
+            entries_[i].idx_var = var_t::make(dsl::type_t::s32(), genname(i));
     }
     grid_t(const std::array<expr_t, N> &idx_vars) {
         for (int i = 0; i < N; i++) {
@@ -470,7 +476,8 @@ grid_t create_thread_group_grid(const kernel_desc_t &desc);
 grid_t create_thread_grid(const kernel_desc_t &desc);
 dim_t stream_k_thread_groups(
         dim_t total_iters, dim_t max_thread_groups_per_wave);
-type_t accumulator_type(const type_t &a_type, const type_t &b_type);
+dsl::type_t accumulator_type(
+        const dsl::type_t &a_type, const dsl::type_t &b_type);
 kernel_desc_t to_stream_k(const kernel_desc_t &desc, bool check_ext = true);
 prb_reqs_t generate_2d_reqs(const kernel_desc_t &desc);
 bool can_use_2d(const kernel_desc_t &desc, tensor_kind_t tensor);

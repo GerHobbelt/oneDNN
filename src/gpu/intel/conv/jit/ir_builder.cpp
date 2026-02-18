@@ -60,7 +60,7 @@ public:
             auto &src1 = dpas_t::arg_src1(obj);
             auto &src2 = dpas_t::arg_src2(obj);
             check_access(dst, dpas->dst_size(), obj);
-            if (!is_zero(src0)) check_access(src0, dpas->src0_size(), obj);
+            if (!src0.is(0)) check_access(src0, dpas->src0_size(), obj);
             check_access(src1, dpas->src1_size(), obj);
             check_access(src2, dpas->src2_size(), obj);
         } else if (func.is<eltwise_t>()) {
@@ -74,7 +74,7 @@ public:
             auto &src1 = mad_t::arg_src1(obj);
             auto &src2 = mad_t::arg_src2(obj);
             check_access(dst, mad->dst_size(), obj);
-            if (!is_zero(src0)) check_access(src0, mad->src0_size(), obj);
+            if (!src0.is(0)) check_access(src0, mad->src0_size(), obj);
             check_access(src1, mad->src1_size(), obj);
             check_access(src2, mad->src2_size(), obj);
         } else if (auto *reduce = func.as_ptr<reduce_t>()) {
@@ -291,7 +291,7 @@ private:
         auto g2s_buf = buf_mgr_.get(prefix + "_g2s", g2s_load.reg_buf_size());
         expr_t pattern;
         if ((prefix == "a") && plan_.zp.is_src_precomp_compatible())
-            pattern = load_t::make(type_t::u32(),
+            pattern = load_t::make(dsl::type_t::u32(),
                     buf_mgr_.get("zp_src", plan_.zp.load_reg_buf_size()), 0);
         auto load = g2s_load.create_stmt(mem_buf, g2s_buf, 0, pattern);
         auto reduce_buf = g2s_reduce
@@ -439,7 +439,11 @@ private:
             buf_mgr_.get(zp_buf, size);
             return plan_.fma.create_stmt(ir_ctx_, buf_mgr_,
                     (kind == abc_kind_t::a) ? zp_buf : "a",
-                    (kind == abc_kind_t::b) ? zp_buf : "b", "c", subtile_idx);
+                    (kind == abc_kind_t::b) ? zp_buf : "b", "c", subtile_idx,
+                    (kind == abc_kind_t::a) ? dsl::type_t::s8()
+                                            : dsl::type_t::undef(),
+                    (kind == abc_kind_t::b) ? dsl::type_t::s8()
+                                            : dsl::type_t::undef());
         };
         auto &zp = plan_.zp;
         if (zp.has_zp_wei()) {
@@ -474,7 +478,7 @@ private:
         }
         expr_t pattern;
         if ((prefix == "a") && plan_.zp.is_src_precomp_compatible())
-            pattern = load_t::make(type_t::u32(),
+            pattern = load_t::make(dsl::type_t::u32(),
                     buf_mgr_.get("zp_src", plan_.zp.load_reg_buf_size()), 0);
         auto load = x2r_load.create_stmt(x_buf, load_buf, subtile_idx, pattern);
         auto reduce_buf = x2r_reduce
@@ -562,7 +566,7 @@ private:
         auto x_reduce_buf = buf_mgr_.find("x_reduce", /*allow_empty=*/true).buf;
         if (x_reduce_buf.is_empty()) return;
         auto x_reduce_dummy_buf = var_t::make(
-                type_t::byte(type::attr_t::ptr), "x_reduce_dummy");
+                dsl::type_t::byte(dsl::type::attr_t::ptr), "x_reduce_dummy");
         auto x_reduce_view
                 = plan_.bia_view.create_sub_view(plan_.x_reduce_tile_coord());
         auto r2g = make_access_builder(ir_ctx_, x_reduce_view, x_reduce_buf_,

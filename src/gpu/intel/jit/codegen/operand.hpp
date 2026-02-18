@@ -127,7 +127,7 @@ public:
         return ngen_operand_t();
     }
 
-    ngen_operand_t reinterpret(const type_t &new_type) const {
+    ngen_operand_t reinterpret(const dsl::type_t &new_type) const {
         gpu_assert(new_type.is_scalar());
         return ngen_operand_t(
                 reg_buf_data().reinterpret(to_ngen(new_type)), mod_);
@@ -162,7 +162,7 @@ public:
 
     std::string str() const;
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 
 private:
     template <ngen_operand_kind_t kind>

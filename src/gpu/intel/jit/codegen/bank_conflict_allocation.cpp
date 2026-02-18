@@ -251,7 +251,7 @@ struct reg_mask_t {
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 
     static const int chunk_bits = 64;
     static const int max_regs = 256;
@@ -340,7 +340,7 @@ struct reg_block_mask_t {
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 
     int regs;
     std::vector<reg_mask_t> masks;
@@ -382,7 +382,7 @@ struct reg_t {
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 
     reg_block_mask_t *block = nullptr;
     int off = -1;
@@ -680,7 +680,7 @@ bank_conflict_allocation_t bank_conflict_allocation_t::create(
     }
 
     auto create_reg = [&](const expr_t &e, int src_idx, int off_bytes) {
-        if (is_zero(e)) return reg_t();
+        if (e.is(0)) return reg_t();
         const auto &base = get_base(e);
         int off = 0;
         if (!is_var(e)) off = to_cpp<int>(e.as<ptr_t>().off);

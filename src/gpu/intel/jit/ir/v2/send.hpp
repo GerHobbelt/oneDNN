@@ -117,7 +117,7 @@ struct addr_t {
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 };
 
 struct dim_mask_t {
@@ -142,7 +142,7 @@ struct dim_mask_t {
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 
     pvar_t dim;
     expr_t base;
@@ -196,7 +196,7 @@ struct mask_t {
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 
     std::vector<dim_mask_t> dim_masks;
 };
@@ -264,8 +264,8 @@ struct send_2d_hint_t {
 
     explicit operator bool() const { return is_valid; }
 
-    bool init(send_op_t send_op, const type_t &type, bool vnni, bool transpose,
-            int w_tile, int h_tile, int w_blk, int h_blk) {
+    bool init(send_op_t send_op, const dsl::type_t &type, bool vnni,
+            bool transpose, int w_tile, int h_tile, int w_blk, int h_blk) {
         bool is_load_or_prefetch
                 = utils::one_of(send_op, send_op_t::load, send_op_t::prefetch);
         bool is_store = (send_op == send_op_t::store);
@@ -325,7 +325,7 @@ struct send_2d_hint_t {
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 };
 
 struct send_params_t {
@@ -363,7 +363,7 @@ struct send_params_t {
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 };
 
 struct send_1d_desc_t {
@@ -403,7 +403,7 @@ struct send_1d_desc_t {
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 };
 
 struct send_1d_entry_t {
@@ -478,14 +478,14 @@ struct send_1d_plan_t : public base_plan_t {
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 };
 
 struct send_2d_desc_t {
     hw_t hw;
     send_address_t address = send_address_t::undef;
     send_op_t op = send_op_t::undef;
-    type_t type;
+    dsl::type_t type;
     bool transpose = false;
     bool vnni = false;
     expr_t W; // Surface width in elements.
@@ -605,7 +605,7 @@ struct send_2d_desc_t {
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 
     static expr_t get_2d_base(const v2::view_t &view) {
         auto dim_mapper = view.dim_mapper();
@@ -629,7 +629,7 @@ struct send_2d_entry_t {
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 };
 
 struct send_2d_plan_t : public base_plan_t {
@@ -681,7 +681,7 @@ struct send_2d_plan_t : public base_plan_t {
         return oss.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 };
 
 struct send_plan_t : public base_plan_t {
@@ -727,7 +727,7 @@ struct send_plan_t : public base_plan_t {
         return _2d.str();
     }
 
-    IR_DEFINE_DUMP()
+    XE_DEFINE_DUMP()
 };
 
 class send_plan_builder_t {

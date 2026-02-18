@@ -83,7 +83,7 @@ tile_iterator_t::tile_iterator_t(const layout_t &layout, const tile_t &tile) {
 
 } // namespace layout
 
-layout_t::layout_t(const type_t &type, const std::vector<int64_t> &dims,
+layout_t::layout_t(const dsl::type_t &type, const std::vector<int64_t> &dims,
         const expr_t &offset, bool do_normalize)
     : type_(type), ndims_(dims.size()), offset_(offset) {
     if (type.is_undef()) {
@@ -100,7 +100,7 @@ layout_t::layout_t(const type_t &type, const std::vector<int64_t> &dims,
     sanity_check();
 }
 
-layout_t::layout_t(const type_t &type, const std::vector<block_t> &blocks,
+layout_t::layout_t(const dsl::type_t &type, const std::vector<block_t> &blocks,
         const expr_t &offset, size_t ndims, bool do_normalize)
     : type_(type), ndims_(ndims), offset_(offset), blocks_(blocks) {
     if (type.is_undef()) {
@@ -155,7 +155,7 @@ T layout_t::offset(const coord_t &args, bool ignore_offset) const {
     for (auto &b : blocks()) {
         if (!_args.has(b.idx)) continue;
         auto &idx = _args[b.idx];
-        if (is_const(idx, 0)) continue;
+        if (idx.is(0)) continue;
 
         // Do not use modulus for outermost blocks.
         auto i = is_outermost(b) ? idx : (idx % b.size);

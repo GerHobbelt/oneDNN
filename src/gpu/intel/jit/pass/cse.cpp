@@ -23,7 +23,7 @@
 #include <type_traits>
 #include <unordered_map>
 
-#include "gpu/intel/jit/codegen/register_allocator.hpp"
+#include "gpu/intel/jit/codegen/allocation_size.hpp"
 #include "gpu/intel/jit/ir/send.hpp"
 #include "gpu/intel/jit/utils/trace.hpp"
 #include "gpu/intel/jit/utils/utils.hpp"
@@ -35,6 +35,32 @@ namespace intel {
 namespace jit {
 
 // Common subexpression elimination support.
+
+class ir_path_t {
+public:
+    void push(const object::impl_t *obj) { path_.push_back(obj); }
+
+    void pop() { path_.pop_back(); }
+
+    const object::impl_t *back() const {
+        gpu_assert(!is_empty());
+        return path_.back();
+    }
+
+    bool is_empty() const { return path_.empty(); }
+
+    void merge(const ir_path_t &other) {
+        size_t idx;
+        size_t min_size = std::min(path_.size(), other.path_.size());
+        for (idx = 0; idx < min_size; idx++) {
+            if (path_[idx] != other.path_[idx]) break;
+        }
+        path_.resize(idx);
+    }
+
+private:
+    std::vector<const object::impl_t *> path_;
+};
 
 // Represents an expression-candidate to eliminate.
 class cse_expr_t {
@@ -84,7 +110,7 @@ public:
 
     int size() const {
         return utils::rnd_up(
-                cse_expr_->cse_var.type().size(), reg_allocator_t::granularity);
+                cse_expr_->cse_var.type().size(), ngen_alloc_granularity);
     }
 
     int cost() const { return cost_; }
@@ -154,7 +180,7 @@ public:
     }
 
     void _visit(const alloc_t &obj) override {
-        auto size = obj.register_alloc_size(grf_size_);
+        auto size = register_alloc_size(obj, grf_size_);
         grf_usage_ += size;
         handle_grf_overflow();
 
@@ -168,7 +194,7 @@ public:
         auto *e = it != var2entry_.end() ? var2entry_.find(obj.var)->second
                                          : nullptr;
 
-        int size = obj.register_alloc_size();
+        int size = register_alloc_size(obj);
         if (e) {
             var_stack_.emplace_back(e);
             if (e->allocated()) { grf_usage_ += size; }
