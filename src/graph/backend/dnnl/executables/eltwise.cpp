@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright 2021-2025 Intel Corporation
+ * Copyright 2021 Intel Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -113,6 +113,97 @@ eltwise_bwd_executable_t::desc_t eltwise_bwd_executable_t::create_desc(
 
     return {pd, false};
 }
+
+void binary_executable_t::execute(const stream &stream,
+        const std::unordered_map<int, memory> &args) const {
+    if (is_dummy_) {
+        dummy_impl_.execute(stream, args);
+        return;
+    }
+
+    if (with_sum_) {
+        auto it_dst = args.find(DNNL_ARG_DST);
+        auto it_src = args.find(DNNL_GRAPH_ARG_POST_SRC);
+        if (it_dst == args.end() || it_src == args.end()) {
+            assert(!("cannot find the required memory"));
+            return;
+        }
+
+        memory &dst_mem = const_cast<memory &>(it_dst->second);
+        memory &psrc_mem = const_cast<memory &>(it_src->second);
+
+        if (psrc_mem.get_data_handle() != dst_mem.get_data_handle()) {
+            dnnl::reorder(psrc_mem, dst_mem).execute(stream, psrc_mem, dst_mem);
+        }
+    }
+
+    prim_.execute(stream, args);
+}
+
+#ifdef DNNL_WITH_SYCL
+::sycl::event binary_executable_t::execute_sycl(const stream &stream,
+        const std::unordered_map<int, memory> &args,
+        const std::vector<::sycl::event> &deps) const {
+    if (is_dummy_) { return dummy_impl_.execute_sycl(stream, args, deps); }
+
+    auto sycl_deps = deps;
+    if (with_sum_) {
+        auto it_dst = args.find(DNNL_ARG_DST);
+        auto it_src = args.find(DNNL_GRAPH_ARG_POST_SRC);
+        if (it_dst == args.end() || it_src == args.end()) {
+            assert(!("cannot find the required memory"));
+            return {};
+        }
+
+        memory &dst_mem = const_cast<memory &>(it_dst->second);
+        memory &psrc_mem = const_cast<memory &>(it_src->second);
+
+        if (psrc_mem.get_data_handle() != dst_mem.get_data_handle()) {
+            auto prim = dnnl::reorder(psrc_mem, dst_mem);
+            auto e = dnnl::sycl_interop::execute(prim, stream,
+                    {{DNNL_ARG_FROM, const_cast<memory &>(psrc_mem)},
+                            {DNNL_ARG_TO, const_cast<memory &>(dst_mem)}},
+                    sycl_deps);
+            sycl_deps = {e};
+        }
+    }
+    auto e = dnnl::sycl_interop::execute(prim_, stream, args, sycl_deps);
+    if (stream.get_engine().get_kind() == engine::kind::cpu) e.wait();
+    return e;
+}
+#endif
+
+#if DNNL_GPU_RUNTIME == DNNL_RUNTIME_OCL
+cl_event binary_executable_t::execute_ocl(const stream &stream,
+        const std::unordered_map<int, memory> &args,
+        const std::vector<cl_event> &deps) const {
+    if (is_dummy_) { return dummy_impl_.execute_ocl(stream, args, deps); }
+
+    auto ocl_deps = deps;
+    if (with_sum_) {
+        auto it_dst = args.find(DNNL_ARG_DST);
+        auto it_src = args.find(DNNL_GRAPH_ARG_POST_SRC);
+        if (it_dst == args.end() || it_src == args.end()) {
+            assert(!("cannot find the required memory"));
+            return {};
+        }
+
+        memory &dst_mem = const_cast<memory &>(it_dst->second);
+        memory &psrc_mem = const_cast<memory &>(it_src->second);
+
+        if (psrc_mem.get_data_handle() != dst_mem.get_data_handle()) {
+            auto prim = dnnl::reorder(psrc_mem, dst_mem);
+            auto e = dnnl::ocl_interop::execute(prim, stream,
+                    {{DNNL_ARG_FROM, const_cast<memory &>(psrc_mem)},
+                            {DNNL_ARG_TO, const_cast<memory &>(dst_mem)}},
+                    ocl_deps);
+            ocl_deps = {e};
+        }
+    }
+    auto e = dnnl::ocl_interop::execute(prim_, stream, args, ocl_deps);
+    return e;
+}
+#endif
 
 binary_executable_t::desc_t binary_executable_t::create_desc(
         std::shared_ptr<op_t> &op, const dnnl::engine &p_engine,
@@ -251,69 +342,56 @@ prelu_bwd_executable_t::desc_t prelu_bwd_executable_t::create_desc(
 }
 
 arg_indices_t binary_executable_t::get_arg_indices(const op_t *op) {
-    arg_indices_t arg_indices;
-    const algorithm algo = static_cast<dnnl::algorithm>(
+    arg_indices_t args;
+    const dnnl::algorithm algo = static_cast<dnnl::algorithm>(
             op->get_attr<int64_t>(op_attr::alg_kind));
 
-    // add input args
+    // inputs
     size_t index = 0;
-    arg_indices.insert(
-            {DNNL_ARG_SRC_0, indices_t {indices_t::type_t::input, index++}});
-    arg_indices.insert(
-            {DNNL_ARG_SRC_1, indices_t {indices_t::type_t::input, index++}});
-    if (algo == algorithm::binary_select) {
-        arg_indices.insert({DNNL_ARG_SRC_2,
-                indices_t {indices_t::type_t::input, index++}});
+    args.insert({DNNL_ARG_SRC_0, {indices_t::type_t::input, index++}});
+    args.insert({DNNL_ARG_SRC_1, {indices_t::type_t::input, index++}});
+    if (algo == dnnl::algorithm::binary_select) {
+        args.insert({DNNL_ARG_SRC_2, {indices_t::type_t::input, index++}});
     }
-    get_arg_indices_for_post_ops(op, arg_indices, index);
+    get_arg_indices_for_post_ops(op, args, index);
 
-    // add output args
-    arg_indices.insert(
-            {DNNL_ARG_DST, indices_t {indices_t::type_t::output, 0}});
-    arg_indices.insert(
-            {DNNL_ARG_SCRATCHPAD, indices_t {indices_t::type_t::output, 1}});
+    // outputs
+    args.insert({DNNL_ARG_DST, {indices_t::type_t::output, 0}});
+    args.insert({DNNL_ARG_SCRATCHPAD, {indices_t::type_t::output, 1}});
 
-    return arg_indices;
+    return args;
 }
 
 arg_indices_t prelu_executable_t::get_arg_indices(const op_t *op) {
-    arg_indices_t arg_indices;
+    UNUSED(op);
+    arg_indices_t args;
 
-    // add input args
-    size_t index = 0;
-    arg_indices.insert(
-            {DNNL_ARG_SRC, indices_t {indices_t::type_t::input, index++}});
-    arg_indices.insert(
-            {DNNL_ARG_WEIGHTS, indices_t {indices_t::type_t::input, index++}});
+    // inputs
+    args.insert({DNNL_ARG_SRC, {indices_t::type_t::input, 0}});
+    args.insert({DNNL_ARG_WEIGHTS, {indices_t::type_t::input, 1}});
 
-    // add output args
-    arg_indices.insert(
-            {DNNL_ARG_DST, indices_t {indices_t::type_t::output, 0}});
-    arg_indices.insert(
-            {DNNL_ARG_SCRATCHPAD, indices_t {indices_t::type_t::output, 1}});
+    // outputs
+    args.insert({DNNL_ARG_DST, {indices_t::type_t::output, 0}});
+    args.insert({DNNL_ARG_SCRATCHPAD, {indices_t::type_t::output, 1}});
 
-    return arg_indices;
+    return args;
 }
 
 arg_indices_t prelu_bwd_executable_t::get_arg_indices(const op_t *op) {
-    arg_indices_t arg_indices;
+    UNUSED(op);
+    arg_indices_t args;
 
-    // add input args
-    arg_indices.insert({DNNL_ARG_SRC, indices_t {indices_t::type_t::input, 0}});
-    arg_indices.insert(
-            {DNNL_ARG_WEIGHTS, indices_t {indices_t::type_t::input, 1}});
-    arg_indices.insert(
-            {DNNL_ARG_DIFF_DST, indices_t {indices_t::type_t::input, 2}});
+    // inputs
+    args.insert({DNNL_ARG_SRC, {indices_t::type_t::input, 0}});
+    args.insert({DNNL_ARG_WEIGHTS, {indices_t::type_t::input, 1}});
+    args.insert({DNNL_ARG_DIFF_DST, {indices_t::type_t::input, 2}});
 
-    // add output args
-    arg_indices.insert(
-            {DNNL_ARG_DIFF_SRC, indices_t {indices_t::type_t::output, 0}});
-    arg_indices.insert(
-            {DNNL_ARG_DIFF_WEIGHTS, indices_t {indices_t::type_t::output, 1}});
-    arg_indices.insert(
-            {DNNL_ARG_SCRATCHPAD, indices_t {indices_t::type_t::output, 2}});
+    // outputs
+    args.insert({DNNL_ARG_DIFF_SRC, {indices_t::type_t::output, 0}});
+    args.insert({DNNL_ARG_DIFF_WEIGHTS, {indices_t::type_t::output, 1}});
+    args.insert({DNNL_ARG_SCRATCHPAD, {indices_t::type_t::output, 2}});
 
-    return arg_indices;
+    return args;
 }
 
 arg_indices_t eltwise_executable_t::get_arg_indices(const op_t *op) {
@@ -321,24 +399,19 @@ arg_indices_t eltwise_executable_t::get_arg_indices(const op_t *op) {
 }
 
 arg_indices_t eltwise_bwd_executable_t::get_arg_indices(const op_t *op) {
-    arg_indices_t arg_indices;
+    arg_indices_t args;
 
     if (op->get_attr<bool>(op_attr::use_dst)) {
-        arg_indices.insert(
-                {DNNL_ARG_DST, indices_t {indices_t::type_t::input, 0}});
+        args.insert({DNNL_ARG_DST, {indices_t::type_t::input, 0}});
     } else {
-        arg_indices.insert(
-                {DNNL_ARG_SRC, indices_t {indices_t::type_t::input, 0}});
+        args.insert({DNNL_ARG_SRC, {indices_t::type_t::input, 0}});
     }
-    arg_indices.insert(
-            {DNNL_ARG_DIFF_DST, indices_t {indices_t::type_t::input, 1}});
+    args.insert({DNNL_ARG_DIFF_DST, {indices_t::type_t::input, 1}});
 
-    arg_indices.insert(
-            {DNNL_ARG_DIFF_SRC, indices_t {indices_t::type_t::output, 0}});
-    arg_indices.insert(
-            {DNNL_ARG_SCRATCHPAD, indices_t {indices_t::type_t::output, 1}});
+    args.insert({DNNL_ARG_DIFF_SRC, {indices_t::type_t::output, 0}});
+    args.insert({DNNL_ARG_SCRATCHPAD, {indices_t::type_t::output, 1}});
 
-    return arg_indices;
+    return args;
 }
 
 } // namespace dnnl_impl

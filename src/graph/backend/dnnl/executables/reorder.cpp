@@ -21,6 +21,86 @@ namespace impl {
 namespace graph {
 namespace dnnl_impl {
 
+void reorder_executable_t::execute(const stream &stream,
+        const std::unordered_map<int, memory> &args) const {
+    if (with_sum_) {
+        auto it_dst = args.find(DNNL_ARG_DST);
+        auto it_src = args.find(DNNL_GRAPH_ARG_POST_SRC);
+        if (it_dst == args.end() || it_src == args.end()) {
+            assert(!("cannot find the required memory"));
+            return;
+        }
+
+        const memory &psrc_mem = it_src->second;
+        const memory &dst_mem = it_dst->second;
+        if (psrc_mem.get_data_handle() != dst_mem.get_data_handle()) {
+            dnnl::reorder(psrc_mem, dst_mem)
+                    .execute(stream, const_cast<memory &>(psrc_mem),
+                            const_cast<memory &>(dst_mem));
+        }
+    }
+    prim_.execute(stream, args);
+}
+
+#ifdef DNNL_WITH_SYCL
+::sycl::event reorder_executable_t::execute_sycl(const stream &stream,
+        const std::unordered_map<int, memory> &args,
+        const std::vector<::sycl::event> &deps) const {
+    auto sycl_deps = deps;
+    if (with_sum_) {
+        auto it_dst = args.find(DNNL_ARG_DST);
+        auto it_src = args.find(DNNL_GRAPH_ARG_POST_SRC);
+        if (it_dst == args.end() || it_src == args.end()) {
+            assert(!("cannot find the required memory"));
+            return {};
+        }
+
+        const memory &psrc_mem = it_src->second;
+        const memory &dst_mem = it_dst->second;
+        if (psrc_mem.get_data_handle() != dst_mem.get_data_handle()) {
+            auto prim = dnnl::reorder(psrc_mem, dst_mem);
+            auto e = dnnl::sycl_interop::execute(prim, stream,
+                    {{DNNL_ARG_FROM, const_cast<memory &>(psrc_mem)},
+                            {DNNL_ARG_TO, const_cast<memory &>(dst_mem)}},
+                    sycl_deps);
+            sycl_deps = {e};
+        }
+    }
+    auto e = dnnl::sycl_interop::execute(prim_, stream, args, sycl_deps);
+    if (stream.get_engine().get_kind() == engine::kind::cpu) e.wait();
+    return e;
+}
+#endif
+
+#if DNNL_GPU_RUNTIME == DNNL_RUNTIME_OCL
+cl_event reorder_executable_t::execute_ocl(const stream &stream,
+        const std::unordered_map<int, memory> &args,
+        const std::vector<cl_event> &deps) const {
+    auto ocl_deps = deps;
+    if (with_sum_) {
+        auto it_dst = args.find(DNNL_ARG_DST);
+        auto it_src = args.find(DNNL_GRAPH_ARG_POST_SRC);
+        if (it_dst == args.end() || it_src == args.end()) {
+            assert(!("cannot find the required memory"));
+            return {};
+        }
+
+        const memory &psrc_mem = it_src->second;
+        const memory &dst_mem = it_dst->second;
+        if (psrc_mem.get_data_handle() != dst_mem.get_data_handle()) {
+            auto prim = dnnl::reorder(psrc_mem, dst_mem);
+            auto e = dnnl::ocl_interop::execute(prim, stream,
+                    {{DNNL_ARG_FROM, const_cast<memory &>(psrc_mem)},
+                            {DNNL_ARG_TO, const_cast<memory &>(dst_mem)}},
+                    ocl_deps);
+            ocl_deps = {e};
+        }
+    }
+    auto e = dnnl::ocl_interop::execute(prim_, stream, args, ocl_deps);
+    return e;
+}
+#endif
+
 reorder_executable_t::desc_t reorder_executable_t::create_desc(
         std::shared_ptr<op_t> &op, const dnnl::engine &p_engine,
         pd_cache_t &pd_cache, const fpmath_t &fpmath, bool use_block_layout) {
@@ -123,11 +203,10 @@ reorder_executable_t::desc_t reorder_executable_t::create_desc(
 }
 
 arg_indices_t reorder_executable_t::get_arg_indices(const op_t *op) {
-    arg_indices_t arg_indices;
+    arg_indices_t args;
 
-    size_t index = 0;
-    arg_indices.insert(
-            {DNNL_ARG_FROM, indices_t {indices_t::type_t::input, index++}});
+    size_t idx = 0;
+    args.insert({DNNL_ARG_FROM, {indices_t::type_t::input, idx++}});
 
     const fusion_info_t &fusion_info = op->has_attr(op_attr::fusion_info)
             ? op->get_attr<fusion_info_t>(op_attr::fusion_info)
@@ -136,37 +215,37 @@ arg_indices_t reorder_executable_t::get_arg_indices(const op_t *op) {
     if ((op->has_attr(op_attr::with_runtime_scales)
                 && op->get_attr<bool>(op_attr::with_runtime_scales))
             || fusion_info.with_runtime_scales(true, 0)) {
-        arg_indices.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC,
-                indices_t {indices_t::type_t::input, index++}});
+        args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC,
+                {indices_t::type_t::input, idx++}});
     }
 
     if ((op->has_attr(op_attr::with_runtime_src_zps)
                 && op->get_attr<bool>(op_attr::with_runtime_src_zps))
             || fusion_info.with_runtime_zero_points(true, 0)) {
-        arg_indices.insert({DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_SRC,
-                indices_t {indices_t::type_t::input, index++}});
+        args.insert({DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_SRC,
+                {indices_t::type_t::input, idx++}});
     }
 
-    get_arg_indices_for_post_ops(op, arg_indices, index);
+    get_arg_indices_for_post_ops(op, args, idx);
 
     if (fusion_info.with_runtime_scales(false, 0)) {
-        arg_indices.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_DST,
-                indices_t {indices_t::type_t::input, index++}});
+        args.insert({DNNL_ARG_ATTR_SCALES | DNNL_ARG_DST,
+                {indices_t::type_t::input, idx++}});
     }
 
     if ((op->has_attr(op_attr::with_runtime_dst_zps)
                 && op->get_attr<bool>(op_attr::with_runtime_dst_zps))
             || fusion_info.with_runtime_zero_points(false, 0)) {
-        arg_indices.insert({DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_DST,
-                indices_t {indices_t::type_t::input, index++}});
+        args.insert({DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_DST,
+                {indices_t::type_t::input, idx++}});
     }
 
-    arg_indices.insert({DNNL_ARG_TO, indices_t {indices_t::type_t::output, 0}});
+    args.insert({DNNL_ARG_TO, {indices_t::type_t::output, 0}});
     if (op->num_outputs() > 1) {
-        arg_indices.insert({DNNL_ARG_SCRATCHPAD,
-                indices_t {indices_t::type_t::output, 1}});
+        args.insert({DNNL_ARG_SCRATCHPAD, {indices_t::type_t::output, 1}});
     }
-    return arg_indices;
+
+    return args;
 }
 
 } // namespace dnnl_impl

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2022-2023 Intel Corporation
+* Copyright 2022 Intel Corporation
 * Copyright 2022-2023 FUJITSU LIMITED
 * Copyright 2025 Arm Ltd. and affiliates
 *
@@ -432,7 +432,7 @@ void jit_uni_binary_kernel_t<isa>::compute_bcast(bool tail) {
 
 template <cpu_isa_t isa>
 void jit_uni_binary_kernel_t<isa>::push(const Xbyak_aarch64::XReg &reg) {
-    str(reg, pre_ptr(X_SP, -(reg.getBit() / 8)));
+    str(reg, pre_ptr(X_SP, -static_cast<int>(reg.getBit() / 8)));
 }
 template <cpu_isa_t isa>
 void jit_uni_binary_kernel_t<isa>::pop(const Xbyak_aarch64::XReg &reg) {

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2022-2025 Intel Corporation
+* Copyright 2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -130,6 +130,10 @@ bool matches(const kcatalog::Entry &e, const MatchParams &p)
             if (e.restrictions.allowedSizesMax[i] >= 0)
                 ok = ok && (mnk[i] <= e.restrictions.allowedSizesMax[i]);
         }
+    }
+
+    if (p.reqNUnroll32){
+        ok = ok && (e.driverInfo.unroll[LoopM] % 32 == 0);
     }
 
     for (int i = 0; i < p.nExtraReqs; i++)
@@ -313,6 +317,7 @@ MatchParamsBase::MatchParamsBase(ngen::HW hw, bool systolicAvailable, bool isInt
     using namespace kcatalog;
 
     auto problem = problem_;
+    reqNUnroll32 = problem.hasCMXScale();
 
     switch (hw) {
         default: assert(!"Unknown architecture");

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2022-2025 Intel Corporation
+* Copyright 2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -936,8 +936,6 @@ bool zero_points_ok(const problem_t &prb) {
             !utils::one_of(input_type, s8, u8), zp.has_default_values());
     if (!ok) return false;
 
-    if (zp.has_host_scalars()) return false;
-
     if (!zp.has_default_values(DNNL_ARG_SRC)) {
         int mask_src = zp.get_mask(DNNL_ARG_SRC);
         ok = utils::one_of(mask_src, 0, (1 << 1));
@@ -985,8 +983,6 @@ bool post_ops_ok(const problem_t &prb, const hw_t &hw) {
     if (!attr->post_ops_.check_sum_consistency(
                 prb.c_data_type, utils::one_of(input_type, s8, u8), true))
         return false;
-
-    if (attr->scales_.has_host_scalars()) return false;
 
     if (!attr->scales_.has_default_values())
         if (!prb.is_s32_accumulator() && !prb.is_fp8_conv()) return false;
@@ -1644,6 +1640,25 @@ walk_order_t compute_walk_order(const config_t &cfg) {
         size_t ab_bytes = get_memory_footprint(cfg, inner, outer);
         if (ab_bytes <= l3_size) grid_inner = std::move(outer);
     }
+
+    // Prefer square spatial dimensions to increase cache reuse due to iteration
+    // over kernel spatial dimensions.
+    if (cfg.prb().is_fwd && cfg.loop_dim(pvars::kh) > 1 && cfg.prb().sh == 1) {
+        auto &w_inner = grid_inner[pvars::ow];
+        auto &h_inner = grid_inner[pvars::oh];
+        auto rebalance_spatial = [&]() {
+            if (grid_tile[pvars::oh] % (h_inner * 2)) return false;
+            if (w_inner % 2) return false;
+            if (w_inner < h_inner * 4) return false;
+            return true;
+        };
+
+        while (rebalance_spatial()) {
+            w_inner /= 2;
+            h_inner *= 2;
+        }
+    }
+
     // Add the blocks in this order:
     // - Step 1. Add grid_inner blocks (fitting L3 cache)
     // - Step 2. Add the remaining M/N blocks

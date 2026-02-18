@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2021-2025 Intel Corporation
+* Copyright 2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -226,9 +226,8 @@ private:
             regscratchpad_, rax, r23};
     const injector_utils::reg64_savable_t reg_src_zero_point {
             regscratchpad_, rax, r24};
-    // TODO: Make use of rbp under condition in reg_zp_compensation
     const injector_utils::reg64_savable_t reg_zp_compensation {
-            regscratchpad_, rbp, r25};
+            regscratchpad_, r12, r25};
     // abi_param1 is used in post-ops injector and by reg_aux_B,
     // so need to be savable or use other registers
     const injector_utils::reg64_savable_t reg_binary_params {

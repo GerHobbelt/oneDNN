@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2025 Intel Corporation
+* Copyright 2019 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -276,6 +276,7 @@ void debugdump_processed_source(const std::string &source,
                 = std::string() + "cpp -P " + o + " | clang-format";
         execute_command(preprocess_cmd, source);
         std::cout << "OCL_ARCH_OPTIONS: " << cl_options << std::endl;
+        std::cout << "OCL_OPTIONS: " << options << std::endl;
     }
 #endif
 }

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2025 Intel Corporation
+* Copyright 2019 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -325,9 +325,12 @@ status_t ref_matmul_t::execute_ref(const exec_ctx_t &ctx) const {
                         // round_down_pow2(max_dst_group) so the rounding
                         // to a power of two happens before the division,
                         // and not after.
-                        float dst_group_scale = types::round_to_dt(dst_scale_dt,
-                                                        max_dst_group)
-                                / types::max_value<float>(dst_d.data_type());
+                        float dst_group_scale = std::max(
+                                types::round_to_dt(dst_scale_dt, 0.f),
+                                types::round_to_dt(dst_scale_dt, max_dst_group)
+                                        / types::round_to_dt(dst_scale_dt,
+                                                types::max_value<float>(
+                                                        dst_d.data_type())));
 
                         dims_t dst_dims_idx;
                         const size_t offset = mb * M * N + m_ * N + n_;

@@ -46,7 +46,7 @@ int quant_entry_ndims(
     // for gemmstone, 1D quantization implies a full column vector
     // (i.e. not on the K dimension). If quantization varies over K,
     // we have to send these as 2D
-    if (count == 1 && qmd.dims[k_idx] > 1) return 2;
+    if (k_idx >= 0 && count == 1 && qmd.dims[k_idx] > 1) return 2;
 
     return count;
 }
@@ -125,13 +125,14 @@ status_t pd_t::init_post_ops() {
 
     auto maybe_convert_scales_to_postop
             = [this](const memory_desc_t &scale_md, int arg, data_type_t dt,
-                      bool &converted) -> status_t {
+                      bool mx, bool &converted) -> status_t {
         auto ndims = desc()->c_desc.ndims;
         // Scales on A/B can be converted to postops if
         // the scales md has K=1
         converted = false;
         int inner_dim = (arg == DNNL_ARG_A ? ndims - 2 : ndims - 1);
         bool convert = (scale_md.dims[inner_dim] <= 1) || (arg == DNNL_ARG_C);
+        convert &= !mx;
         if (convert) {
             if (arg == DNNL_ARG_C) {
                 CHECK(post_ops_.append_binary(binary_div, &scale_md));
@@ -150,15 +151,15 @@ status_t pd_t::init_post_ops() {
     if (!a_scales.has_default_values() && !a_scales.is_host_scalar()) {
         // Host scalar scale will be converted to Alpha
         bool converted;
-        CHECK(maybe_convert_scales_to_postop(
-                a_scale_md_, DNNL_ARG_A, a_scales.get_data_type(), converted));
+        CHECK(maybe_convert_scales_to_postop(a_scale_md_, DNNL_ARG_A,
+                a_scales.get_data_type(), a_scales.is_mx(), converted));
         if (converted) asc_dims_ = -1;
     }
 
     if (!b_scales.has_default_values() && !b_scales.is_host_scalar()) {
         bool converted;
-        CHECK(maybe_convert_scales_to_postop(
-                b_scale_md_, DNNL_ARG_B, b_scales.get_data_type(), converted));
+        CHECK(maybe_convert_scales_to_postop(b_scale_md_, DNNL_ARG_B,
+                b_scales.get_data_type(), b_scales.is_mx(), converted));
         if (converted) bsc_dims_ = -1;
     }
 
@@ -166,11 +167,12 @@ status_t pd_t::init_post_ops() {
             || (c_scales.is_host_scalar() && num_orig_postops > 0);
     if (!c_scales.has_default_values() && try_c_scale) {
         bool converted;
-        CHECK(maybe_convert_scales_to_postop(
-                c_scale_md_, DNNL_ARG_C, c_scales.get_data_type(), converted));
+        CHECK(maybe_convert_scales_to_postop(c_scale_md_, DNNL_ARG_C,
+                c_scales.get_data_type(), c_scales.is_mx(), converted));
         // Conversion of dst scales to post ops is currently supported for all
         // cases supported in the library.
-        gpu_assert(converted) << "Unable to convert dst scales to a post op";
+        gpu_assert(converted || c_scales.is_mx())
+                << "Unable to convert dst scales to a post op";
     }
 
     return status::success;
@@ -245,6 +247,7 @@ status_t pd_t::init_attrs() {
     bg_dims_ = quant_entry_ndims(b_gs, b_gs_md_, ndims - 1);
     asc_dims_ = quant_entry_ndims(a_scales, a_scale_md_, ndims - 2);
     bsc_dims_ = quant_entry_ndims(b_scales, b_scale_md_, ndims - 1);
+    csc_dims_ = quant_entry_ndims(c_scales, c_scale_md_, -1);
 
     a_scales_type_ = a_scales.get_data_type();
     if (!a_zps.has_default_groups()) {
@@ -273,21 +276,30 @@ status_t pd_t::init_attrs() {
         b_scales_group_n_ = b_scales.get_group(0);
         b_scales_group_k_ = b_scales.get_group(1);
     }
+    c_scales_type_ = c_scales.get_data_type();
+    if (!c_scales.has_default_groups()) {
+        c_scales_group_m_ = c_scales.get_group(1);
+        c_scales_group_n_ = c_scales.get_group(0);
+        with_mx_scale_ = c_scales.is_mx();
+    }
     return status::success;
 }
 
 bool pd_t::zp_ok() {
-    auto &attr_gs = attr()->precomputed_reductions_;
+    using namespace data_type;
     auto &attr_zps = attr()->zero_points_;
     auto &a_zps = attr_zps.get(DNNL_ARG_A);
     auto &b_zps = attr_zps.get(DNNL_ARG_B);
+
+    // INT4 ZPs on SRC do not expand the range in a meaningful way, skipping
+    if (utils::one_of((swap_ab() ? a_zps : b_zps).get_data_type(), s4, u4))
+        return false;
+
     int ndims = desc()->a_desc.ndims;
-    const auto d = desc();
-    using namespace data_type;
-    bool weights_upconversion
-            = ((utils::one_of(swap_ab() ? d->b_type() : d->a_type(), s4, u4)
-                       && dy_quant_enabled_)
-                    || wei_decomp_);
+    const bool a_int4 = utils::one_of(desc()->a_type(), s4, u4);
+    const bool b_int4 = utils::one_of(desc()->b_type(), s4, u4);
+    const bool weights_upconversion = wei_decomp_
+            || ((swap_ab() ? b_int4 : a_int4) && dy_quant_enabled_);
 
     if (attr_zps.has_host_scalars()) return false;
 
@@ -302,17 +314,15 @@ bool pd_t::zp_ok() {
             if (a_q2d_group_n != 1) return false;
             // Zero points with non-trivial groups only supported with
             // precomputed reductions or when target tensor is being dequantized.
-            if (attr_gs.has_default_values(DNNL_ARG_B) && dy_quant_enabled_
-                    && !utils::one_of(d->a_type(), s4, u4) && a_zp_2d())
+            if (attr()->precomputed_reductions_.has_default_values(DNNL_ARG_B)
+                    && dy_quant_enabled_ && b_int4 && !a_int4 && a_zp_2d())
                 return false;
         } else {
             if (!utils::one_of(cmask_a_, 0, mask_per_oc, mask_per_ic))
                 return false;
             // Weights zp can only be performantly enabled during upconversion
             // for cases that perform decompression.
-            if (!wei_decomp_ && !utils::one_of(d->a_type(), s4, u4)
-                    && a_scales_2d())
-                return false;
+            if (!wei_decomp_ && !a_int4 && a_scales_2d()) return false;
         }
     }
 
@@ -327,8 +337,7 @@ bool pd_t::zp_ok() {
             if (!utils::one_of(b_q2d_group_n, 1, desc()->n())) return false;
             // Zero points with non-trivial groups only supported
             // when target tensor is being dequantized.
-            if (dy_quant_enabled_ && !utils::one_of(d->b_type(), s4, u4)
-                    && b_zp_2d())
+            if (dy_quant_enabled_ && a_int4 && !b_int4 && b_zp_2d())
                 return false;
         } else {
             if (!utils::one_of(
@@ -379,7 +388,9 @@ bool pd_t::scales_ok() {
         if (!(utils::one_of(mask, 0, mask_scalar, mask_per_oc, mask_per_ic)
                     || (utils::one_of(s, DNNL_ARG_A, DNNL_ARG_B)
                             && !x_scales.has_default_groups()
-                            && valid_2d_mask(mask, ndims))))
+                            && valid_2d_mask(mask, ndims))
+                    || (s == DNNL_ARG_C && !x_scales.has_default_groups()
+                            && with_mx_scale() && valid_2d_mask(mask, ndims))))
             return false;
 
         // Nontrivial groups are only supported across one GEMM dimension.
@@ -400,6 +411,11 @@ bool pd_t::scales_ok() {
                 if (1 < gs && gs < dim) count++;
             }
             if (count > 1) return false;
+
+            // Dynamic Dst Quant only supported with `1x32` groups.
+            if (s == DNNL_ARG_C && with_mx_scale() && x_scales.get_group(0) != 1
+                    && x_scales.get_group(1) != 32)
+                return false;
         }
     }
 

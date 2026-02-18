@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2025 Intel Corporation
+* Copyright 2019 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -101,6 +101,7 @@ struct attr_info_t {
     bool with_host_src_scale;
     bool with_host_wei_scale;
     bool with_host_dst_scale;
+    bool with_mx_dst_scale;
     bool with_host_src_zp;
     bool with_host_wei_zp;
     bool with_host_dst_zp;

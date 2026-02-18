@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2025 Intel Corporation
+* Copyright 2019 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -104,7 +104,9 @@ void Generator<hw>::loadMatrixBlock(const Register &dest, const RegisterBlock &b
         case AccessType::Scattered:
         case AccessType::ChannelScattered: {
             auto spec = getDataSpecLSC(atype, astrategy, block, AccessClass::Read);
-            if (block.descAssigned) {
+            if (astrategy.atomic && hw >= HW::Xe2)
+                atomic(AtomicOp::load, mod, dest, spec, astrategy.base, getAddress(addr, block, astrategy));
+            else if (block.descAssigned) {
                 MessageDescriptor desc;
                 ExtendedMessageDescriptor exdesc;
                 encodeLoadDescriptors(hw, desc, exdesc, block.simdSize, r0, spec, astrategy.base, null);

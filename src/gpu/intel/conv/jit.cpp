@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2021-2025 Intel Corporation
+* Copyright 2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -145,9 +145,15 @@ public:
             tiler->set_cur_version(primitive->version());
         }
 
+        int desc_idx = gpu_utils::dev_getenv("desc_idx", -1);
         for (int try_iter = 0; try_iter < max_tries; try_iter++) {
-            if (try_iter != 0 && !tiler->is_tuning_mode())
+            if (try_iter < desc_idx) {
                 tiler->move_next(cfg);
+                continue;
+            }
+            if ((try_iter != 0 && !tiler->is_tuning_mode())) {
+                tiler->move_next(cfg);
+            }
             try {
                 cfg = data.pd_cfg;
                 cfg.set_pd(pd);
@@ -356,14 +362,35 @@ private:
         // Initialize kernel arguments.
         int scratchpad_key = memory_tracking::names::key_none;
         for (auto &t : data.tensor_cfg.tensors()) {
+            auto buf_type = [pd](int key) {
+                if (key & DNNL_ARG_ATTR_ZERO_POINTS) {
+                    key &= ~DNNL_ARG_ATTR_ZERO_POINTS;
+                    auto &zp = pd->attr()->zero_points_;
+                    if (zp.get(key).is_host_scalar()) switch (key) {
+                            case DNNL_ARG_SRC:
+                                return (zp.has_default_values(DNNL_ARG_WEIGHTS))
+                                        ? type_t::f32()
+                                        : type_t::s32();
+                            case DNNL_ARG_DST: return type_t::f32();
+                            default: return to_ir(zp.get(key).get_data_type());
+                        }
+                } else if (key & DNNL_ARG_ATTR_SCALES) {
+                    key &= ~DNNL_ARG_ATTR_SCALES;
+                    auto &sc = pd->attr()->scales_;
+                    if (sc.get(key).is_host_scalar())
+                        return to_ir(sc.get(key).get_data_type());
+                }
+                return type_t::byte(type::attr_t::ptr);
+            };
             const bool wei_reorder_precalc = (t.name == "wei")
                     && cfg.zp_cfg().needs_src_reorder_precalc;
             const bool src_conv_precalc = (t.name == "src_zero_points")
                     && cfg.zp_cfg().needs_src_conv_precalc;
 
-            const auto compute_buf = make_buffer(t.name);
             size_t compute_size = size_bytes(t.compute_layout);
             int compute_arg_key = t.arg_key;
+            const auto compute_buf
+                    = var_t::make(buf_type(compute_arg_key), t.name);
 
             if (compute_arg_key == DNNL_ARG_UNDEF) {
                 gpu_assert(!t.needs_reorder);
@@ -377,8 +404,10 @@ private:
                 if (t.needs_reorder || src_conv_precalc)
                     ki.register_scratchpad_arg(
                             buf, compute_arg_key, is_input, compute_size);
-                else
+                else if (buf.type().is_ptr())
                     ki.register_user_arg(buf, compute_arg_key, is_input);
+                else
+                    ki.register_immediate_arg(buf, expr_t(), compute_arg_key);
             };
             auto scratchpad_book = [&](int key) {
                 pd->scratchpad_registry().registrar().book(into<uint32_t>(key),
@@ -388,7 +417,7 @@ private:
                 auto &zero_out_info
                         = create_kernel_info(pd, kernel_id_t::zero_out);
                 auto size_var = var_t::make(type_t::u32(), "size");
-                zero_out_info.register_internal_arg(
+                zero_out_info.register_immediate_arg(
                         size_var, into<uint32_t>(compute_size));
                 zero_out_info.set_nd_range(zero_out_kernel_desc_t::nd_range(
                         cfg.simd(), compute_size));

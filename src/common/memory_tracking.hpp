@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2018-2025 Intel Corporation
+* Copyright 2018 Intel Corporation
 * Copyright 2024-2025 Arm Ltd. and affiliates
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
@@ -276,6 +276,7 @@ enum {
     key_matmul_dst_cast_acc,
     key_matmul_dst_scales,
     key_matmul_sparse_tmp_ptr,
+    key_matmul_mx_scale_space,
     key_pool_dst_bf16cvt,
     key_pool_dst_plain2blocked_cvt,
     key_pool_ind_plain2blocked_cvt,

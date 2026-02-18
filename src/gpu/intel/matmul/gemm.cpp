@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020-2025 Intel Corporation
+* Copyright 2020 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -56,11 +56,16 @@ status_t gemm_t::execute(const exec_ctx_t &ctx) const {
     args.c_zero_point = c0;
     args.a_scales = &CTX_IN_STORAGE(DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS);
     args.b_scales = &CTX_IN_STORAGE(DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC);
-    args.c_scales = &CTX_IN_STORAGE(DNNL_ARG_ATTR_SCALES | DNNL_ARG_DST);
+    bool mx_scales = gemm_->pd()->attr()->scales_.get(DNNL_ARG_DST).is_mx();
+    args.c_scales = mx_scales
+            ? &CTX_OUT_STORAGE(DNNL_ARG_ATTR_SCALES | DNNL_ARG_DST)
+            : &CTX_IN_STORAGE(DNNL_ARG_ATTR_SCALES | DNNL_ARG_DST);
+
     args.a_group_sums = &CTX_IN_STORAGE(
             DNNL_ARG_ATTR_PRECOMPUTED_REDUCTIONS | DNNL_ARG_WEIGHTS);
     args.b_group_sums = &CTX_IN_STORAGE(
             DNNL_ARG_ATTR_PRECOMPUTED_REDUCTIONS | DNNL_ARG_SRC);
+
     args.sround_seed = &CTX_IN_STORAGE(DNNL_ARG_ATTR_ROUNDING_SEED);
     args.exec_args = ctx.args();
     gemm::desc_t desc;

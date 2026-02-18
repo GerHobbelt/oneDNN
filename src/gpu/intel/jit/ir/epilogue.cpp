@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2022-2025 Intel Corporation
+* Copyright 2022 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -311,8 +311,9 @@ public:
                 gpu_assert(t.is_f32_scalar())
                         << "All tensors in the compute expression must be f32 "
                            "scalars.";
-                gpu_assert(t.do_preload()) << "All tensors in the compute "
-                                              "expression must be preloaded.";
+                gpu_assert(t.do_preload() || !t.reg_buf().type().is_ptr())
+                        << "All non-immediate tensors in the compute"
+                           "expression must be preloaded.";
                 e = substitute(e, t.op_var(), t.load_expr(tile, 0));
             }
         }
@@ -519,7 +520,10 @@ public:
             dim_t lhs_elems = lhs_size / int(sizeof(float));
             auto &eltwise_func = post_op_.eltwise().as<eltwise_t>();
             if (eltwise_func.alg_kind == alg_kind::eltwise_stochastic_round) {
-
+                return post_op_.eltwise().call(
+                        {expr_t(lhs_elems), lhs_tensor.reg_buf(),
+                                (*args.at(eltwise_func.seed)).reg_buf()});
+            } else if (eltwise_func.alg_kind == alg_kind::eltwise_mx_scale) {
                 return post_op_.eltwise().call(
                         {expr_t(lhs_elems), lhs_tensor.reg_buf(),
                                 (*args.at(eltwise_func.seed)).reg_buf()});
