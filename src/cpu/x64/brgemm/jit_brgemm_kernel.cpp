@@ -207,12 +207,11 @@ private:
     const reg64_t reg_a_offset = rdx;
     const reg64_t reg_b_offset = rsi;
 
-    const reg64_t reg_aux1_A = rbp;
+    const reg64_savable_t reg_aux1_A {regscratchpad_, rbx, rbp, may_use_rbp()};
     const reg64_t reg_aux1_B = abi_param1;
 
-    const reg64_t reg_addr_batch = r13;
-    const reg64_t reg_aux1_batch = rbp;
-    const reg64_savable_t reg_relative_batch {regscratchpad_, rbp};
+    const reg64_savable_t reg_batch {regscratchpad_, r10};
+    const reg64_savable_t reg_aux_batch {regscratchpad_, rbx};
 
     const reg64_savable_t reg_bias {regscratchpad_, rbx, r24};
     const reg64_savable_t reg_src_scales {regscratchpad_, rbx, r23};
@@ -904,9 +903,7 @@ void jit_brgemm_kernel_t<Wmm>::read_params() {
 
     if (brg.with_binary) param1.save();
 
-    if (brg.type == brgemm_addr) {
-        mov(reg_addr_batch, ptr[param1 + GET_OFF(batch)]);
-    } else {
+    if (brg.type != brgemm_addr) {
         if (brg.layout == brgemm_row_major) {
             mov(reg_A, ptr[param1 + GET_OFF(ptr_A)]);
             mov(reg_B, ptr[param1 + GET_OFF(ptr_B)]);
@@ -914,10 +911,9 @@ void jit_brgemm_kernel_t<Wmm>::read_params() {
             mov(reg_A, ptr[param1 + GET_OFF(ptr_B)]);
             mov(reg_B, ptr[param1 + GET_OFF(ptr_A)]);
         }
-
-        mov(reg_relative_batch, ptr[param1 + GET_OFF(batch)]);
-        reg_relative_batch.save();
     }
+    mov(reg_batch, ptr[param1 + GET_OFF(batch)]);
+    reg_batch.save();
 
     mov(reg_C, ptr[param1 + GET_OFF(ptr_C)]);
     mov(reg_D, ptr[param1 + GET_OFF(ptr_D)]);
@@ -1361,10 +1357,12 @@ void jit_brgemm_kernel_t<Wmm>::store_accumulators_apply_post_ops(dim_t bd_block,
                 if (IMPLICATION(is_tail, isa_has_masks(brg.isa_impl))) {
                     switch (brg.dt_wei_scales) {
                         case data_type::f32:
-                            if (brg.is_gemv)
-                                uni_vmovss(vmm_wei_scales_masked, addr);
-                            else
+                            if (brg.is_gemv) {
+                                if (!brg.treat_y_as_row)
+                                    uni_vmovss(vmm_wei_scales_masked, addr);
+                            } else {
                                 uni_vmovups(vmm_wei_scales_masked, addr);
+                            }
                             break;
                         case data_type::bf16:
                             uni_vpmovzxwd(vmm_wei_scales_masked, addr);
@@ -1384,7 +1382,21 @@ void jit_brgemm_kernel_t<Wmm>::store_accumulators_apply_post_ops(dim_t bd_block,
             for (dim_t bd = 0; bd < bd_block; bd++) {
                 auto vmm = accm(ld_block2, bd, ld);
                 if (dq2ps_required && !dq2ps_cvt_done) uni_vcvtdq2ps(vmm, vmm);
-                uni_vmulps(vmm, vmm, vmm_wei_scales);
+
+                if (brg.is_gemv) {
+                    if (!brg.treat_y_as_row) {
+                        uni_vmulss(Xmm(vmm.getIdx()), Xmm(vmm.getIdx()),
+                                vmm_wei_scales);
+                    } else {
+                        auto addr = ptr[reg_aux_wei_scales
+                                + wei_scales_offset(bd)];
+                        uni_vmovss(Xmm(vmm_wei_scales_masked.getIdx()), addr);
+                        uni_vmulss(Xmm(vmm.getIdx()), Xmm(vmm.getIdx()),
+                                vmm_wei_scales);
+                    }
+                } else {
+                    uni_vmulps(vmm, vmm, vmm_wei_scales);
+                }
             }
         }
         dq2ps_cvt_done = true;
@@ -1422,7 +1434,15 @@ void jit_brgemm_kernel_t<Wmm>::store_accumulators_apply_post_ops(dim_t bd_block,
         for (dim_t bd = 0; bd < bd_block; bd++) {
             auto vmm = accm(ld_block2, bd, ld);
             if (dq2ps_required && !dq2ps_cvt_done) uni_vcvtdq2ps(vmm, vmm);
-            if (brg.with_bias) uni_vaddps(vmm, vmm, vmm_bias);
+            if (brg.with_bias) {
+                if (!brg.treat_y_as_row) {
+                    uni_vaddps(vmm, vmm, vmm_bias);
+                } else {
+                    auto ptr_bias = ptr[reg_aux_bias + bias_offset(bd)];
+                    uni_vmovss(Xmm(vmm_bias.getIdx()), ptr_bias);
+                    uni_vaddss(Xmm(vmm.getIdx()), Xmm(vmm.getIdx()), vmm_bias);
+                }
+            }
         }
     }
     if (brg.is_fp8_via_convert()) reg64_fp8_aux.restore();
@@ -1931,36 +1951,42 @@ void jit_brgemm_kernel_t<Wmm>::store_accumulators(dim_t bd_block2,
 
 template <typename Wmm>
 void jit_brgemm_kernel_t<Wmm>::restore_A_B_matrices() {
-    auto restore_reg_batch = brg.brgattr.max_bs > 1 || vpad_exist;
-    if (brg.type == brgemm_addr) {
-        if (restore_reg_batch) mov(reg_aux1_batch, reg_addr_batch);
-    } else {
-        mov(reg_aux1_A, reg_A);
-        mov(reg_aux1_B, reg_B);
+    // called at the start of bs loop
+    // restore batch pointer
+    reg_batch.restore();
+    // save batch pointer in reg_aux_batch
+    reg_batch.saveTo(reg_aux_batch);
 
-        reg_relative_batch.restore();
+    if (brg.type != brgemm_addr) {
+        mov(reg_aux1_A, reg_A);
+        reg_aux1_A.save();
+        mov(reg_aux1_B, reg_B);
     }
 }
 
 template <typename Wmm>
 void jit_brgemm_kernel_t<Wmm>::set_A_B_matrices() {
+    // called on each iteration of bs loop
     if (brg.type == brgemm_addr) {
+        const bool is_row_major = (brg.layout == brgemm_row_major);
         if (brg.brgattr.max_bs > 1) {
-            if (brg.layout == brgemm_row_major) {
-                mov(reg_aux_A,
-                        ptr[reg_aux1_batch + GET_OFF_BATCH_ELEMENT(ptr.A)]);
-                mov(reg_aux_B,
-                        ptr[reg_aux1_batch + GET_OFF_BATCH_ELEMENT(ptr.B)]);
-            } else {
-                mov(reg_aux_A,
-                        ptr[reg_aux1_batch + GET_OFF_BATCH_ELEMENT(ptr.B)]);
-                mov(reg_aux_B,
-                        ptr[reg_aux1_batch + GET_OFF_BATCH_ELEMENT(ptr.A)]);
-            }
+            reg_aux_batch.restore();
+            const size_t offA = is_row_major ? GET_OFF_BATCH_ELEMENT(ptr.A)
+                                             : GET_OFF_BATCH_ELEMENT(ptr.B);
+            const size_t offB = is_row_major ? GET_OFF_BATCH_ELEMENT(ptr.B)
+                                             : GET_OFF_BATCH_ELEMENT(ptr.A);
+
+            mov(reg_aux_A, ptr[reg_aux_batch + offA]);
+            mov(reg_aux_B, ptr[reg_aux_batch + offB]);
+
+            // Advance to next batch element and prefetch
+            add(reg_aux_batch, sizeof(brgemm_batch_element_t));
+            reg_aux_batch.save();
+            prefetcht0(ptr[reg_aux_batch]);
         } else {
-            // for max_batch == 1 we stored A and B pointers at the beginning
-            // of kernel in reg_aux1_A and reg_aux1_B
-            if (brg.layout == brgemm_row_major) {
+            // max_bs == 1: reuse cached A/B saved at kernel entry
+            reg_aux1_A.restore();
+            if (is_row_major) {
                 mov(reg_aux_A, reg_aux1_A);
                 mov(reg_aux_B, reg_aux1_B);
             } else {
@@ -1968,30 +1994,32 @@ void jit_brgemm_kernel_t<Wmm>::set_A_B_matrices() {
                 mov(reg_aux_B, reg_aux1_A);
             }
         }
-
-        if (brg.brgattr.max_bs > 1) {
-            add(reg_aux1_batch, sizeof(brgemm_batch_element_t));
-            prefetcht0(ptr[reg_aux1_batch]);
-        }
     } else if (brg.type == brgemm_offs) {
+        // Base pointers
         mov(reg_aux_A, reg_A);
         mov(reg_aux_B, reg_B);
 
-        add(reg_aux_A,
-                ptr[reg_relative_batch + GET_OFF_BATCH_ELEMENT(offset.A)]);
-        add(reg_aux_B,
-                ptr[reg_relative_batch + GET_OFF_BATCH_ELEMENT(offset.B)]);
-        add(reg_relative_batch, sizeof(brgemm_batch_element_t));
+        reg_aux_batch.restore();
+        // Apply per-batch offsets
+        add(reg_aux_A, ptr[reg_aux_batch + GET_OFF_BATCH_ELEMENT(offset.A)]);
+        add(reg_aux_B, ptr[reg_aux_batch + GET_OFF_BATCH_ELEMENT(offset.B)]);
+        // Advance batch descriptor
+        add(reg_aux_batch, sizeof(brgemm_batch_element_t));
+        reg_aux_batch.save();
     } else if (brg.type == brgemm_strd) {
+        // Restore original bases saved in restore_A_B_matrices()
+        reg_aux1_A.restore();
         mov(reg_aux_A, reg_aux1_A);
         mov(reg_aux_B, reg_aux1_B);
 
+        // Add strides (safe_add handles large immediates)
         safe_add(reg_aux1_A, brg.stride_a, reg_tmp_gpr);
+        reg_aux1_A.save();
         safe_add(reg_aux1_B, brg.stride_b, reg_tmp_gpr);
         if (vpad_exist) {
-            reg_relative_batch.restore();
-            add(reg_relative_batch, sizeof(brgemm_batch_element_t));
-            reg_relative_batch.save();
+            reg_aux_batch.restore();
+            add(reg_aux_batch, sizeof(brgemm_batch_element_t));
+            reg_aux_batch.save();
         }
     }
 
@@ -2614,7 +2642,7 @@ void jit_brgemm_kernel_t<Wmm>::bs_loop(dim_t bd_block2, bool is_bdb_tail,
         dim_t ld_block2, bool is_ld_tail, bool first_bdb, bool last_bdb,
         dim_t rows_for_rd_tail, bool skip_accumulation) {
 
-    auto ld_loop_body = [&](dim_t vpad, bool last_bdb) {
+    auto bs_loop_body = [&](dim_t vpad, bool last_bdb) {
         set_A_B_matrices();
 
         dim_t bd_block = (is_bdb_tail) ? brg.bdb_tail : brg.bd_block;
@@ -2691,16 +2719,14 @@ void jit_brgemm_kernel_t<Wmm>::bs_loop(dim_t bd_block2, bool is_bdb_tail,
                 Label Vpad_loop_end_label;
                 std::vector<Label> Vpad_loop_iter_label(MAX_N_VPADS);
                 if (vpad_exist) {
-                    reg64_t reg_batch = (brg.type == brgemm_addr)
-                            ? reg_aux1_batch
-                            : ((brg.type == brgemm_offs) ? reg_addr_batch
-                                                         : reg_relative_batch);
-                    if (brg.type == brgemm_strd) reg_relative_batch.restore();
+                    if (brg.type == brgemm_addr || brg.type == brgemm_strd)
+                        reg_aux_batch.restore();
 
                     mov(reg_aux_A_vpad,
-                            ptr[reg_batch + GET_OFF_BATCH_ELEMENT(vvpad.top)]);
+                            ptr[reg_aux_batch
+                                    + GET_OFF_BATCH_ELEMENT(vvpad.top)]);
                     sub(reg_aux_A_vpad,
-                            ptr[reg_batch
+                            ptr[reg_aux_batch
                                     + GET_OFF_BATCH_ELEMENT(vvpad.bottom)]);
                 } else
                     xor_(reg_aux_A_vpad, reg_aux_A_vpad);
@@ -2731,14 +2757,14 @@ void jit_brgemm_kernel_t<Wmm>::bs_loop(dim_t bd_block2, bool is_bdb_tail,
                     }
                     cmp(reg_aux_A_vpad, vpad);
                     jne(Vpad_loop_iter_label[label_vpad + 1], T_NEAR);
-                    ld_loop_body(real_vpad, last_bdb);
+                    bs_loop_body(real_vpad, last_bdb);
                     jmp(Vpad_loop_end_label, T_NEAR);
                 }
                 L(Vpad_loop_iter_label[n_vpads - 1]);
-                ld_loop_body(0, last_bdb);
+                bs_loop_body(0, last_bdb);
                 L(Vpad_loop_end_label);
             } else {
-                ld_loop_body(0, last_bdb);
+                bs_loop_body(0, last_bdb);
             }
             if (brg.brgattr.max_bs > 1) {
                 dec(reg_BS_loop);
@@ -2855,6 +2881,20 @@ void jit_brgemm_kernel_t<Wmm>::bdb_loop() {
         }
         add(reg_a_offset, bdb_A_offset(bd_block2));
 
+        if (brg.is_gemv && brg.treat_y_as_row) {
+            if (brg.with_bias) {
+                reg_bias.restore();
+                add(reg_bias, bias_offset(brg.bd_block));
+                reg_bias.save();
+            }
+
+            if (brg.with_wei_scales) {
+                reg_wei_scales.restore();
+                add(reg_wei_scales, wei_scales_offset(brg.bd_block));
+                reg_wei_scales.save();
+            }
+        }
+
         advance_bd_block2_post_op_regs(bd_block2);
     };
 
@@ -2889,7 +2929,8 @@ void jit_brgemm_kernel_t<Wmm>::bdb_loop() {
 
             if (brg.type == brgemm_strd) {
                 // if batch is nullptr then it means no vpadding in this call
-                cmp(reg_relative_batch, 0);
+                reg_aux_batch.restore();
+                cmp(reg_aux_batch, 0);
                 je(no_vpad_label, T_NEAR);
             }
 
@@ -3019,8 +3060,10 @@ void jit_brgemm_kernel_t<Wmm>::bdb_loop() {
     auto bdb_loop_general = [&](bool skip_accumulation) {
         if (brg.type == brgemm_addr && brg.brgattr.max_bs == 1 && !vpad_exist
                 && !skip_accumulation) {
-            mov(reg_aux1_A, ptr[reg_addr_batch + GET_OFF_BATCH_ELEMENT(ptr.A)]);
-            mov(reg_aux1_B, ptr[reg_addr_batch + GET_OFF_BATCH_ELEMENT(ptr.B)]);
+            reg_batch.restore();
+            mov(reg_aux1_A, ptr[reg_batch + GET_OFF_BATCH_ELEMENT(ptr.A)]);
+            reg_aux1_A.save();
+            mov(reg_aux1_B, ptr[reg_batch + GET_OFF_BATCH_ELEMENT(ptr.B)]);
         }
 
         xor_(reg_a_offset, reg_a_offset);

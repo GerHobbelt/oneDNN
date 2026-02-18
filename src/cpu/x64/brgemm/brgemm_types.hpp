@@ -362,6 +362,7 @@ struct brgemm_desc_t {
     bool is_runtime_ldd = false;
 
     bool is_gemv = false;
+    bool treat_y_as_row = false;
 
     static constexpr int MAX_VPAD = 100;
     static constexpr int AMX_TILES_NUM = 8;
@@ -524,6 +525,15 @@ struct brgemm_desc_t {
         return dt_c != dt_d || with_eltwise || with_binary || with_bias
                 || with_sum || req_s8s8_compensation || has_zero_points
                 || with_src_scales || with_wei_scales || with_dst_scales;
+    }
+
+    bool can_dispatch_uker() const noexcept {
+        using namespace utils;
+        return is_tmm
+                && one_of(type, brgemm_addr, brgemm_offs, brgemm_static_offs)
+                && brgattr.use_uker
+                && everyone_is(false, is_runtime_lda, is_runtime_ldb,
+                        is_runtime_ldc, is_runtime_ldd);
     }
 
     bool is_xf16() const noexcept { return is_bf16 || is_f16; }

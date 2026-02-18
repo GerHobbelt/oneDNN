@@ -77,6 +77,9 @@ int get_brg_kernel_index(const brgemm_matmul_conf_t &bgmmc, bool is_bs_tail,
             ? (bgmmc.is_runtime_N ? dynamic_n_tails[n_ker_idx - 1]
                                   : bgmmc.N_tail)
             : bgmmc.N_blk;
+
+    if (bgmmc.gemv_swap_a_b) std::swap(vM, vN);
+
     auto vK = (is_K_tail) ? bgmmc.K_tail : bgmmc.K_blk;
     if (vM == 0 || vN == 0 || vK == 0 || bs == 0 || bgmmc.LDA < vK
             || (bgmmc.LDB < vN && !bgmmc.is_amx)
@@ -377,15 +380,18 @@ status_t brgemm_matmul_t<isa>::pd_t::init(engine_t *engine) {
                 : bgmmc_.LDA;
         const auto kernel_isa = i_M == max_m_ker_idx - 1 ? backup_isa : isa;
 
-        if (bgmmc_.is_gemv)
+        if (bgmmc_.is_gemv) {
+            const dim_t gemv_m = bgmmc_.gemv_swap_a_b ? vN : vM;
+            const bool treat_y_as_row = bgmmc_.gemv_swap_a_b;
             CHECK(brgemv_desc_init(&brg, kernel_isa, bgmmc_.brg_type,
                     bgmmc_.src_dt, bgmmc_.wei_dt, false, alpha, vbeta, LDA,
-                    bgmmc_.LDC, vM, vK));
-        else
+                    bgmmc_.LDC, gemv_m, vK, treat_y_as_row));
+        } else {
             CHECK(brgemm_desc_init(&brg, kernel_isa, bgmmc_.brg_type,
                     bgmmc_.src_dt, bgmmc_.wei_dt, false, false,
                     brgemm_row_major, alpha, vbeta, LDA, bgmmc_.LDB, bgmmc_.LDC,
                     vM, vN, vK, nullptr, bgmmc_.is_tf32));
+        }
 
         auto LDD = bgmmc_.LDD;
         if (bgmmc_.with_wei_decompression && bgmmc_.has_zero_point_b)
@@ -516,7 +522,7 @@ status_t brgemm_matmul_t<isa>::init(engine_t *engine) {
 template <cpu_isa_t isa>
 bool brgemm_matmul_t<isa>::determine_prefetch(const int mb, const int m_end,
         const int nb, const int n_end, const brgemm_matmul_conf_t &bgmmc,
-        brg_matmul_exec_ctx_t &brgmm_ctx) const {
+        const brg_matmul_exec_ctx_t &brgmm_ctx) const {
     // Prefetch if not the last BRGEMM in the chunk and
     // if the next BRGEMM is identical to the current one.
 
@@ -547,22 +553,23 @@ status_t brgemm_matmul_t<isa>::execute_body(const exec_ctx_t &ctx) const {
 
     brg_matmul_exec_ctx_t brgmm_ctx(ctx, pd(), helper);
 
-    const auto &bgmmc = pd()->get_brgemm_matmul_conf();
-    const bool use_buffer_a
-            = bgmmc.use_buffer_a || bgmmc.use_buffer_a_tail_only;
-    const bool is_amx = is_superset(isa, avx512_core_amx);
     const int num_threads = brgmm_ctx.get_num_threads_for_parallelization();
-    const int M_chunks = brgmm_ctx.get_M_chunks();
-    const int M_chunk_size = brgmm_ctx.get_M_chunk_size();
-    const int M_chunk_tail = brgmm_ctx.get_M_chunk_tail();
-
-    const int K_chunks = brgmm_ctx.get_K_chunks();
-    const int K_chunk_size = brgmm_ctx.get_K_chunk_size();
-    const int K_chunk_tail = brgmm_ctx.get_K_chunk_tail();
-
-    const int N_chunks = brgmm_ctx.get_N_chunks();
-    const int N_chunk_tail = brgmm_ctx.get_N_chunk_tail();
     parallel(num_threads, [&](const int ithr, const int nthr) {
+        const auto &bgmmc = pd()->get_brgemm_matmul_conf();
+        const bool use_buffer_a
+                = bgmmc.use_buffer_a || bgmmc.use_buffer_a_tail_only;
+        const bool is_amx = is_superset(isa, avx512_core_amx);
+        const int M_chunks = brgmm_ctx.get_M_chunks();
+        const int M_chunk_size = brgmm_ctx.get_M_chunk_size();
+        const int M_chunk_tail = brgmm_ctx.get_M_chunk_tail();
+
+        const int K_chunks = brgmm_ctx.get_K_chunks();
+        const int K_chunk_size = brgmm_ctx.get_K_chunk_size();
+        const int K_chunk_tail = brgmm_ctx.get_K_chunk_tail();
+
+        const int N_chunks = brgmm_ctx.get_N_chunks();
+        const int N_chunk_tail = brgmm_ctx.get_N_chunk_tail();
+
         const int ithr_bmn = brgmm_ctx.get_thread_idx_for_bmn_gemm(ithr);
         const int ithr_k = brgmm_ctx.get_thread_idx_for_k(ithr);
         if (ithr_bmn < 0 || ithr_k < 0) return;
@@ -1843,6 +1850,9 @@ struct brgemm_matmul_t<isa>::brg_matmul_exec_ctx_t {
             addr_batch[b_iter].ptr.B = (bgmmc_.use_buffer_b)
                     ? get_buf_B_ptr(ithr, k_blk_idx, n_blk_idx, brg_batch_idx)
                     : get_data_B_kn_ptr(B_data_batch_ptr, k, n);
+
+            if (bgmmc_.gemv_swap_a_b)
+                std::swap(addr_batch[b_iter].ptr.A, addr_batch[b_iter].ptr.B);
         }
     }
 
