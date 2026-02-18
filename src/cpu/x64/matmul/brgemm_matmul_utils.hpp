@@ -94,7 +94,7 @@ struct brgemm_matmul_conf_t {
     dim_t LDA, LDB, LDC, LDD;
     dim_t LDB2;
     int brgemm_batch_size, brgemm_batch_tail_size;
-    int wei_n_blk, wei_k_blk;
+    int wei_n_blk, wei_k_blk, orig_wei_k_blk;
     brgemm_batch_kind_t brg_type;
     bool is_macro_heuristics;
 
@@ -220,6 +220,7 @@ struct brgemm_matmul_conf_t {
     bool is_f32_f16 = false;
     bool is_f32_bf16 = false;
     bool is_int4_weights = false;
+    bool is_f4_via_convert = false;
     bool is_tf32 = false;
     bool req_wei_vnni_downconvert = false;
     bool is_runtime_M = false;
@@ -263,8 +264,7 @@ struct brgemm_matmul_conf_utils_t {
         return blocked_B_layouts_allowed && !bgmmc.is_runtime_N
                 && utils::one_of(matrix_b_tag, blocked_64n_B_layout_tag,
                         blocked_48n_B_layout_tag, blocked_32n_B_layout_tag,
-                        blocked_24n_B_layout_tag, blocked_16n_B_layout_tag,
-                        blocked_8n_B_layout_tag);
+                        blocked_16n_B_layout_tag);
     }
 
     inline bool check_b_layout_blocked_32_by_n(
@@ -276,6 +276,32 @@ struct brgemm_matmul_conf_utils_t {
     inline bool get_blocked_B() const {
         return blocked_B_layouts_allowed && !bgmmc.is_runtime_N
                 && check_b_layout_blocked_by_n(bgmmc.wei_tag);
+    }
+
+    /**
+     * Returns the total block size along the K dimension, as the product of
+     * the fixed outer block size and the VNNI granularity.
+     *
+     * Example: For format tag BA16a16b4a, the block size is
+     * 16 (outer) * 4 (VNNI granularity) = 64.
+     *
+     * @param use_orig_wei_dt If true, use the original weight data type to
+     *   determine block size. If false, use the compute data type type.
+     * @return The total K dimension block size.
+     */
+    int get_wei_k_blk(bool use_orig_wei_dt = false) const {
+        // No blocking is used in GEMV mode.
+        if (bgmmc.is_gemv) return 1;
+
+        // Fixed outer block size.
+        const int k_outer_block = 16;
+
+        // VNNI granularity determines the inner block size along K.
+        const data_type_t wei_dt
+                = use_orig_wei_dt ? bgmmc.orig_wei_dt : bgmmc.wei_dt;
+        const int k_inner_block = data_type_vnni_granularity(wei_dt);
+
+        return k_outer_block * k_inner_block;
     }
 
     inline bool use_buffer_b(bool use_heuristic = true) const {
@@ -351,6 +377,8 @@ struct brgemm_matmul_conf_utils_t {
 
     inline bool is_f16() const { return f16_dt; }
 
+    inline bool is_f4_via_convert() const { return f4_via_convert_dt; }
+
     inline bool is_f8() const { return f8_dt; }
 
     inline bool is_bf8() const { return bf8_dt; }
@@ -407,8 +435,8 @@ struct brgemm_matmul_conf_utils_t {
 private:
     brgemm_matmul_conf_t &bgmmc;
 
-    const bool f32_dt, bf16_dt, f16_dt, f8_dt, bf8_dt, int8_dt, bf32_dt,
-            tf32_dt;
+    const bool f32_dt, bf16_dt, f16_dt, f4_via_convert_dt, f8_dt, bf8_dt,
+            int8_dt, bf32_dt, tf32_dt;
     const bool weights_decompression_support, bf16_with_int_wei_dt, f32_f16_dt,
             f32_bf16_dt, f16_with_int_wei_dt;
     const bool A_any_layout;
@@ -419,8 +447,7 @@ private:
     const format_tag_t plain_tensor_layout_tag;
     const format_tag_t transposed_tensor_layout_tag;
     const format_tag_t blocked_64n_B_layout_tag, blocked_48n_B_layout_tag,
-            blocked_32n_B_layout_tag, blocked_24n_B_layout_tag,
-            blocked_16n_B_layout_tag, blocked_8n_B_layout_tag;
+            blocked_32n_B_layout_tag, blocked_16n_B_layout_tag;
     const bool blocked_B_layouts_allowed;
     const bool n_blk_fixed;
     const cpu_isa_t isa_;
@@ -439,7 +466,8 @@ void init_aux_values(brgemm_matmul_conf_t &bgmmc,
 status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
         const matmul_desc_t &mmd, memory_desc_t &src_md,
         memory_desc_t &weights_md, memory_desc_t &dst_md,
-        memory_desc_t &bias_md, primitive_attr_t &attr);
+        memory_desc_t &bias_md, primitive_attr_t &attr,
+        const std::function<bool()> &can_use_gemm_fallback);
 
 void init_scratchpad(memory_tracking::registrar_t &scratchpad,
         const brgemm_matmul_conf_t &bgmmc);
