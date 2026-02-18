@@ -266,8 +266,8 @@ endif()
 set(_DNNL_TEST_THREADPOOL_IMPL "STANDALONE" CACHE STRING
     "specifies which threadpool implementation to use when
     DNNL_CPU_RUNTIME=THREADPOOL is selected. Valid values: STANDALONE, EIGEN,
-    TBB")
-if(NOT "${_DNNL_TEST_THREADPOOL_IMPL}" MATCHES "^(STANDALONE|TBB|EIGEN)$")
+    EIGEN_ASYNC, TBB")
+if(NOT "${_DNNL_TEST_THREADPOOL_IMPL}" MATCHES "^(STANDALONE|TBB|EIGEN|EIGEN_ASYNC)$")
     message(FATAL_ERROR
         "Unsupported threadpool implementation: ${_DNNL_TEST_THREADPOOL_IMPL}")
 endif()
@@ -300,7 +300,7 @@ if(NOT "${DNNL_GPU_VENDOR}" MATCHES "^(NONE|INTEL|NVIDIA|AMD|GENERIC)$")
 endif()
 
 set(OPENCLROOT "" CACHE STRING
-    "path to Intel SDK for OpenCL applications.
+    "Path to OpenCL SDK.
     Use this option to specify custom location for OpenCL.")
 
 # TODO: move logic to other cmake files?

@@ -14,9 +14,9 @@
 * limitations under the License.
 *******************************************************************************/
 
+#include "gemmstone/config.hpp"
 #include "gemmstone/strategy.hpp"
 #include "gpu/intel/gemm/jit/generator_dsl/kernel_desc.hpp"
-#include "gpu/intel/gemm/jit/include/gemmstone/config.hpp"
 #include "gpu/intel/jit/dsl/dsl.hpp"
 #include "gpu/intel/jit/pass/pass.hpp"
 #include "gpu/intel/jit/utils/trace.hpp"
@@ -119,7 +119,7 @@ struct transform_t {
 
             // Impossible to hit due to normalization
             case kind_t::transpose_vnni:
-            default: gpu_assert(false); return {};
+            default: stub(); return {};
         }
     }
 
@@ -129,7 +129,7 @@ struct transform_t {
                 return ir::send_cache_hint_t::load_once;
             case ngen::CacheSettingsLSC::Default:
                 return ir::send_cache_hint_t::hw_default;
-            default: gpu_assert(false); return ir::send_cache_hint_t::undef;
+            default: stub(); return ir::send_cache_hint_t::undef;
         }
     }
 
