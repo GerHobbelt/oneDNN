@@ -179,19 +179,19 @@ status_t gen_t::launch_nocopy(const exec_ctx_t &ctx,
             arg_list.set(argn++, stride_a);
             arg_list.set(argn++, stride_b);
             arg_list.set(argn++, stride_c);
-            if (problem->hasAScale()) {
+            if (problem->hasAScalePtr()) {
                 arg_list.set(argn++, pd()->eff_scale_stride(i, DNNL_ARG_A));
             }
-            if (problem->hasBScale()) {
+            if (problem->hasBScalePtr()) {
                 arg_list.set(argn++, pd()->eff_scale_stride(i, DNNL_ARG_B));
             }
             if (problem->hasCMXScale()) {
                 arg_list.set(argn++, stride_c / problem->cqGroupM);
             }
-            if (problem->hasAOffset()) {
+            if (problem->hasAOffsetPtr()) {
                 arg_list.set(argn++, pd()->eff_zp_stride(i, DNNL_ARG_A));
             }
-            if (problem->hasBOffset()) {
+            if (problem->hasBOffsetPtr()) {
                 arg_list.set(argn++, pd()->eff_zp_stride(i, DNNL_ARG_B));
             }
             if (problem->needsAGroupSums()) {
@@ -233,6 +233,16 @@ status_t gen_t::launch_nocopy(const exec_ctx_t &ctx,
 
     compute::range_t lws = {size_t(nocopy_info()->wg[gemmstone::LoopM]),
             size_t(nocopy_info()->wg[gemmstone::LoopN]), size_t(lws_k)};
+
+    // C Interleave: pad up gws[N] to a multiple of the chunk size and add to gws[M] if misaligned ldc
+    auto info = nocopy_info();
+    gws[1] = utils::rnd_up(gws[1], info->cInterleaveChunk() * lws[1]);
+    if (info->cInterleaveChunk() > 1
+            && (offset_c % 64 > 0 || ldc * problem->Tc % 64 > 0)) {
+        auto wgTileM = info->wgTile(gemmstone::LoopM);
+        auto maxShift = 64 / problem->Tc_ext - 1;
+        gws[0] += lws[0] * utils::div_up(wgTileM + maxShift, wgTileM);
+    }
 
     if (nocopy_info()->isNMK()) {
         std::swap(lws[0], lws[1]);
@@ -454,16 +464,16 @@ status_t gen_t::execute(const exec_ctx_t &ctx) const {
         alpha = 1.0f;
         float scale_val = 0;
         if (a_scales.is_host_scalar()) {
-            CHECK(maybe_get_scale_as_float(a_scales_storage, scale_val));
+            CHECK(maybe_get_host_scalar_value(a_scales_storage, scale_val));
             alpha *= scale_val;
         }
         if (b_scales.is_host_scalar()) {
-            CHECK(maybe_get_scale_as_float(b_scales_storage, scale_val));
+            CHECK(maybe_get_host_scalar_value(b_scales_storage, scale_val));
             alpha *= scale_val;
         }
         // Limited support of host scalar dst scales
         if (c_scales.is_host_scalar() && pd()->attr()->post_ops_.len() == 0) {
-            CHECK(maybe_get_scale_as_float(c_scales_storage, scale_val));
+            CHECK(maybe_get_host_scalar_value(c_scales_storage, scale_val));
             gpu_assert(scale_val != 0);
             alpha /= scale_val;
         }

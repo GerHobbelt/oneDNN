@@ -56,14 +56,26 @@ inline char layoutChar(MatrixLayout layout)
     }
 }
 
+inline MatrixLayout charLayout(char c) {
+    switch (c) {
+        case 'A': return MatrixLayout::Pc;
+        case 'B': return MatrixLayout::Pr;
+        case 'N': return MatrixLayout::N;
+        case 'T': return MatrixLayout::T;
+        case '?': return MatrixLayout::N; // Either N/T; used for fused GEMM.
+        default:
+            throw std::runtime_error("Unknown matrix layout requested.");
+    }
+}
+
 struct MatrixAddressing {
     MatrixLayout layout;            // Layout type (N/T/Pr/Pc)
     uint8_t pad[3] = {};
     uint32_t packSize = 0;           // # of elements in a packed row/column for packed layouts.
     uint16_t tileR = 0, tileC = 0;  // Tiling (0 if none) for packed layouts.
+    uint8_t panelLength = 0;        // Length of the panel for packed layouts = #cols/rows for Pc/Pr respectively.
     uint8_t crosspack = 1;          // Crosspack for packed layouts.
     uint8_t alignment;              // Alignment for all addresses, offsets, and leading dimensions.
-    uint8_t panelLength = 0;        // Length of the panel for packed layouts = #cols/rows for Pc/Pr respectively.
     bool needA64 = false;
 
     void setAlignment(int align) { alignment = static_cast<uint8_t>(sanitizeAlign(align)); }
@@ -229,12 +241,12 @@ struct GEMMProblem : public CommonProblem {
     bool gemmt() const { return false; }
     bool backward() const { return false; }
 
-    bool hasAScale() const { return (asPtrDims > -1); }
-    bool hasBScale() const { return (bsPtrDims > -1); }
+    bool hasAScalePtr() const { return (asPtrDims > -1); }
+    bool hasBScalePtr() const { return (bsPtrDims > -1); }
     bool hasCScale() const { return (csPtrDims > 0); }
     bool hasCMXScale() const { return cMXScale; }
-    bool hasAOffset() const { return (aoPtrDims > -1); }
-    bool hasBOffset() const { return (boPtrDims > -1); }
+    bool hasAOffsetPtr() const { return (aoPtrDims > -1); }
+    bool hasBOffsetPtr() const { return (boPtrDims > -1); }
 
     bool aScale2D() const { return (asPtrDims >= 2); }
     bool bScale2D() const { return (bsPtrDims >= 2); }
