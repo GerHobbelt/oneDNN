@@ -648,7 +648,7 @@ status_t gen_xe_systolic_kernel_desc_t::select_kernel(compute::gpu_arch_t arch,
     if (alpha == 1.0f) problem_.alpha = alpha;
     if (beta == 0.0f || beta == 1.0f) problem_.beta = beta;
 
-    auto status = transfer_post_ops(problem_, std::move(post_ops), false);
+    auto status = transfer_post_ops(problem_, std::move(post_ops));
     if (status != status::success) return status;
 
     if (c_offset) problem_.cOffset = COffset::Post;
@@ -814,12 +814,14 @@ void gen_kernel_t::init_interface() {
         interface_.newArgument("ldbq", DataType::d);
     }
     if (problem.hasCMXScale()) interface_.newArgument("ldcq", DataType::d);
-    if (problem.cOffset != COffset::None || problem.sumA || problem.sumB) {
+    if (problem.usesCO()) {
         interface_.newArgument(
-                "CO", ExternalArgumentType::GlobalPtr, co_access);
+                "co_ptr", ExternalArgumentType::GlobalPtr, co_access);
         interface_.newArgument("offset_CO", DataType::q);
         if (problem.cOffset == COffset::Pre)
             interface_.newArgument("ldco", DataType::d);
+    } else if (problem.cOffsetHostScalar()) {
+        interface_.newArgument("co", DataType::w);
     }
     if (problem.postOps.cStochasticRound) {
         interface_.newArgument("sround_seed", ExternalArgumentType::GlobalPtr);

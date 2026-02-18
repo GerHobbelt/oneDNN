@@ -76,6 +76,9 @@ struct gen_t : public primitive_t {
             CHECK(set_default_formats(false));
             CHECK(jit::pd_t::init(engine));
 
+            auto m = desc()->m();
+            auto n = desc()->n();
+
             // If m = 1, swap A/B to use more efficient n = 1 kernels if possible.
             bool check_lda = ((d->transa() == dnnl_notrans && d->lda() == 1)
                     || (d->transa() == dnnl_trans));
@@ -88,28 +91,23 @@ struct gen_t : public primitive_t {
                     && d->b_type() == bf16);
 
             if (swap_ab_) {
-                std::swap(eff_lda_, eff_ldb_);
-                std::swap(eff_transa_, eff_transb_);
-                eff_transa_ = !eff_transa_;
-                eff_transb_ = !eff_transb_;
-
                 // Do not use transposed B when it is unnecessary
-                if (eff_transb_ && eff_n() == 1) {
-                    eff_transb_ = false;
-                    eff_ldb_ = d->k();
+                if (!transa_ && m == 1) {
+                    transa_ = true;
+                    lda_ = d->k();
                 }
             }
 
             // Pad leading dimensions in case of a single row/column.
-            if ((d->k() == 1 && eff_transa() == dnnl_notrans)
-                    || (eff_m() == 1 && eff_transa() == dnnl_trans)) {
-                eff_lda_ = utils::rnd_up(eff_lda_, 16);
+            if ((d->k() == 1 && !trans_a()) || (m == 1 && trans_a())) {
+                lda_ = utils::rnd_up(lda_, 16);
             }
 
-            if ((eff_n() == 1 && eff_transb() == dnnl_notrans)
-                    || (d->k() == 1 && eff_transb() == dnnl_trans)) {
-                eff_ldb_ = utils::rnd_up(eff_ldb_, 16);
+            if ((n == 1 && !trans_b()) || (d->k() == 1 && trans_b())) {
+                ldb_ = utils::rnd_up(ldb_, 16);
             }
+
+            if (swap_ab_) std::swap(m, n);
 
             // Check parameters.
             if (utils::one_of(d->c_type(), s32, f16, bf16, f32, u8, s8)
@@ -158,23 +156,26 @@ struct gen_t : public primitive_t {
                     !utils::one_of(DNNL_RUNTIME_DIM_VAL, d->m(), d->n(), d->k(),
                             d->lda(), d->ldb(), d->ldc(), d->batch()),
                     VERBOSE_RUNTIMEDIM_UNSUPPORTED);
-            VDISPATCH_GEMM(IMPLICATION(with_bias(),
-                                   utils::one_of(d->bias_type(), f64, f32, bf16,
-                                           f16, f8_e5m2, f8_e4m3)
-                                           && (d->bias_desc.ndims <= 6)
-                                           && d->bias_mask() < 8),
-                    VERBOSE_UNSUPPORTED_BIAS_CFG);
-            VDISPATCH_GEMM(
-                    IMPLICATION(with_bias(),
-                            (d->c_type() != f64 || d->bias_type() == f64)),
-                    VERBOSE_UNSUPPORTED_BIAS_CFG);
             VDISPATCH_GEMM(intel_engine->mayiuse_ngen_kernels(),
                     VERBOSE_UNSUPPORTED_DEVICE_FEATURE, "ngen_kernels");
+
+            // Do not use `with_bias()` as the bias operation may have been
+            // moved into a post-op.
+            bool with_bias = d->bias_type() != data_type::undef;
+            VDISPATCH_GEMM(utils::one_of(d->bias_type(), data_type::undef, f64,
+                                   f32, bf16, f16, f8_e5m2, f8_e4m3)
+                            && (d->bias_desc.ndims <= 6) && d->bias_mask() < 8,
+                    VERBOSE_UNSUPPORTED_BIAS_CFG);
+            VDISPATCH_GEMM(
+                    IMPLICATION(with_bias,
+                            (d->c_type() != f64 || d->bias_type() == f64)),
+                    VERBOSE_UNSUPPORTED_BIAS_CFG);
             VDISPATCH_GEMM(IMPLICATION(with_sum_ab(),
-                                   !with_bias()
+                                   !with_bias
                                            && (attr_zps.has_default_values(
                                                    DNNL_ARG_DST))),
                     VERBOSE_UNSUPPORTED_ATTR);
+
             VDISPATCH_GEMM(attr()->post_ops_.check_sum_consistency(d->c_type(),
                                    utils::one_of(d->a_type(), s8, u8)),
                     VERBOSE_UNSUPPORTED_POSTOP);
@@ -244,10 +245,11 @@ struct gen_t : public primitive_t {
 
             // GEMM kernels down convert the following parameters to
             // int/uint32_t
-            VDISPATCH_GEMM(std::max({eff_m(), eff_n(), d->k(), d->batch()})
+            VDISPATCH_GEMM(std::max({m, n, d->k(), d->batch()})
                             <= std::numeric_limits<int32_t>::max(),
                     VERBOSE_SHAPE_RESTRICTION);
-            VDISPATCH_GEMM(std::max({eff_lda(), eff_ldb(), d->ldc()})
+            VDISPATCH_GEMM(
+                    std::max({ld(DNNL_ARG_A), ld(DNNL_ARG_B), ld(DNNL_ARG_C)})
                             <= std::numeric_limits<uint32_t>::max(),
                     VERBOSE_SHAPE_RESTRICTION);
 
@@ -260,10 +262,13 @@ struct gen_t : public primitive_t {
 
             bool print_verbose = get_verbose(verbose_t::debuginfo) >= 5;
             bool kernel_success = false;
+            auto lda = ld(DNNL_ARG_A);
+            auto ldb = ld(DNNL_ARG_B);
+            if (swap_ab_) std::swap(lda, ldb);
             auto entries = kernel_desc_.select_kernel(arch_, stepping,
                     dev_info_->eu_count(), has_systolic, is_integrated, mode,
-                    problem, alpha(), beta(), eff_m(), eff_n(), d->k(),
-                    eff_lda(), eff_ldb(), d->ldc(), d->batch());
+                    problem, alpha(), beta(), m, n, d->k(), lda, ldb, d->ldc(),
+                    d->batch());
 
             for (auto &entry : entries) {
                 kernel_desc_.set_entry(entry);
@@ -585,13 +590,14 @@ private:
             const memory_storage_t *a_scales, const memory_storage_t *b_scales,
             const memory_storage_t *c_scales, const memory_storage_t *ag,
             const memory_storage_t *bg, const memory_storage_t &co,
-            const memory_storage_t *c_temp, const memory_storage_t *sround_seed,
-            int po_count, const memory_storage_t **po_src, int64_t offset_a,
-            int64_t offset_b, int64_t offset_c, int64_t offset_aq,
-            int64_t offset_bq, int64_t offset_co, int64_t *offset_po_src,
-            int32_t lda, int32_t ldb, int32_t ldc, int32_t m, int32_t n,
-            int32_t k, int32_t k0, float alpha, float beta, int32_t cmask,
-            bool last_k_block, bool swap_ab, bool disable_hilbert) const;
+            int16_t co_host_scalar, const memory_storage_t *c_temp,
+            const memory_storage_t *sround_seed, int po_count,
+            const memory_storage_t **po_src, int64_t offset_a, int64_t offset_b,
+            int64_t offset_c, int64_t offset_aq, int64_t offset_bq,
+            int64_t offset_co, int64_t *offset_po_src, int32_t lda, int32_t ldb,
+            int32_t ldc, int32_t m, int32_t n, int32_t k, int32_t k0,
+            float alpha, float beta, int32_t cmask, bool last_k_block,
+            bool swap_ab, bool disable_hilbert) const;
 
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
     const gemmstone::CommonDriverInfo *nocopy_info() const {
