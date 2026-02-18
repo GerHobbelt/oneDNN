@@ -288,6 +288,7 @@ status_t pd_t::init_attrs() {
 bool pd_t::zp_ok() {
     using namespace data_type;
     auto &attr_zps = attr()->zero_points_;
+    if (attr_zps.has_default_values()) return true;
     auto &a_zps = attr_zps.get(DNNL_ARG_A);
     auto &b_zps = attr_zps.get(DNNL_ARG_B);
     auto &c_zps = attr_zps.get(DNNL_ARG_C);
@@ -357,6 +358,7 @@ bool pd_t::zp_ok() {
 
 bool pd_t::gs_ok() {
     auto &attr_gs = attr()->precomputed_reductions_;
+    if (attr_gs.has_default_values()) return true;
 
     if (!attr_gs.has_default_values(DNNL_ARG_DST)) { return false; }
 
@@ -378,6 +380,7 @@ bool pd_t::gs_ok() {
 
 bool pd_t::scales_ok() {
     const auto &scales = attr()->scales_;
+    if (scales.has_default_values()) return true;
     int ndims = desc()->a_desc.ndims;
     using namespace data_type;
 
@@ -395,25 +398,7 @@ bool pd_t::scales_ok() {
                             && with_mx_scale() && valid_2d_mask(mask, ndims))))
             return false;
 
-        // Nontrivial groups are only supported across one GEMM dimension.
-        // Nontrivial: 1 < group size < dim size
         if (!x_scales.has_default_groups()) {
-            const memory_desc_t *md = nullptr;
-            switch (s) {
-                // Swap descriptors to follow column major format
-                case DNNL_ARG_A: md = &desc()->b_desc; break;
-                case DNNL_ARG_B: md = &desc()->a_desc; break;
-                case DNNL_ARG_C: md = &desc()->c_desc; break;
-            }
-            if (!md) gpu_error_not_expected();
-            int count = 0;
-            for (int i = 0; i < 2; i++) {
-                int gs = x_scales.get_group(i);
-                int dim = md->dims[md->ndims - 2 + i];
-                if (1 < gs && gs < dim) count++;
-            }
-            if (count > 1) return false;
-
             // Dynamic Dst Quant only supported with `1x32` groups.
             if (s == DNNL_ARG_C && with_mx_scale() && x_scales.get_group(0) != 1
                     && x_scales.get_group(1) != 32)

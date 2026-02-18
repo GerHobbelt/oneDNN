@@ -115,22 +115,11 @@ struct ref_t : public primitive_t {
                     VERBOSE_UNSUPPORTED_POSTOP);
             VDISPATCH_MATMUL(post_ops_with_binary_ok(attr(), *dst_md(), 6),
                     VERBOSE_UNSUPPORTED_POSTOP);
-            VDISPATCH_MATMUL(IMPLICATION(!attr_.dropout_.has_default_values(),
-                                     attr_.dropout_.seed_dt_ == data_type::s32),
-                    VERBOSE_UNSUPPORTED_DROPOUT);
-            const memory_desc_wrapper dropout_md(attr_.dropout_.dropout_desc_);
-            VDISPATCH_MATMUL(
-                    IMPLICATION(!attr_.dropout_.has_default_values(),
-                            dropout_md.similar_to(dst_md(), true, false)),
-                    VERBOSE_INCONSISTENT_MDS, "dropout", "dst");
-            VDISPATCH_MATMUL(
-                    IMPLICATION(!attr_.dropout_.has_default_values(),
-                            utils::one_of(dropout_md.data_type(), u8, s8)),
-                    VERBOSE_UNSUPPORTED_DT);
             VDISPATCH_MATMUL(
                     IMPLICATION(utils::one_of(f64, src_dt_, wei_dt_, dst_dt_),
                             dev_info_->has_native(f64)),
                     VERBOSE_UNSUPPORTED_DT);
+            CHECK(dropout_ok());
             subbyte_pack_ = utils::one_of(
                     dst_dt_, data_type::f4_e2m1, data_type::f4_e3m0);
             mx_scales_ = attr()->scales_.get(DNNL_ARG_DST).is_mx();
@@ -214,6 +203,24 @@ struct ref_t : public primitive_t {
             }
             return true;
         }
+        status_t dropout_ok() const {
+            if (attr_.dropout_.has_default_values()) return status::success;
+
+            assert(memory_desc_wrapper(dst_md(0)).format_kind()
+                    == format_kind::blocked);
+
+            using namespace format_tag;
+            // Note: for `offset = 0` keep the legacy logic without the `offset`.
+            VDISPATCH_MATMUL_IC(memory_desc_matches_one_of_tag(
+                                        *dst_md(0), ncdhw, nchw, ncw, nc)
+                            && IMPLICATION(attr_.dropout_.has_output_mask(),
+                                    memory_desc_wrapper(dst_md(0)).similar_to(
+                                            attr_.dropout_.dropout_desc_, true,
+                                            false)),
+                    VERBOSE_UNSUPPORTED_DROPOUT);
+
+            return status::success;
+        }
         bool precomputed_reductions_ok() const {
             const auto &pr = attr()->precomputed_reductions_;
             if (pr.has_default_values(DNNL_ARG_SRC)) return true;
@@ -240,11 +247,19 @@ struct ref_t : public primitive_t {
     status_t init(impl::engine_t *engine) override {
         compute::kernel_ctx_t kernel_ctx;
 
+        bool with_seed_s64
+                = (pd()->attr()->dropout_.seed_dt_) == data_type::s64;
         int ndims = pd()->dst_md()->ndims;
         kernel_ctx.define_int("DST_NDIMS", ndims);
         kernel_ctx.define_int("WITH_BIAS", pd()->with_bias());
+        kernel_ctx.define_int("WITH_SEED_S64", with_seed_s64);
         kernel_ctx.define_int(
                 "WITH_DROPOUT", !pd()->attr()->dropout_.has_default_values());
+        kernel_ctx.define_int(
+                "USE_HOST_SCALARS", pd()->attr()->dropout_.use_host_scalars_);
+        kernel_ctx.define_int("USE_OFFSET", pd()->attr()->dropout_.use_offset_);
+        kernel_ctx.define_int(
+                "HAS_OUTPUT_MASK", pd()->attr()->dropout_.has_output_mask());
         kernel_ctx.define_int("NON_DEFAULT_ATTRS", pd()->non_default_attrs_);
 
         auto dst_rnd_mode = pd()->attr()->rounding_mode_.get(DNNL_ARG_DST);
@@ -286,6 +301,7 @@ struct ref_t : public primitive_t {
         def_data_type(kernel_ctx, pd()->dst_dt_, "DST");
         def_data_type(kernel_ctx, pd()->bia_dt_, "BIA");
         data_type_t acc_type = pd()->desc()->accum_data_type;
+        data_type_t seed_type = pd()->attr()->dropout_.seed_dt_;
         switch (pd()->attr()->acc_mode_) {
             case accumulation_mode::strict:
             case accumulation_mode::relaxed:
@@ -296,6 +312,7 @@ struct ref_t : public primitive_t {
             default: break;
         }
         def_data_type(kernel_ctx, acc_type, "ACC");
+        def_data_type(kernel_ctx, seed_type, "SEED");
         def_data_type(kernel_ctx,
                 pd()->attr()->scales_.get_data_type(DNNL_ARG_WEIGHTS),
                 "WEI_SCALES");
