@@ -90,7 +90,7 @@ struct gws_indexing_term_t {
 
         bool operator==(const compile_params_t &other) const {
             return op == other.op && gws_idx == other.gws_idx;
-        };
+        }
 
         std::string str() const {
             stringstream_t ss;
@@ -112,7 +112,7 @@ struct gws_indexing_term_t {
         bool operator==(const runtime_params_t &other) const {
             return size == other.size && stride == other.stride
                     && block == other.block;
-        };
+        }
         dim_t size;
         stride_t stride;
         dim_t block;
@@ -123,7 +123,7 @@ struct gws_indexing_term_t {
     bool operator==(const gws_indexing_term_t &other) const {
         return compile_params_ == other.compile_params_
                 && runtime_params_ == other.runtime_params_;
-    };
+    }
     gws_indexing_term_t(gws_op_t op, size_t gws_idx, dim_t size,
             stride_t stride, dim_t block)
         : compile_params_(op, gws_idx), runtime_params_(size, stride, block) {};
@@ -245,8 +245,7 @@ struct dispatch_compile_params_t {
     subgroup_data_t subgroup;
     int32_t num_terms = 0;
     bool use_int32_offset = false;
-    bool require_large_buffers = true;
-    uint8_t padding[2] = {0};
+    uint8_t padding[3] = {0};
     gws_indexing_term_t::compile_params_t terms[MAX_INDEXING_TERMS]
             = {{gws_op_t::SOLO, 0}};
 
@@ -280,8 +279,8 @@ public:
             rt_params.strides[i] = 1;
             rt_params.blocks[i] = 1;
         }
-    };
-    dispatch_gws_rt_params_t get() const { return rt_params; };
+    }
+    dispatch_gws_rt_params_t get() const { return rt_params; }
 
     std::string str() const {
         stringstream_t ss;
@@ -317,7 +316,8 @@ struct lws_strategy_t {
     virtual ~lws_strategy_t() = default;
 
     virtual range_t create_lws(
-            range_t &gws, const gws_bin_mapping_t &mapper) const = 0;
+            range_t &gws, const gws_bin_mapping_t &mapper) const
+            = 0;
 
     // Determine if a given block (mapped to each buffer) should be in the lws.
     // Gets called for each block dispatched to the GWS.
@@ -366,10 +366,10 @@ struct named_buffer_t : public memory_desc_t {
         gpu_assert(this->name.size() <= MAX_BUFFER_NAME_LENGTH);
         gpu_assert(format_kind == format_kind::blocked);
         gpu_assert(static_cast<size_t>(md.ndims) <= dim_ids.size());
-    };
+    }
     named_buffer_t(const char *name) : name(name) {
         format_kind = format_kind::blocked;
-    };
+    }
 
     // Copy the named_buffer_t, while changing the name
     named_buffer_t(const char *name, const named_buffer_t &buf)
@@ -532,7 +532,6 @@ public:
 
         // Save buffer information
         dim_t max_buffer_size = 0;
-        uint64_t max_buffer_size_bytes = 0;
         compile_params.num_buffers = buffers.size();
         for (size_t buf_idx = 0; buf_idx < buffers.size(); buf_idx++) {
             const named_buffer_t &buffer = buffers[buf_idx];
@@ -553,15 +552,10 @@ public:
             compile_params.buffer_types[buf_idx] = buffer.data_type;
 
             // Check buffer sizes to see if we can use int32_t offsets
-            // or do we need to use stateless addressing model
             max_buffer_size = std::max(max_buffer_size, buffer.nelems(true));
-            max_buffer_size_bytes = std::max(
-                    max_buffer_size_bytes, buffer.size(0, true, true));
         }
 
         compile_params.use_int32_offset = max_buffer_size <= INT32_MAX;
-        compile_params.require_large_buffers
-                = max_buffer_size_bytes > UINT32_MAX;
         compile_params.subgroup = subgroup;
 
         // Set runtime params
@@ -570,10 +564,10 @@ public:
 
     const dispatch_compile_params_t &get_compile_params() const {
         return compile_params;
-    };
+    }
     const dispatch_runtime_params_t &get_runtime_params() const {
         return runtime_params;
-    };
+    }
 
 private:
     dispatch_compile_params_t compile_params;

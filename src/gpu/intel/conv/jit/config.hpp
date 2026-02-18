@@ -543,7 +543,7 @@ public:
 
     int reserved_regs() const;
 
-    const hw_t &hw() const { return options().hw(); }
+    const dsl::hw_t &hw() const { return options().hw(); }
 
     bool is_ge_xe_hpc() const { return hw() >= ngen::HW::XeHPC; }
 
@@ -639,8 +639,8 @@ private:
     name##_param_t name##_; \
     param_init_t name##_init_ \
             = register_param([](const container_config_t *c) { \
-                  return &((const config_t *)c)->name##_; \
-              });
+        return &((const config_t *)c)->name##_; \
+    });
 
     INIT_PARAM(allow_global_reduction)
     INIT_PARAM(bwd_d_optimize_kind)

@@ -236,7 +236,7 @@ int estimate_grf_usage_bytes(const kernel_desc_t &desc) {
     return into<int>(abc_size);
 }
 
-bool is_tg_size_ok(const kernel_desc_t &desc, const hw_t &hw) {
+bool is_tg_size_ok(const kernel_desc_t &desc, const dsl::hw_t &hw) {
     int max_tg_size = hw.max_tg_size(desc.regs, desc.simd);
     return desc.thread_group_tile.elems() <= max_tg_size;
 }
@@ -255,7 +255,8 @@ prb_reqs_t kernel_desc_t::reqs() const {
     return reqs;
 }
 
-bool kernel_desc_t::is_supported(const hw_t &hw, const problem_t *prb) const {
+bool kernel_desc_t::is_supported(
+        const dsl::hw_t &hw, const problem_t *prb) const {
     gpu_check(prop != prop_kind::undef)
             << "Invalid prop: " << ir_utils::to_string(prop);
     gpu_check(!prb || (hw_desc.hw == prb->hw().ngen_hw()))
@@ -366,7 +367,7 @@ bool is_compatible(tensor_kind_t abc, const kernel_desc_t &kernel_desc,
     return true;
 }
 
-bool is_compatible(const hw_desc_t &hw_desc, const hw_t &hw, bool exact) {
+bool is_compatible(const hw_desc_t &hw_desc, const dsl::hw_t &hw, bool exact) {
     if (!exact && hw != hw_desc.hw) {
         switch (hw_desc.hw) {
             case ngen::HW::XeHPC:
@@ -575,8 +576,8 @@ void kernel_desc_t::init_parse_iface(parse_iface_t<kernel_desc_t> *iface) {
             "Loop description, variables ordered from innermost to outermost "
             "(e.g. kw,kh,kd,ic).",
             /*required=*/false, [](const kernel_desc_t &parent) {
-                return default_loop_desc(parent.prop).str();
-            });
+        return default_loop_desc(parent.prop).str();
+    });
     iface->add<PACK(use_stream_k)>("stream-k", "Whether to use Stream-K.");
     iface->add<PACK(use_2d_access)>(
             "2d", "Whether to use block 2D messages for access.");
@@ -602,8 +603,8 @@ void kernel_desc_t::init_parse_iface(parse_iface_t<kernel_desc_t> *iface) {
     };
     scales_entry.stringify
             = [](std::ostream &out, const kernel_desc_t &parent) {
-                  out << serialize_to_hex(parent.scales);
-              };
+        out << serialize_to_hex(parent.scales);
+    };
     scales_entry.parse = [](std::istream &in, kernel_desc_t &parent) {
         auto s_data = stream_parse<std::string>(in);
         deserialize_from_hex(parent.scales, s_data);
@@ -757,7 +758,8 @@ compute::range_t kernel_desc_t::local_range() const {
     return lws;
 }
 
-void kernel_desc_t::init_kernel_iface(kernel::iface_t &kernel_iface) const {
+void kernel_desc_t::init_kernel_iface(
+        dsl::kernel::iface_t &kernel_iface) const {
     auto tensor_config = get_tensor_config(*this);
     for (auto &t : tensor_config.tensors()) {
         kernel_iface.register_arg(

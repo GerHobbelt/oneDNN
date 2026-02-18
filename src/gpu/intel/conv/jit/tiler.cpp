@@ -400,8 +400,8 @@ private:
             }
             std::sort(loop_dims.begin(), loop_dims.end(),
                     [&](const loop_dim_t &a, const loop_dim_t &b) {
-                        return a.size > b.size;
-                    });
+                return a.size > b.size;
+            });
 
             // Do not filter out loops with disabled global reduction as all
             // loops must be present.
@@ -599,8 +599,8 @@ private:
     struct context_t {
         context_t(const blocking_t &blk, const config_t &cfg)
             : context_t(blk, cfg, to_gemm(blk.iter(), cfg.prb()),
-                    to_gemm(blk.loop(), cfg.prb()),
-                    to_gemm(blk.thread_group(), cfg.prb())) {}
+                      to_gemm(blk.loop(), cfg.prb()),
+                      to_gemm(blk.thread_group(), cfg.prb())) {}
 
         context_t(const blocking_t &blk, const config_t &cfg,
                 const tile_t &iter, const tile_t &loop, const tile_t &tg)

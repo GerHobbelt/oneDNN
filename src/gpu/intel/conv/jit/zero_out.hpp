@@ -39,9 +39,9 @@ public:
     zero_out_kernel_desc_t(int regs, int simd, bool dpas)
         : regs_(regs), simd_(simd), dpas_(dpas) {}
     std::string kernel_name() const override;
-    kernel::options_t options(const impl::engine_t *engine) const override;
+    dsl::kernel::options_t options(const impl::engine_t *engine) const override;
     compute::range_t local_range() const override;
-    void init_kernel_iface(kernel::iface_t &kernel_iface) const override;
+    void init_kernel_iface(dsl::kernel::iface_t &kernel_iface) const override;
     void init_kernel_info(kernel_info_t &kernel_info,
             const kernel_params_base_t &params,
             const impl::engine_t *engine) const override;
@@ -77,16 +77,16 @@ public:
 
     using base_type = ir_to_ngen_generator_t<generator_t<hw>>;
 
-    zero_out_kernel_t(const kernel::options_t &options,
+    zero_out_kernel_t(const dsl::kernel::options_t &options,
             const kernel_info_t &kernel_info, const impl::engine_t *engine)
         : zero_out_kernel_t(zero_out_kernel_desc_t(options.regs(),
                                     options.simd(), options.require_dpas()),
-                engine) {}
+                  engine) {}
 
     zero_out_kernel_t(
             const kernel_desc_base_t &_desc, const impl::engine_t *engine)
         : base_type(get_kernel_iface(_desc), _desc.options(engine),
-                debug_config_t {GENERATOR_NAME, GENERATOR_LINE}) {
+                  debug_config_t {GENERATOR_NAME, GENERATOR_LINE}) {
         requireLocalID(3);
         requireLocalSize();
         requireGRF(options().regs());
@@ -188,8 +188,9 @@ public:
     }
 
 private:
-    static kernel::iface_t get_kernel_iface(const kernel_desc_base_t &desc) {
-        kernel::iface_t iface(desc.kernel_name());
+    static dsl::kernel::iface_t get_kernel_iface(
+            const kernel_desc_base_t &desc) {
+        dsl::kernel::iface_t iface(desc.kernel_name());
         desc.init_kernel_iface(iface);
         return iface;
     }

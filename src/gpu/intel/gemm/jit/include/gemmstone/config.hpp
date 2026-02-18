@@ -14,8 +14,8 @@
 * limitations under the License.
 *******************************************************************************/
 
-#ifndef GEMMSTONE_GUARD_CONFIG_HPP
-#define GEMMSTONE_GUARD_CONFIG_HPP
+#ifndef GEMMSTONE_INCLUDE_GEMMSTONE_CONFIG_HPP
+#define GEMMSTONE_INCLUDE_GEMMSTONE_CONFIG_HPP
 
 #if (defined(__has_include) && __has_include("gemmstone_config.hpp")) || defined(GEMMSTONE_CONFIG)
 #include "gemmstone_config.hpp"
@@ -24,6 +24,10 @@
 #include "entrance_agent.hpp"
 #include "package.hpp"
 
+#endif
+
+#ifndef GEMMSTONE_ASSERTIONS
+#define GEMMSTONE_ASSERTIONS 0
 #endif
 
 #ifndef GEMMSTONE_NAMESPACE_START

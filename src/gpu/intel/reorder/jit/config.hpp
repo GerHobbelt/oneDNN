@@ -38,12 +38,12 @@ public:
         return ss.str();
     }
 
-    tile_t shape(bool pad) const override { return {}; };
+    tile_t shape(bool pad) const override { return {}; }
 
     const std::vector<pvar_t> &index_dims() const override {
         static const std::vector<pvar_t> null {};
         return null;
-    };
+    }
 
     int pad_block(const pvar_t &d) const override { return 0; }
 
@@ -52,7 +52,7 @@ public:
     const std::vector<tile_t> &tiles() const { return tiles_; }
     const std::array<tile_t, 3> &grid() const { return grid_; }
 
-    config_t(const kernel::options_t &ec, layout_t src, layout_t dst);
+    config_t(const dsl::kernel::options_t &ec, layout_t src, layout_t dst);
 
 private:
     std::vector<tile_t> tiles_;

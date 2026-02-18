@@ -34,8 +34,7 @@ size_t get_benchdnn_cpu_limit() {
 size_t get_benchdnn_device_limit() {
     if (is_cpu()) return 0;
     static size_t gpu_device_capacity = 0;
-    static size_t gpu_max_alloc_capacity = 0;
-    SAFE(get_gpu_ram_sizes(gpu_device_capacity, gpu_max_alloc_capacity), WARN);
+    SAFE(get_gpu_ram_size(gpu_device_capacity), WARN);
 
     const double benchdnn_device_limit = capacity_factor * gpu_device_capacity;
     assert(benchdnn_device_limit > 0);
@@ -99,7 +98,8 @@ dnn_graph_mem_t::dnn_graph_mem_t(const dnn_mem_t &mem,
             // Get memory tag of primitive memory
             int ndims = mem.ndims();
             dims_t strides(mem.strides(), mem.strides() + ndims);
-            std::string mtag = strides2memory_tag(ndims, strides);
+            dims_t shape(mem.dims(), mem.dims() + ndims);
+            std::string mtag = strides2memory_tag(shape, strides, false);
 
             mem_ = dnn_mem_t(
                     mem.md_, graph_dt, mtag, g_eng.get(), /* prefill = */ true);
@@ -121,8 +121,8 @@ int dnn_graph_mem_t::fill_mem_with_data(
     }
 
     int ndims = mem.ndims();
-    const auto prim_to_graph_memcpy = [](dnn_mem_t &graph_mem,
-                                              const dnn_mem_t &prim_mem) {
+    const auto prim_to_graph_memcpy
+            = [](dnn_mem_t &graph_mem, const dnn_mem_t &prim_mem) {
         const void *prim_data_handle = static_cast<const void *>(prim_mem);
         void *graph_data_handle = graph_mem.get_mapped_pointer<void>();
         std::memcpy(graph_data_handle, prim_data_handle, graph_mem.size());

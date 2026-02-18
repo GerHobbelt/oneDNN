@@ -246,7 +246,7 @@ public:
                     data_size);
         }
         return status::success;
-    };
+    }
 
     status_t create_and_set_convolution_desc(const convolution_pd_t *pd) {
 
@@ -303,7 +303,8 @@ public:
     }
 
     virtual void execute(
-            miopenHandle_t handle, const std::vector<void *> &args) const = 0;
+            miopenHandle_t handle, const std::vector<void *> &args) const
+            = 0;
 
     void execute_sum(miopenHandle_t handle, void *x, void *y, float alpha_,
             float beta_) const {

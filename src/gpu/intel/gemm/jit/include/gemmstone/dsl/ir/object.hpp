@@ -14,33 +14,29 @@
 * limitations under the License.
 *******************************************************************************/
 
-#ifndef GPU_INTEL_JIT_IR_INCLUDE_OBJECT_HPP
-#define GPU_INTEL_JIT_IR_INCLUDE_OBJECT_HPP
+#ifndef GEMMSTONE_INCLUDE_GEMMSTONE_DSL_IR_OBJECT_HPP
+#define GEMMSTONE_INCLUDE_GEMMSTONE_DSL_IR_OBJECT_HPP
 
+#include <cstdint>
 #include <string>
 
-#include "gpu/intel/jit/utils/utils.hpp"
+#include "internal/utils.hpp"
+#include "gemmstone/dsl/type.hpp"
 
-namespace dnnl {
-namespace impl {
-namespace gpu {
-namespace intel {
-namespace jit {
+GEMMSTONE_NAMESPACE_START
+namespace dsl {
+namespace ir {
 
 class object_t;
 class expr_impl_t;
 class stmt_impl_t;
 class ir_mutator_t;
 class ir_visitor_t;
-namespace dsl {
-class type_t;
-}
-using type_t = dsl::type_t;
 
 namespace object {
 // Base class for all IR objects. Implemented as an intrusive pointer, with
 // the reference counter stored inside the object.
-class impl_t {
+class impl_t: public stringify_t<impl_t> {
 public:
     impl_t(const impl_t &) = delete;
     impl_t &operator=(const impl_t &) = delete;
@@ -64,7 +60,7 @@ public:
     //       necessary, and please don't add a non-const variant of the method!
     template <typename T>
     const T &as() const {
-        gpu_assert(is<T>());
+        assume(is<T>());
         return *as_ptr<T>(); // fails on incorrect casts even in Release
     }
 
@@ -92,7 +88,7 @@ public:
     virtual void _visit(ir_visitor_t &visitor) const;
 
 protected:
-    friend class dnnl::impl::gpu::intel::jit::object_t;
+    friend class gemmstone::dsl::ir::object_t;
     template <typename T>
     friend struct info_t;
 
@@ -186,7 +182,7 @@ private:
 } // namespace object
 
 // Base wrapper for IR objects.
-class object_t {
+class object_t: public stringify_t<object_t> {
 public:
     using impl_t = object::impl_t;
     object_t(impl_t *impl = nullptr) : impl_(impl) { retain(impl_); }
@@ -219,7 +215,7 @@ public:
 
     template <typename T>
     const T &as() const {
-        gpu_assert(impl_);
+        assume(impl_);
         return impl_->as<T>();
     }
 
@@ -301,7 +297,7 @@ public:
     const type_t &type() const;
 
 #define DECLARE_BINARY_ASSIGN_OPERATOR(op) \
-    expr_t &operator op##=(const expr_t &rhs);
+    expr_t &operator op##=(const expr_t & rhs);
 
     DECLARE_BINARY_ASSIGN_OPERATOR(+)
     DECLARE_BINARY_ASSIGN_OPERATOR(-)
@@ -380,9 +376,7 @@ public:
     stmt_t append(const stmt_t &s) const;
 };
 
-} // namespace jit
-} // namespace intel
-} // namespace gpu
-} // namespace impl
-} // namespace dnnl
+} // namespace ir
+} // namespace dsl
+GEMMSTONE_NAMESPACE_END
 #endif

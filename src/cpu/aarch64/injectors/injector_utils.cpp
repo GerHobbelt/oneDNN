@@ -112,8 +112,8 @@ size_t register_preserve_guard_t<isa>::calc_vmm_to_preserve_size_bytes(
     return std::accumulate(vmm_to_preserve.begin(), vmm_to_preserve.end(),
             std::size_t(0u),
             [](std::size_t accum, const Xbyak_aarch64::VReg &vmm) {
-                return accum + cpu_isa_traits<isa>::vlen;
-            });
+        return accum + cpu_isa_traits<isa>::vlen;
+    });
 }
 
 template <cpu_isa_t isa>
@@ -123,7 +123,7 @@ size_t register_preserve_guard_t<isa>::stack_space_occupied() const {
             = vmm_to_preserve_size_bytes_ + reg64_stack_.size() * reg64_size;
 
     return stack_space_occupied;
-};
+}
 
 template <cpu_isa_t isa>
 conditional_register_preserve_guard_t<
@@ -132,9 +132,9 @@ conditional_register_preserve_guard_t<
         std::initializer_list<Xbyak_aarch64::XReg> reg64_to_preserve,
         std::initializer_list<Xbyak_aarch64::VReg> vmm_to_preserve)
     : register_preserve_guard_t<isa> {condition_to_be_met
-                    ? register_preserve_guard_t<isa> {host, reg64_to_preserve,
-                            vmm_to_preserve}
-                    : register_preserve_guard_t<isa> {nullptr, {}, {}}} {};
+                      ? register_preserve_guard_t<isa> {host, reg64_to_preserve,
+                                vmm_to_preserve}
+                      : register_preserve_guard_t<isa> {nullptr, {}, {}}} {};
 
 template class register_preserve_guard_t<sve_512>;
 template class register_preserve_guard_t<sve_256>;

@@ -16,8 +16,8 @@
 
 #include "gpu/intel/conv/jit/v2/tensor_utils.hpp"
 
+#include "gemmstone/../../dsl/ir/pass/simplify.hpp"
 #include "gpu/intel/conv/jit/problem.hpp"
-#include "gpu/intel/jit/pass/simplify.hpp"
 
 namespace dnnl {
 namespace impl {
@@ -162,7 +162,7 @@ layout_t make_layout(tensor_kind_t tensor_kind, const layout_tag_t &_tag,
         if (dim_mask == 0) return expr_t(1);
         auto dim_size = reqs.to_expr(dim);
         if (!blocks.has(dim)) return dim_size;
-        return div_up(dim_size, blocks[dim]);
+        return intel::jit::v2::div_up(dim_size, blocks[dim]);
     };
     auto &entries = tag.raw_tag().entries();
     for (auto it = entries.rbegin(); it != entries.rend(); it++) {

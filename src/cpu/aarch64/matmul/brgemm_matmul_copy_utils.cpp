@@ -39,7 +39,7 @@ using namespace Xbyak_aarch64;
 #define LDR_IMM(reg, addr, off) \
     { \
         const uint64_t IMM12_MASK = ~uint64_t(0xfff); \
-        if (((off)&IMM12_MASK) == 0) { \
+        if (((off) & IMM12_MASK) == 0) { \
             ldr(reg, ptr(addr, off)); \
         } else { \
             add_imm(X_DEFAULT_ADDR, addr, off, X_TMP_0); \
@@ -50,7 +50,7 @@ using namespace Xbyak_aarch64;
 #define STR_IMM(reg, addr, off) \
     { \
         const uint64_t IMM12_MASK = ~uint64_t(0xfff); \
-        if (((off)&IMM12_MASK) == 0) { \
+        if (((off) & IMM12_MASK) == 0) { \
             str(reg, ptr(addr, off)); \
         } else { \
             add_imm(X_DEFAULT_ADDR, addr, off, X_TMP_0); \
@@ -751,11 +751,11 @@ private:
 
     void kmovw(Xbyak_aarch64::PReg k, unsigned w) {
         assert(!"under construction");
-    };
+    }
 
     void kmovq(Xbyak_aarch64::PReg k, size_t q) {
         assert(!"under construction");
-    };
+    }
 
     ZReg src_vmm(int i) {
         assert(i >= 0 && i < n_blk_step_);

@@ -21,7 +21,7 @@
 
 #include "gpu/intel/jit/ir/fma.hpp"
 #include "gpu/intel/jit/ir/gemm_schedule.hpp"
-#include "gpu/intel/jit/ir/ir.hpp"
+#include "gpu/intel/jit/ir/legacy.hpp"
 #include "gpu/intel/jit/ir/tensor.hpp"
 
 namespace dnnl {
@@ -46,7 +46,7 @@ struct send_2d_hint_t {
 struct send_params_t {
     send_params_t() = default;
     send_params_t(
-            const hw_t &hw, const dsl::type_t &mem_type, send_op_t send_op)
+            const dsl::hw_t &hw, const dsl::type_t &mem_type, send_op_t send_op)
         : hw(hw), mem_type(mem_type), send_op(send_op), use_send_plan(true) {}
 
     send_op_t convert(const send_op_t &op) const {
@@ -64,7 +64,7 @@ struct send_params_t {
                 send_op, send_op_t::prefetch, send_op_t::prefetch_2d);
     }
 
-    hw_t hw;
+    dsl::hw_t hw;
     dsl::type_t mem_type;
     send_op_t send_op;
     send_address_t send_address;
@@ -141,18 +141,18 @@ private:
     stmt_t stmt_;
 };
 
-send_params_t get_send_params(const kernel::options_t &options,
+send_params_t get_send_params(const dsl::kernel::options_t &options,
         send_op_t send_op, send_address_t send_address, const view_t &view,
         send_cache_hint_t cache_hint = send_cache_hint_t::undef,
         fma_kind_t fma_kind = fma_kind_t::undef,
         abc_kind_t abc_kind = abc_kind_t::undef, bool allow_2d = false);
 
-send_params_t get_send_params(const kernel::options_t &options,
+send_params_t get_send_params(const dsl::kernel::options_t &options,
         send_op_t send_op, send_address_t send_address, fma_kind_t fma_kind,
         abc_kind_t abc_kind, const view_t &view,
         const gemm_schedule_t &gemm_schedule, bool allow_2d = true);
 
-inline send_params_t get_send_params(const kernel::options_t &options,
+inline send_params_t get_send_params(const dsl::kernel::options_t &options,
         send_op_t send_op, send_address_t send_address, const view_t &view,
         bool allow_2d) {
     return get_send_params(options, send_op, send_address, view,

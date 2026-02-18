@@ -36,7 +36,7 @@ void conv_fwd_executable_t::execute(const stream &stream,
                     && dst_mem.get_desc().get_data_type()
                             == dnnl::memory::data_type::u8) {
                 dnnl::memory::desc to_desc = dst_mem.get_desc();
-                auto format_tag = get_format_tag_str(to_desc);
+                auto format_tag = md2fmt_tag_str(to_desc.get());
                 const auto &dims = to_desc.get_dims();
                 const auto &dtype = psrc_mem.get_desc().get_data_type();
                 dnnl_memory_desc_t new_to_desc_c;
@@ -80,7 +80,7 @@ void conv_fwd_executable_t::execute(const stream &stream,
                     && dst_mem.get_desc().get_data_type()
                             == dnnl::memory::data_type::u8) {
                 dnnl::memory::desc to_desc = dst_mem.get_desc();
-                auto format_tag = get_format_tag_str(to_desc);
+                auto format_tag = md2fmt_tag_str(to_desc.get());
                 const auto &dims = to_desc.get_dims();
                 const auto &dtype = psrc_mem.get_desc().get_data_type();
                 dnnl_memory_desc_t new_to_desc_c;
@@ -134,7 +134,7 @@ cl_event conv_fwd_executable_t::execute_ocl(const stream &stream,
                     && dst_mem.get_desc().get_data_type()
                             == dnnl::memory::data_type::u8) {
                 dnnl::memory::desc to_desc = dst_mem.get_desc();
-                auto format_tag = get_format_tag_str(to_desc);
+                auto format_tag = md2fmt_tag_str(to_desc.get());
                 const auto &dims = to_desc.get_dims();
                 const auto &dtype = psrc_mem.get_desc().get_data_type();
                 dnnl_memory_desc_t new_to_desc_c;
@@ -149,13 +149,13 @@ cl_event conv_fwd_executable_t::execute_ocl(const stream &stream,
                         = dnnl::ocl_interop::get_memory_kind(dst_mem)
                                 == dnnl::ocl_interop::memory_kind::usm
                         ? dnnl::ocl_interop::make_memory(new_to_desc,
-                                psrc_mem.get_engine(),
-                                dnnl::ocl_interop::memory_kind::usm,
-                                dst_mem.get_data_handle())
+                                  psrc_mem.get_engine(),
+                                  dnnl::ocl_interop::memory_kind::usm,
+                                  dst_mem.get_data_handle())
                         : dnnl::ocl_interop::make_memory(new_to_desc,
-                                psrc_mem.get_engine(),
-                                reinterpret_cast<cl_mem>(
-                                        dst_mem.get_data_handle()));
+                                  psrc_mem.get_engine(),
+                                  reinterpret_cast<cl_mem>(
+                                          dst_mem.get_data_handle()));
 
                 auto prim = dnnl::reorder(psrc_mem, to_mem);
                 auto e = dnnl::ocl_interop::execute(prim, stream,

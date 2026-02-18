@@ -14,25 +14,21 @@
 * limitations under the License.
 *******************************************************************************/
 
-#include "gpu/intel/jit/ir/ir.hpp"
+#include "dsl/ir/ir.hpp"
 
 #include <functional>
 #include <numeric>
 #include <sstream>
 
-#include "common/math_utils.hpp"
-#include "common/optional.hpp"
-#include "gpu/intel/jit/codegen/allocation_size.hpp"
-#include "gpu/intel/jit/ir/core.hpp"
-#include "gpu/intel/jit/pass/simplify.hpp"
+#include "dsl/ir/codegen/allocation_size.hpp"
+#include "dsl/ir/core.hpp"
+#include "dsl/ir/pass/simplify.hpp"
 
-namespace dnnl {
-namespace impl {
-namespace gpu {
-namespace intel {
-namespace jit {
+GEMMSTONE_NAMESPACE_START
+namespace dsl {
+namespace ir {
 
-using namespace ir_utils;
+using namespace utils;
 
 namespace {
 
@@ -43,12 +39,12 @@ public:
 
     void _visit(const assign_t &obj) override {
         print_indent();
-        out_ << obj.str() << "\n";
+        out_ << obj << "\n";
     }
 
     void _visit(const alloc_t &obj) override {
         auto grf_size = 1; // Assume all objects are grf aligned
-        auto guard = mem_usage_guard(register_alloc_size(obj, grf_size));
+        auto guard = mem_usage_guard(register_size(obj, grf_size));
         print_indent();
         out_ << obj.line_str() << "(mem_usage: " << mem_usage_bytes_ << ")\n";
         visit(obj.body);
@@ -136,7 +132,7 @@ public:
     }
 
     void _visit(const let_t &obj) override {
-        int size = register_alloc_size(obj);
+        int size = register_size(obj);
         auto guard = mem_usage_guard(size);
         print_indent();
         out_ << obj.line_str() << "\n";
@@ -203,7 +199,7 @@ public:
 
     void _visit(const stmt_group_t &obj) override {
         print_indent();
-        out_ << obj.label << " {\n";
+        out_ << obj.label.str() << " {\n";
         add_indent();
         visit(obj.body);
         remove_indent();
@@ -233,7 +229,7 @@ public:
 
     void _visit(const var_t &obj) override { out_ << obj.name; }
 
-    void _visit(const ref_t &obj) override { out_ << obj.str(); }
+    void _visit(const ref_t &obj) override { out_ << obj; }
 
     void _visit(const while_t &obj) override {
         print_indent();
@@ -289,7 +285,7 @@ public:
             return to_; \
         } \
         return ir_mutator_t::_mutate(obj); \
-    };
+    }
 
     HANDLE_CORE_IR_OBJECTS()
 
@@ -351,7 +347,7 @@ public:
             return it->second; \
         } \
         return _mutate_after(obj); \
-    };
+    }
 
     HANDLE_CORE_IR_OBJECTS()
 
@@ -380,181 +376,6 @@ public:
     std::vector<stmt_t> stmts;
 };
 
-class alloc_injector_t : public ir_mutator_t {
-public:
-    alloc_injector_t(const stmt_t &root, const std::vector<stmt_t> &allocs)
-        : allocs_(allocs) {
-        for (auto &_a : allocs) {
-            auto &a = _a.as<alloc_t>();
-            if (a.kind != alloc_kind_t::global) gpu_assert(a.size > 0) << _a;
-            alloc_map_.insert({a.buf, _a});
-            buf_cur_refs_[a.buf] = 0;
-        }
-        mutate(root);
-        buf_total_refs_ = buf_cur_refs_;
-        for (auto &kv : buf_cur_refs_)
-            kv.second = 0;
-        in_ctor_ = false; // NOLINT(cppcoreguidelines-prefer-member-initializer)
-    }
-
-#define HANDLE_IR_OBJECT(type) \
-    object_t _mutate(const type &obj) override { return mutate_stmt(obj); }
-
-    HANDLE_STMT_IR_OBJECTS()
-
-#undef HANDLE_IR_OBJECT
-    object_t _mutate(const var_t &obj) override {
-        if (alloc_map_.find(obj) != alloc_map_.end()) buf_cur_refs_[obj]++;
-        return obj;
-    }
-
-private:
-    template <typename T>
-    object_t mutate_stmt(const T &obj) {
-        if (in_ctor_) return ir_mutator_t::_mutate(obj);
-        if (obj.template is<stmt_seq_t>()) { return mutate_stmt_seq(obj); }
-        auto undef_bufs = get_undef_bufs();
-        auto new_obj = ir_mutator_t::_mutate(obj);
-        new_obj = maybe_inject(new_obj, undef_bufs);
-        return new_obj;
-    }
-
-    // Handle stmt_seq_t in a special way:
-    // 1. Walk through the sequence and record the first and the last statement
-    //    where a buffer is referenced
-    // 2. Inject alloc statements according to the usage
-    object_t mutate_stmt_seq(const object_t &obj) {
-        auto stmt_vec = obj.as<stmt_seq_t>().vec;
-        gpu_assert(!stmt_vec.empty());
-        int nstmts = (int)stmt_vec.size();
-        // Mutate statments and record buffer usage in the form: buf: [first, last].
-        object_map_t<expr_t, int> last_undef;
-        object_map_t<expr_t, std::pair<int, int>> entries;
-        for (int i = 0; i < nstmts; i++) {
-            auto &s = stmt_vec[i];
-            for (auto &b : get_undef_bufs()) {
-                auto it = alloc_map_.find(b);
-                if (it == alloc_map_.end() || it->second.is_empty()) continue;
-                last_undef[b] = i;
-            }
-            s = mutate(s);
-            for (auto &kv : last_undef) {
-                auto &buf = kv.first;
-                if (entries.count(buf) != 0) continue;
-                if (buf_cur_refs_[buf] == buf_total_refs_[buf]) {
-                    entries[buf] = std::make_pair(kv.second, i);
-                }
-            }
-        }
-        // Sort buffers based on the number of statements they span. This is to
-        // inject more local allocations first.
-        std::vector<expr_t> bufs;
-        for (auto &kv : entries) {
-            if (alloc_map_.at(kv.first).is_empty()) continue;
-            bufs.push_back(kv.first);
-        }
-        std::sort(bufs.begin(), bufs.end(),
-                [&](const expr_t &a, const expr_t &b) {
-                    auto &ea = entries.at(a);
-                    auto &eb = entries.at(b);
-                    int a_span = (ea.second - ea.first);
-                    int b_span = (eb.second - eb.first);
-                    if (a_span == b_span)
-                        return a.as<var_t>().name < b.as<var_t>().name;
-                    return a_span < b_span;
-                });
-        // Use union-find to incrementally merge statements based on the common
-        // buffers.
-        std::vector<int> parent(nstmts);
-        std::iota(parent.begin(), parent.end(), 0);
-        std::function<int(int)> _find;
-        std::function<void(int, int)> _union;
-        _find = [&](int i) {
-            if (parent[i] == i) return i;
-            return parent[i] = _find(parent[i]);
-        };
-        _union = [&](int i, int j) {
-            i = _find(i);
-            j = _find(j);
-            parent[j] = i;
-        };
-        std::vector<stmt_t> new_stmt_seq = std::move(stmt_vec);
-        for (auto &buf : bufs) {
-            auto &e = entries.at(buf);
-            stmt_t stmt;
-            for (int i = e.first; i <= e.second; i++) {
-                int idx = _find(i);
-                stmt = stmt.append(new_stmt_seq[idx]);
-                new_stmt_seq[idx] = stmt_t();
-                _union(e.first, i);
-            }
-            auto it = alloc_map_.find(buf);
-            auto &a = it->second.as<alloc_t>();
-            stmt = alloc_t::make(a.buf, a.size, a.kind, a.attrs, stmt);
-            new_stmt_seq[_find(e.first)] = stmt;
-            it->second = stmt_t();
-        }
-        stmt_t new_obj;
-        for (auto &s : new_stmt_seq) {
-            if (s.is_empty()) continue;
-            new_obj = new_obj.append(s);
-        }
-        return std::move(new_obj);
-    }
-
-    object_set_t<expr_t> get_undef_bufs() const {
-        object_set_t<expr_t> ret;
-        for (auto &kv : buf_cur_refs_)
-            if (kv.second == 0) ret.insert(kv.first);
-        return ret;
-    }
-
-    object_t maybe_inject(
-            const object_t &obj, const object_set_t<expr_t> &undef_bufs) {
-        auto new_obj = obj;
-        for (auto &kv : alloc_map_) {
-            if (kv.second.is_empty()) continue;
-            auto &buf = kv.first;
-            auto &a = kv.second.as<alloc_t>();
-            if (do_inject(buf, undef_bufs)) {
-                new_obj = alloc_t::make(
-                        a.buf, a.size, a.kind, a.attrs, new_obj);
-                kv.second = stmt_t();
-            }
-        }
-        return new_obj;
-    }
-
-    bool do_inject(
-            const expr_t &buf, const object_set_t<expr_t> &undef_bufs) const {
-        if (buf.is_empty()) return false; // Already injected.
-        int cur_refs = buf_cur_refs_.at(buf);
-        int total_refs = buf_total_refs_.at(buf);
-        bool was_undef = (undef_bufs.count(buf) != 0);
-        return was_undef && (cur_refs == total_refs);
-    }
-
-    bool in_ctor_ = true;
-    std::vector<stmt_t> allocs_;
-    object_map_t<expr_t, stmt_t> alloc_map_;
-    object_map_t<expr_t, int> buf_total_refs_;
-    object_map_t<expr_t, int> buf_cur_refs_;
-};
-
-class alloc_remover_t : public ir_mutator_t {
-public:
-    alloc_remover_t(std::vector<stmt_t> &allocs) : allocs_(allocs) {}
-
-    object_t _mutate(const alloc_t &obj) override {
-        allocs_.push_back(
-                alloc_t::make(obj.buf, obj.size, obj.kind, obj.attrs));
-        return mutate(obj.body);
-    }
-
-private:
-    std::vector<stmt_t> &allocs_;
-};
-
 } // namespace
 
 std::string object::impl_t::str() const {
@@ -569,7 +390,7 @@ object_t substitute(const object_t &root, const object_t &from,
     if (to.is_same(from)) return root;
     substitute_mutator_t sm(from, to);
     auto ret = sm.mutate(root);
-    gpu_assert(sm.substitutions() <= max_substitutions)
+    dsl_assert(sm.substitutions() <= max_substitutions)
             << "Unexpected number of substitutions.";
     return ret;
 }
@@ -579,7 +400,7 @@ object_t substitute_with_different_type(const object_t &root,
     if (to.is_same(from)) return root;
     substitute_and_type_mutator_t sm(from, to);
     auto ret = sm.mutate(root);
-    gpu_assert(sm.substitutions() <= max_substitutions)
+    dsl_assert(sm.substitutions() <= max_substitutions)
             << "Unexpected number of substitutions.";
     return ret;
 }
@@ -588,162 +409,6 @@ std::vector<stmt_t> flatten_statements(const stmt_t &root) {
     stmt_flattener_t f;
     f.visit(root);
     return f.stmts;
-}
-
-stmt_t inject_alloc_stmts(const stmt_t &stmt, const std::vector<stmt_t> &allocs,
-        bool put_innermost, bool update_existing) {
-    if (update_existing)
-        gpu_assert(put_innermost)
-                << "update_existing can be used only with put_innermost.";
-    if (!put_innermost) {
-        auto ret = stmt;
-        for (auto &_a : allocs) {
-            auto &a = _a.as<alloc_t>();
-            ret = alloc_t::make(a.buf, a.size, a.kind, a.attrs, ret);
-        }
-        return ret;
-    }
-    if (update_existing) {
-        std::vector<stmt_t> _allocs;
-        alloc_remover_t remover(_allocs);
-        auto _stmt = remover.mutate(stmt);
-        _allocs.insert(_allocs.end(), allocs.begin(), allocs.end());
-        return inject_alloc_stmts(_stmt, _allocs, put_innermost);
-    }
-    alloc_injector_t injector(stmt, allocs);
-    return injector.mutate(stmt);
-}
-
-stmt_t inject_alloc_stmts(const stmt_t &stmt, const buffer_manager_t &buf_mgr) {
-    std::vector<stmt_t> allocs;
-    for (auto &e : buf_mgr.entries()) {
-        allocs.push_back(e.second.create_alloc_stmt());
-    }
-    return inject_alloc_stmts(stmt, allocs, /*put_innermost=*/true);
-}
-
-stmt_t inject_let_stmts(const stmt_t &stmt, const std::vector<stmt_t> &lets) {
-    stmt_t ret = stmt;
-    for (auto it = lets.rbegin(); it != lets.rend(); ++it) {
-        auto &let = it->as<let_t>();
-        ret = let_t::make(let.var, let.value, ret);
-    }
-    return ret;
-}
-
-class var_counter_t : public ir_visitor_t {
-public:
-    var_counter_t(const object_set_t<expr_t> &vars) {
-        for (auto &v : vars) {
-            counts[v] = 0;
-        }
-    }
-
-    void _visit(const var_t &obj) override {
-        auto it = counts.find(obj);
-        if (it == counts.end()) return;
-        it->second++;
-    }
-
-    object_map_t<expr_t, int> counts;
-};
-
-object_map_t<expr_t, int> count_vars(
-        const stmt_t &stmt, const object_set_t<expr_t> &vars) {
-    var_counter_t counter(vars);
-    counter.visit(stmt);
-    return counter.counts;
-}
-
-class let_injector_t : public ir_mutator_t {
-public:
-    object_t _mutate(const stmt_seq_t &obj) override {
-        auto new_obj = ir_mutator_t::_mutate(obj);
-        auto &stmt_vec = new_obj.as<stmt_seq_t>().vec;
-        int nstmts = (int)stmt_vec.size();
-        // 1. Collect total var references for dangling lets.
-        object_set_t<expr_t> let_vars;
-        for (auto &s : stmt_vec) {
-            if (is_dangling_let(s)) {
-                auto &var = s.as<let_t>().var;
-                let_vars.insert(var);
-            }
-        }
-        if (let_vars.empty()) return new_obj;
-        auto total_refs = count_vars(new_obj, let_vars);
-
-        // 2. Find scopes for dangling lets.
-        object_map_t<expr_t, stmt_t> var2let;
-        object_map_t<stmt_t, int> let_scope_ends;
-        object_map_t<expr_t, int> cur_refs;
-        for (auto &v : let_vars)
-            cur_refs[v] = 0;
-        for (int i = 0; i < nstmts; i++) {
-            auto &s = stmt_vec[i];
-            if (is_dangling_let(s)) {
-                var2let[s.as<let_t>().var] = s;
-                let_scope_ends[s] = i;
-            }
-            for (auto &kv : count_vars(s, let_vars)) {
-                auto &var = kv.first;
-                cur_refs[var] += kv.second;
-                if (cur_refs[var] == total_refs[var]) {
-                    let_vars.erase(var);
-                    let_scope_ends[var2let.at(var)] = i;
-                }
-            }
-        }
-
-        // 3. Nest let statements according to the scopes.
-        std::vector<entry_t> entries;
-        entries.emplace_back();
-        for (int i = 0; i < nstmts; i++) {
-            auto &s = stmt_vec[i];
-            if (is_dangling_let(s)) {
-                entry_t e;
-                e.let_stmt = s;
-                entries.push_back(e);
-            } else {
-                entries.back().append(s);
-            }
-            while (!entries.empty()) {
-                auto &last = entries.back();
-                if (last.let_stmt.is_empty()) break;
-                int end = let_scope_ends.at(last.let_stmt);
-                if (end > i) break;
-                auto new_stmt = last.make_let();
-                entries.pop_back();
-                entries.back().append(new_stmt);
-            }
-        }
-
-        stmt_t ret;
-        for (auto &e : entries) {
-            gpu_assert(e.let_stmt.is_empty()) << e.let_stmt;
-            ret = ret.append(e.body);
-        }
-
-        return std::move(ret);
-    }
-
-private:
-    static bool is_dangling_let(const stmt_t &s) {
-        auto *let = s.as_ptr<let_t>();
-        return let && let->body.is_empty();
-    }
-
-    struct entry_t {
-        stmt_t body;
-        stmt_t let_stmt;
-
-        stmt_t make_let() const { return replace_stmt_body(let_stmt, body); }
-
-        void append(const stmt_t &s) { body = body.append(s); }
-    };
-};
-
-stmt_t inject_dangling_let_stmts(const stmt_t &stmt) {
-    return let_injector_t().mutate(stmt);
 }
 
 std::vector<expr_t> split_by_and(const expr_t &e) {
@@ -757,7 +422,7 @@ std::vector<expr_t> split_by_and(const expr_t &e) {
 }
 
 expr_t abs(const expr_t &e) {
-    gpu_assert(is_const(e)) << e;
+    dsl_assert(is_const(e)) << e;
     if (to_cpp<bool>(e >= 0)) return e;
     return -e;
 }
@@ -806,7 +471,7 @@ int count_object(const object_t &root, const object_t &obj) {
 
 #undef HANDLE_IR_OBJECT
 
-        gpu_error_not_expected() << obj;
+        dsl_error() << obj;
     } while (false);
 
     int ret = 0;
@@ -816,7 +481,7 @@ int count_object(const object_t &root, const object_t &obj) {
 }
 
 bool contains_object(const object_t &root, const object_t &obj) {
-    gpu_assert(is_var(obj)) << obj;
+    dsl_assert(is_var(obj)) << obj;
     return count_object(root, obj) > 0;
 }
 
@@ -903,12 +568,12 @@ public:
         : grf_size_(grf_size), skip_let_(skip_let), regs_(external_regs) {}
 
     void _visit(const alloc_t &obj) override {
-        auto guard = grf_usage_guard(register_alloc_size(obj, grf_size_));
+        auto guard = grf_usage_guard(register_size(obj, grf_size_));
         ir_visitor_t::_visit(obj);
     }
 
     void _visit(const let_t &obj) override {
-        int size = skip_let_ ? 0 : register_alloc_size(obj);
+        int size = skip_let_ ? 0 : register_size(obj);
         auto guard = grf_usage_guard(size);
         ir_visitor_t::_visit(obj);
     }
@@ -932,11 +597,11 @@ int get_peak_regs(
         const stmt_t &stmt, int grf_size, int external_regs, bool skip_let) {
     grf_usage_visitor_t visitor(grf_size, external_regs, skip_let);
     visitor.visit(stmt);
-    return utils::div_up(visitor.peak_regs(), grf_size);
+    return div_up(visitor.peak_regs(), grf_size);
 }
 
 bool relation_t::implies(const relation_t &other) const {
-    gpu_assert(var().is_same(other.var()));
+    dsl_assert(var().is_same(other.var()));
 
     if (op_kind() != other.op_kind()) return false;
 
@@ -952,19 +617,19 @@ bool relation_t::implies(const relation_t &other) const {
         // (x <= A) && (A <= B) => (x <= B)
         case op_kind_t::_lt:
         case op_kind_t::_le: return A <= B;
-        default: gpu_error_not_expected() << "Not implemented: " << expr_;
+        default: dsl_error() << "Not implemented: " << expr_;
     }
     return false;
 }
 
 relation_t relation_t::transform(
         const linear_transform_t &t, const expr_t &new_var) const {
-    gpu_assert(t.a == 1) << "Not implemented.";
+    dsl_assert(t.a == 1) << "Not implemented.";
     return relation_t(binary_op_t::make(op_kind(), new_var, rhs() + t.b));
 }
 
 expr_t relation_t::normalize(const expr_t &e) {
-    gpu_assert(is_relation_constraint(e)) << e;
+    dsl_assert(is_relation_constraint(e)) << e;
     auto &op = e.as<binary_op_t>();
 
     auto op_kind = op.op_kind;
@@ -1008,7 +673,7 @@ int64_t bound_finder_base_t::find_bound_impl(
 
     auto *unary = e.as_ptr<unary_op_t>();
     if (unary) {
-        gpu_assert(unary->op_kind == op_kind_t::_minus) << e;
+        dsl_assert(unary->op_kind == op_kind_t::_minus) << e;
         auto a = find_bound_impl(unary->a, !is_low);
         if (!is_good_bound(a)) return def_bound;
         return -a;
@@ -1052,7 +717,7 @@ int64_t bound_finder_base_t::find_bound_impl(
                 if (!is_const(binary->b)) return def_bound;
 
                 auto b = to_cpp<int64_t>(binary->b);
-                gpu_assert(b != 0);
+                dsl_assert(b != 0);
 
                 auto a = find_bound_impl(binary->a, b > 0 ? is_low : !is_low);
                 if (!is_good_bound(a)) return def_bound;
@@ -1062,7 +727,7 @@ int64_t bound_finder_base_t::find_bound_impl(
                 int64_t div_bound;
                 if (is_low != is_neg) {
                     // Truncate away from zero.
-                    div_bound = utils::div_up(std::abs(a), std::abs(b));
+                    div_bound = div_up(std::abs(a), std::abs(b));
                 } else {
                     // Truncate towards zero.
                     div_bound = std::abs(a) / std::abs(b);
@@ -1137,7 +802,7 @@ bool is_linear_var_transform(const expr_t &e, linear_transform_t &t) {
     auto &var = vars[0];
 
     // TODO: Extend to match multiplication: (a * var).
-    if (!utils::one_of(binary_op->op_kind, op_kind_t::_add, op_kind_t::_sub))
+    if (!one_of(binary_op->op_kind, {op_kind_t::_add, op_kind_t::_sub}))
         return false;
 
     auto &a = binary_op->a;
@@ -1232,14 +897,14 @@ void constraint_set_t::add_constraint(const expr_t &e) {
 }
 
 bool constraint_set_t::is_single_value(const expr_t &e, expr_t &value) const {
-    gpu_assert(is_var(e)) << e;
+    dsl_assert(is_var(e)) << e;
     auto it = relations_.find(e);
     if (it == relations_.end()) return false;
 
     expr_t lo;
     expr_t hi;
     for (auto &rel : it->second) {
-        gpu_assert(is_const(rel.rhs())) << rel;
+        dsl_assert(is_const(rel.rhs())) << rel.str();
         bool do_break = false;
         switch (rel.op_kind()) {
             case op_kind_t::_eq:
@@ -1264,7 +929,7 @@ bool constraint_set_t::is_single_value(const expr_t &e, expr_t &value) const {
                 }
                 break;
             }
-            default: gpu_error_not_expected() << rel;
+            default: dsl_error() << rel.str();
         }
         if (do_break) break;
     }
@@ -1277,7 +942,7 @@ bool constraint_set_t::can_prove_impl(
         const expr_t &_e, bool do_simplify) const {
     auto e = _e;
     if (is_const(e)) {
-        gpu_assert(e.type() == type_t::_bool()) << e;
+        dsl_assert(e.type() == type_t::_bool()) << e;
         return to_cpp<bool>(e);
     }
 
@@ -1287,7 +952,7 @@ bool constraint_set_t::can_prove_impl(
         e = simplify_cmp_reduce_lhs_rhs(e);
         e = simplify(e);
         if (is_const(e)) {
-            gpu_assert(e.type() == type_t::_bool()) << e;
+            dsl_assert(e.type() == type_t::_bool()) << e;
             return to_cpp<bool>(e);
         }
     }
@@ -1307,13 +972,11 @@ int constraint_set_t::max_proven_gcd(const expr_t &var) const {
     if (it == modulus_infos_.end()) return 1;
     int ret = 1;
     for (auto &c : it->second) {
-        ret = math::lcm(ret, to_cpp<int>(c.mod()));
+        ret = lcm(ret, to_cpp<int>(c.mod()));
     }
     return ret;
 }
 
-} // namespace jit
-} // namespace intel
-} // namespace gpu
-} // namespace impl
-} // namespace dnnl
+} // namespace ir
+} // namespace dsl
+GEMMSTONE_NAMESPACE_END

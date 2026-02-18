@@ -54,7 +54,7 @@
 #define LDR_IMM(reg, addr, off) \
     { \
         const uint64_t IMM12_MASK = ~uint64_t(0xfff); \
-        if (((off)&IMM12_MASK) == 0) { \
+        if (((off) & IMM12_MASK) == 0) { \
             ldr(reg, ptr(addr, off)); \
         } else { \
             add_imm(X_DEFAULT_ADDR, addr, off, X_TMP_0); \
@@ -1271,10 +1271,10 @@ status_t jit_int8_matmul_t::execute(const exec_ctx_t &ctx) const {
         });
     };
 
-    auto kernel_execute = [&](int idx, int na, int nb, int m_blk_adr,
-                                  int n_blk_adr, int dst_adr, int bias_addr,
-                                  int scl_addr, int zp_ptr_a_adr,
-                                  int zp_ptr_b_adr, int zp_b_buf) {
+    auto kernel_execute
+            = [&](int idx, int na, int nb, int m_blk_adr, int n_blk_adr,
+                      int dst_adr, int bias_addr, int scl_addr,
+                      int zp_ptr_a_adr, int zp_ptr_b_adr, int zp_b_buf) {
         call_params_t p;
         p.na = &na;
         p.nb = &nb;

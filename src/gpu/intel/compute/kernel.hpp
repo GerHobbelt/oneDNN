@@ -85,7 +85,7 @@ struct program_src_t {
         name_ = std::shared_ptr<char>(new char[name_size], deleter);
         std::memcpy(name_.get(), name, name_size);
     }
-    operator bool() const { return name_ != nullptr; };
+    operator bool() const { return name_ != nullptr; }
     const char *name() const { return name_.get(); }
 
 private:
@@ -184,8 +184,8 @@ public:
         return status::success;
     }
 
-    virtual status_t check_alignment(
-            const kernel_arg_list_t &arg_list) const = 0;
+    virtual status_t check_alignment(const kernel_arg_list_t &arg_list) const
+            = 0;
 
     status_t check_alignment(const void *ptr, int arg_idx) const {
         const int min_alignment = 64;

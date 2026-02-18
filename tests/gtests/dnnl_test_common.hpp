@@ -326,7 +326,7 @@ struct mapped_ptr_t {
 
     ~mapped_ptr_t() {
         if (mem_ && ptr_) mem_->unmap_data(ptr_);
-    };
+    }
 
     operator T *() { return ptr_; }
     operator const T *() const { return ptr_; }
@@ -407,7 +407,7 @@ static inline data_t set_value(
         const memory::dim in_group = index % group_size;
         const bool fill = in_group == ((group % 1637) % group_size);
         return fill ? static_cast<data_t>(
-                       mean + deviation * sinf(float(index % 37)))
+                              mean + deviation * sinf(float(index % 37)))
                     : data_t {0};
     } else if (data_traits_t<data_t>::data_type == memory::data_type::s32
             || data_traits_t<data_t>::data_type == memory::data_type::s8) {
@@ -559,7 +559,7 @@ inline const char *query_impl_info(const_dnnl_primitive_desc_t pd) {
     const char *str;
     dnnl_primitive_desc_query(pd, dnnl_query_impl_info_str, 0, &str);
     return str;
-};
+}
 
 inline dnnl_status_t get_conv_impl_status(
         const_dnnl_primitive_desc_t pd, const char *match_str) {
@@ -568,7 +568,7 @@ inline dnnl_status_t get_conv_impl_status(
     if (strstr(conv_str, match_str) != nullptr)
         return dnnl_status_t::dnnl_success;
     return dnnl_status_t::dnnl_unimplemented;
-};
+}
 
 struct test_convolution_sizes_t {
     test_convolution_sizes_t(memory::dim mb, memory::dim ng, memory::dim ic,
@@ -684,8 +684,8 @@ bool catch_expected_failures(const F &f, bool expect_to_fail,
             if (ignore_unimplemented && (e.status == dnnl_unimplemented)) {
                 // Print unimplemented but do not treat as error
                 std::cout << "(" << filename << ":" << line_num << ") "
-                          << "[  UNIMPL  ] "
-                          << "Implementation not found" << std::endl;
+                          << "[  UNIMPL  ] " << "Implementation not found"
+                          << std::endl;
                 reset_failed_malloc_counter();
                 return true;
             } else if (test_out_of_memory()

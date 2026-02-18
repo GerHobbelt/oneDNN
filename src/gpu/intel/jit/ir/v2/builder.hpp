@@ -24,6 +24,7 @@
 #include "gpu/intel/jit/ir/v2/plan.hpp"
 #include "gpu/intel/jit/ir/v2/send.hpp"
 #include "gpu/intel/jit/ir/v2/tensor.hpp"
+#include "gpu/intel/jit/pass/alloc.hpp"
 
 namespace dnnl {
 namespace impl {
@@ -488,7 +489,7 @@ public:
         enter_scope();
     }
     ir_builder_t(const ir_builder_t &parent) = delete;
-    const hw_t &hw() const { return buf_mgr_->ir_ctx().hw(); }
+    const dsl::hw_t &hw() const { return buf_mgr_->ir_ctx().hw(); }
     ir_context_t &ir_ctx() { return buf_mgr_->ir_ctx(); }
     buffer_manager_t &buf_mgr() { return *buf_mgr_; }
     const offset_scope_t &off_scope() const { return *off_scope_; }
@@ -675,7 +676,7 @@ inline var_ref_t &var_ref_t::operator=(const expr_t &value) {
 
 class var_manager_t {
 public:
-    var_manager_t(const kernel::iface_t &kernel_iface)
+    var_manager_t(const dsl::kernel::iface_t &kernel_iface)
         : kernel_iface_(kernel_iface) {}
 
     std::vector<expr_t> ptr_args() const {
@@ -724,7 +725,7 @@ public:
     }
 
 private:
-    const kernel::iface_t &kernel_iface_;
+    const dsl::kernel::iface_t &kernel_iface_;
 };
 
 } // namespace v2

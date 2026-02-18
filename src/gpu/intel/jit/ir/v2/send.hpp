@@ -17,13 +17,13 @@
 #ifndef GPU_INTEL_JIT_IR_V2_SEND_HPP
 #define GPU_INTEL_JIT_IR_V2_SEND_HPP
 
+#include "gemmstone/../../dsl/ir/pass/simplify.hpp"
 #include "gpu/intel/jit/ir/block_2d_utils.hpp"
 #include "gpu/intel/jit/ir/fma.hpp"
 #include "gpu/intel/jit/ir/linear_expr.hpp"
 #include "gpu/intel/jit/ir/v2/plan_utils.hpp"
 #include "gpu/intel/jit/ir/v2/reqs.hpp"
 #include "gpu/intel/jit/ir/v2/tensor.hpp"
-#include "gpu/intel/jit/pass/simplify.hpp"
 
 #include <string>
 
@@ -329,7 +329,7 @@ struct send_2d_hint_t {
 };
 
 struct send_params_t {
-    hw_t hw;
+    dsl::hw_t hw;
     send_address_t address = send_address_t::undef;
     send_kind_t kind = send_kind_t::undef;
     send_op_t op = send_op_t::undef;
@@ -367,7 +367,7 @@ struct send_params_t {
 };
 
 struct send_1d_desc_t {
-    hw_t hw;
+    dsl::hw_t hw;
     send_address_t address = send_address_t::undef;
     send_op_t op = send_op_t::undef;
     int type_size = 0;
@@ -482,7 +482,7 @@ struct send_1d_plan_t : public base_plan_t {
 };
 
 struct send_2d_desc_t {
-    hw_t hw;
+    dsl::hw_t hw;
     send_address_t address = send_address_t::undef;
     send_op_t op = send_op_t::undef;
     dsl::type_t type;

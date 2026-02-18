@@ -49,7 +49,7 @@ struct alignas(int) gpu_product_t {
     unsigned char data[12];
 };
 
-static inline std::string to_string(gpu_arch_t arch) {
+static inline const char *to_string(gpu_arch_t arch) {
 #define CASE(_case) \
     if (arch == gpu_arch_t::_case) return STRINGIFY(_case)
     CASE(xe_lp);
@@ -222,6 +222,7 @@ public:
     static int max_slm_size_per_tg(gpu_arch_t gpu_arch);
     static int max_slm_size_per_tg(
             gpu_arch_t gpu_arch, int tg_size, bool large_grf_mode = false);
+    size_t memory_size() const { return memory_size_; }
     size_t l3_cache_size() const { return l3_cache_size_; }
     size_t icache_size() const;
     size_t max_kernel_param_size() const { return max_kernel_param_size_; }
@@ -294,10 +295,11 @@ protected:
     int32_t max_subgroup_size_ = 16;
     int max_exec_size_ = 0;
     size_t max_wg_size_ = 0;
+    size_t memory_size_ = 0;
     size_t l3_cache_size_ = 0;
     size_t max_kernel_param_size_ = 1024;
     uint32_t device_address_bits_ = 64;
-    uint64_t max_allocation_size_ = 0;
+    uint64_t max_allocation_size_ = UINT32_MAX;
 
     // extensions_ and gpu_arch_ describe effective extensions and GPU architecture.
     uint64_t extensions_ = 0;

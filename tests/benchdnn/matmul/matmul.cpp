@@ -718,7 +718,7 @@ void skip_invalid_prb(const prb_t *prb, res_t *res) {
         if (!groups.empty()) {
             if (prb->k % groups[0]) {
                 BENCHDNN_PRINT(2,
-                        "[INVALID][%s:%d]: Weights decompression scales "
+                        "[INVALID][%s:%d]: Weight-only quantization scales "
                         "require IC ('%d') to be divisible by groups ('%d')\n",
                         __FILE__, __LINE__, (int)prb->k, (int)groups[0]);
                 res->state = SKIPPED;
@@ -726,7 +726,8 @@ void skip_invalid_prb(const prb_t *prb, res_t *res) {
                 return;
             } else if (groups.size() > 2) {
                 BENCHDNN_PRINT(2,
-                        "[INVALID][%s:%d]: Weights decompression scales groups "
+                        "[INVALID][%s:%d]: Weight-only quantization scales "
+                        "groups "
                         "support only two dimensions\n",
                         __FILE__, __LINE__);
                 res->state = SKIPPED;
@@ -741,7 +742,8 @@ void skip_invalid_prb(const prb_t *prb, res_t *res) {
         if (!groups.empty()) {
             if (groups[0] > 0 && (prb->k % groups[0])) {
                 BENCHDNN_PRINT(2,
-                        "[INVALID][%s:%d]: Weights decompression zero-points "
+                        "[INVALID][%s:%d]: Weight-only quantization "
+                        "zero-points "
                         "require IC ('%d') to be divisible by groups ('%d')\n",
                         __FILE__, __LINE__, (int)prb->k, (int)groups[0]);
                 res->state = SKIPPED;
@@ -749,7 +751,8 @@ void skip_invalid_prb(const prb_t *prb, res_t *res) {
                 return;
             } else if (groups.size() > 2) {
                 BENCHDNN_PRINT(2,
-                        "[INVALID][%s:%d]: Weights decompression zero-points "
+                        "[INVALID][%s:%d]: Weight-only quantization "
+                        "zero-points "
                         "groups support only two dimensions\n",
                         __FILE__, __LINE__);
                 res->state = SKIPPED;
@@ -776,7 +779,7 @@ void skip_invalid_prb(const prb_t *prb, res_t *res) {
                 n_unit_strides++;
                 if (n_unit_strides > 1) {
                     BENCHDNN_PRINT(2,
-                            "[INVALID][%s:%d]: Int4 Weights decompression "
+                            "[INVALID][%s:%d]: Int4 Weight-only quantization "
                             "requires byte alignment for the tensor.\n",
                             __FILE__, __LINE__);
                     res->state = SKIPPED;
@@ -786,7 +789,8 @@ void skip_invalid_prb(const prb_t *prb, res_t *res) {
             }
             if (wei_strides[d] > 1 && (wei_strides[d] % 2)) {
                 BENCHDNN_PRINT(2,
-                        "[INVALID][%s:%d]: Int4 Weights decompression requires "
+                        "[INVALID][%s:%d]: Int4 Weight-only quantization "
+                        "requires "
                         "byte alignment for the tensor.\n",
                         __FILE__, __LINE__);
                 res->state = SKIPPED;
@@ -863,7 +867,7 @@ std::vector<int> supported_exec_args(dir_t dir) {
             DNNL_ARG_DST,
     };
     return exec_args;
-};
+}
 
 int init_ref_memory_args(dnn_mem_map_t &ref_mem_map, dnn_mem_map_t &mem_map,
         dnnl_primitive_t prim, const prb_t *prb, res_t *res,
@@ -1103,7 +1107,7 @@ int doit(const std::vector<benchdnn_dnnl_wrapper_t<dnnl_primitive_t>> &v_prim,
 
     args_t args(mem_map), ref_args(ref_mem_map);
 
-    SAFE(execute_and_wait(prim, args, res), WARN);
+    SAFE(run_execution(prim, args, res), WARN);
 
     check_correctness(prb, get_kinds_to_check(prb), args, ref_args, setup_cmp,
             res, prb->dir, prim_ref);

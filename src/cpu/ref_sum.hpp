@@ -77,7 +77,7 @@ struct ref_sum_t : public primitive_t {
                 scratchpad.book(key_nested_multiple + (int)i,
                         reorder_pds_[i]->scratchpad_registry());
             }
-        };
+        }
     };
 
     ref_sum_t(const pd_t *apd) : primitive_t(apd) {}
@@ -114,7 +114,7 @@ struct ref_sum_t : public primitive_t {
 
         auto sum_reduce = pd()->need_output_reorder()
                 ? ctx.get_scratchpad_grantor().get_memory_storage(
-                        key_sum_reduction)
+                          key_sum_reduction)
                 : nullptr;
         const auto &dst = ctx.args().at(DNNL_ARG_DST);
 

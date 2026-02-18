@@ -1007,8 +1007,8 @@ int scales_post_processing(dnn_mem_map_t &mem_map) {
     const bool has_dst_scale
             = mem_map.count(DNNL_ARG_ATTR_SCALES | DNNL_ARG_DST);
 
-    const auto replace_mem_to_v16 = [&](dnnl_data_type_t dt, int exec_arg,
-                                            float val) {
+    const auto replace_mem_to_v16
+            = [&](dnnl_data_type_t dt, int exec_arg, float val) {
         dims_t dims = {16};
         auto new_md = dnn_mem_t::init_md(1, dims.data(), dt, tag::abx);
         dnn_mem_t new_m(new_md, get_test_engine(), /* prefill = */ true);
@@ -1240,11 +1240,11 @@ int doit(const prb_t *prb, res_t *res) {
     const int32_t *dst_zp_ptr
             = mem_map.count(DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_DST)
             ? (const int32_t *)mem_map.at(
-                    DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_DST)
+                      DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_DST)
             : nullptr;
     int32_t zp_a_val = mem_map.count(DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_SRC)
             ? *(const int32_t *)mem_map.at(
-                    DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_SRC)
+                      DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_SRC)
             : 0;
     const char *bia_dt_ptr = mem_map.count(DNNL_ARG_BIAS)
             ? (const char *)mem_map.at(DNNL_ARG_BIAS)
@@ -1351,27 +1351,27 @@ int doit(const prb_t *prb, res_t *res) {
 
     SAFE(init_hw_config(kernel_args), WARN);
 
+    if (has_bench_mode_bit(mode_bit_t::exec)
+            && !has_bench_mode_bit(mode_bit_t::perf)) {
 #if !defined(DNNL_EXPERIMENTAL_UKERNEL)
-    if (prb->batch_kind == "addr") {
-        brgemm_kernel_execute_postops(brgemm_kernel, prb->batch_size,
-                v_batch_element.data(), acc_ptr, dst_ptr, post_ops_data,
-                scratchpad_ptr);
-    } else if (prb->batch_kind == "offs") {
-        brgemm_kernel_execute_postops(brgemm_kernel, prb->batch_size, src_ptr,
-                wei_ptr, v_batch_element.data(), acc_ptr, dst_ptr,
-                post_ops_data, scratchpad_ptr);
-    }
-#else // !defined(DNNL_EXPERIMENTAL_UKERNEL)
-    // `prb->use_dst_as_acc()=true` will make `dst_ptr=acc_ptr` and rest should
-    // be handled by API.
-    DNN_SAFE(dnnl_brgemm_execute_postops(brgemm, src_ptr, wei_packed_ptr,
-                     offsets.data(), acc_ptr, dst_ptr, scratchpad_ptr,
-                     attr_params),
-            WARN);
+        if (prb->batch_kind == "addr") {
+            brgemm_kernel_execute_postops(brgemm_kernel, prb->batch_size,
+                    v_batch_element.data(), acc_ptr, dst_ptr, post_ops_data,
+                    scratchpad_ptr);
+        } else if (prb->batch_kind == "offs") {
+            brgemm_kernel_execute_postops(brgemm_kernel, prb->batch_size,
+                    src_ptr, wei_ptr, v_batch_element.data(), acc_ptr, dst_ptr,
+                    post_ops_data, scratchpad_ptr);
+        }
+#else /* !defined(DNNL_EXPERIMENTAL_UKERNEL) */
+        // `prb->use_dst_as_acc()=true` will make `dst_ptr=acc_ptr` and rest should
+        // be handled by API.
+        DNN_SAFE(dnnl_brgemm_execute_postops(brgemm, src_ptr, wei_packed_ptr,
+                         offsets.data(), acc_ptr, dst_ptr, scratchpad_ptr,
+                         attr_params),
+                WARN);
 #endif
-    res->state = EXECUTED;
-
-    if (has_bench_mode_bit(mode_bit_t::corr)) {
+        res->state = EXECUTED;
         check_correctness(prb, {DST}, args, ref_args, setup_cmp, res, prb->dir);
     }
 

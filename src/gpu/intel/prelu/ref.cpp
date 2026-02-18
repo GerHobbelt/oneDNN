@@ -66,7 +66,7 @@ static status_t init_conf_common(
             const dnnl_dim_t diff_wei_dim = conf.is_forward
                     ? 1
                     : static_cast<dnnl_dim_t>(
-                            conf.diff_wei_md_info.padded_dims[i]);
+                              conf.diff_wei_md_info.padded_dims[i]);
             dnnl_dim_t dim2dispatch
                     = nstl::max(dst_mdw.padded_dims()[i], diff_wei_dim);
             conf.dispatch.define_dim(utils::format("D%d", i), i, dim2dispatch);
@@ -76,7 +76,7 @@ static status_t init_conf_common(
     conf.dispatch.generate(false);
 
     return status::success;
-};
+}
 
 static status_t init_kernel_ctx_common(
         compute::kernel_ctx_t &kernel_ctx, const conf_t &conf) {

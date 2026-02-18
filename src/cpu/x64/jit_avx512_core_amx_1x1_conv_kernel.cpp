@@ -209,8 +209,8 @@ void jit_avx512_core_amx_1x1_fwd_kernel_t::apply_sum(const Zmm zmm_out,
     if (p_sum_scale) {
         const auto p_sum_scale_val = *p_sum_scale;
         const auto p_sum_zp_val = *p_sum_zp;
-        const auto sum_injector = [&, zmm_out, p_sum_scale_val, p_sum_zp_val,
-                                          mask_flag]() {
+        const auto sum_injector
+                = [&, zmm_out, p_sum_scale_val, p_sum_zp_val, mask_flag]() {
             cvt2ps(jcp.sum_dt, zmm_prev_dst, addr, mask_flag);
             if (p_sum_zp_val != 0) {
                 vcvtdq2ps(zmm_sum_zp, ptr_b[reg_ptr_sum_zp]);
@@ -1114,11 +1114,11 @@ status_t jit_avx512_core_amx_1x1_fwd_kernel_t::init_conf(jit_conv_conf_t &jcp,
         format_tag_t wei_tag;
         wei_tag = (is_bf16_convolution)
                 ? pick(with_groups + 2 * (ndims - 3), OIw16i16o2i, gOIw16i16o2i,
-                        OIhw16i16o2i, gOIhw16i16o2i, OIdhw16i16o2i,
-                        gOIdhw16i16o2i)
+                          OIhw16i16o2i, gOIhw16i16o2i, OIdhw16i16o2i,
+                          gOIdhw16i16o2i)
                 : pick(with_groups + 2 * (ndims - 3), OIw16i16o4i, gOIw16i16o4i,
-                        OIhw16i16o4i, gOIhw16i16o4i, OIdhw16i16o4i,
-                        gOIdhw16i16o4i);
+                          OIhw16i16o4i, gOIhw16i16o4i, OIdhw16i16o4i,
+                          gOIdhw16i16o4i);
         memory_desc_t want_wei_md = weights_md;
         CHECK_BOOL(memory_desc_init_by_tag(want_wei_md, wei_tag));
 

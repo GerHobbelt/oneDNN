@@ -27,8 +27,8 @@ namespace jit {
 namespace dsl {
 
 #ifdef WITH_SYCL_RUNTIME
-inline sycl::kernel make_kernel(
-        const kernel_t &kernel, sycl::context ctx, sycl::device dev) {
+inline ::sycl::kernel make_kernel(
+        const kernel_t &kernel, ::sycl::context ctx, ::sycl::device dev) {
     return jit::make_kernel(kernel, ctx, dev);
 }
 #endif

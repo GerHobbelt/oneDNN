@@ -17,7 +17,7 @@
 #include "gpu/intel/conv/jit/pipeline.hpp"
 
 #include "gpu/intel/jit/ir/send.hpp"
-#include "gpu/intel/jit/utils/trace.hpp"
+#include "gpu/intel/jit/pass/alloc.hpp"
 
 namespace dnnl {
 namespace impl {
@@ -829,7 +829,7 @@ public:
 // buffers.
 class sbid_manager_t {
 public:
-    sbid_manager_t(const hw_t &hw = hw_t(), const int regs = 128)
+    sbid_manager_t(const dsl::hw_t &hw = dsl::hw_t(), const int regs = 128)
         : sbid_count_(ngen::tokenCount(hw, regs))
         , tuple_func_(builtin_t::make("tuple")) {
         gpu_assert(sbid_count_ <= max_sbid_count);
@@ -885,7 +885,7 @@ private:
 // Helper to assign SBIDs to IR function calls.
 class sbid_assigner_t {
 public:
-    sbid_assigner_t(const hw_t &hw) : local_sbid_mgr_(hw) {}
+    sbid_assigner_t(const dsl::hw_t &hw) : local_sbid_mgr_(hw) {}
 
     sbid_assigner_t(sbid_manager_t &external_sbid_mgr)
         : external_sbid_mgr_(&external_sbid_mgr) {}
@@ -1088,9 +1088,9 @@ private:
 
 stmt_t inject_prefetch_pipeline(
         const stmt_t &s, ir_context_t &ir_ctx, const config_t &cfg) {
-    trace_start();
+    ir::trace_start();
     auto ret = prefetch_pipeliner_t(s, cfg, ir_ctx).inject();
-    trace_pass("inject_prefetch_pipeline", ret, ir_ctx);
+    ir::trace_pass("inject_prefetch_pipeline", ret, ir_ctx);
     return ret;
 }
 
@@ -1516,10 +1516,10 @@ public:
 
 stmt_t inject_simple_slm_buffering(const stmt_t &s, ir_context_t &ir_ctx,
         const config_t &cfg, int ab_slm_size) {
-    trace_start();
+    ir::trace_start();
     auto ret = simple_slm_buffering_injector_t(s, ir_ctx, cfg, ab_slm_size)
                        .inject();
-    trace_pass("inject_simple_slm_buffering", ret, ir_ctx);
+    ir::trace_pass("inject_simple_slm_buffering", ret, ir_ctx);
     return ret;
 }
 
@@ -1981,9 +1981,9 @@ private:
 
 stmt_t inject_unrolling(const stmt_t &s, ir_context_t &ir_ctx,
         const config_t &cfg, int ab_slm_size) {
-    trace_start();
+    ir::trace_start();
     auto ret = unrolling_injector_t(s, cfg, ir_ctx, ab_slm_size).inject();
-    trace_pass("inject_unrolling", ret, ir_ctx);
+    ir::trace_pass("inject_unrolling", ret, ir_ctx);
     return ret;
 }
 

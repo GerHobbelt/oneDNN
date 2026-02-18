@@ -446,20 +446,20 @@ std::string md2fmt_tag_str(const memory_desc_t *md) {
     //   output tag: acdb
     std::sort(sort_keys.begin(), sort_keys.end(),
             [](const sort_key_t &left, const sort_key_t &right) {
-                if (left.stride_order < right.stride_order) return false;
-                if (left.stride_order == right.stride_order) {
-                    // WLOG, we can assume a dimension of size 1 has the same
-                    // stride as the next outermost dimension. Sort the one with
-                    // the non-unit outer block as the outer dimension. Multiple
-                    // dimensions of size 1 with the same stride is ambiguous.
-                    if (left.outer_block < right.outer_block) return false;
-                    if (left.outer_block == right.outer_block)
-                        // Sort 1x1x... outer blocks to (arbitrarily) list them
-                        // in alphabetical order.
-                        return left.idx < right.idx;
-                }
-                return true;
-            });
+        if (left.stride_order < right.stride_order) return false;
+        if (left.stride_order == right.stride_order) {
+            // WLOG, we can assume a dimension of size 1 has the same
+            // stride as the next outermost dimension. Sort the one with
+            // the non-unit outer block as the outer dimension. Multiple
+            // dimensions of size 1 with the same stride is ambiguous.
+            if (left.outer_block < right.outer_block) return false;
+            if (left.outer_block == right.outer_block)
+                // Sort 1x1x... outer blocks to (arbitrarily) list them
+                // in alphabetical order.
+                return left.idx < right.idx;
+        }
+        return true;
+    });
 
     char dim_chars[DNNL_MAX_NDIMS + 1];
     for (int i = 0; i < mdw.ndims(); ++i)
@@ -800,8 +800,7 @@ std::ostream &operator<<(std::ostream &ss, const primitive_attr_t *attr) {
                 } break;
                 case primitive_kind::prelu: {
                     const auto &ep = e.prelu;
-                    ss << delim << "prelu"
-                       << ":" << ep.mask;
+                    ss << delim << "prelu" << ":" << ep.mask;
                 } break;
                 default: assert(!"unsupported post op primitive kind!"); break;
             }
@@ -978,8 +977,8 @@ std::string init_info_convolution(const engine_t *e, const pd_t *pd) {
     ss << "alg:" << pd->desc()->alg_kind << ",";
 
     if (pd->with_groups()) ss << "g" << pd->G();
-    ss << "mb" << pd->MB() << "_"
-       << "ic" << pd->IC() << "oc" << pd->OC() << "_";
+    ss << "mb" << pd->MB() << "_" << "ic" << pd->IC() << "oc" << pd->OC()
+       << "_";
     if (pd->ndims() >= 5)
         ss << "id" << pd->ID() << "od" << (has_fused_dw ? pd->ID() : pd->OD())
            << "kd" << pd->KD() << "sd" << pd->KSD() << "dd" << pd->KDD() << "pd"

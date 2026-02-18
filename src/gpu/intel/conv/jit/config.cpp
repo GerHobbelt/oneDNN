@@ -195,7 +195,7 @@ status_t problem_t::init(
     isp = id * ih * iw;
     osp = od * oh * ow;
 
-    hw_t hw(make_ir_hw(engine));
+    dsl::hw_t hw(make_ir_hw(engine));
     init_transpose(hw);
     CHECK(init_abc_data_types(hw));
     CHECK(init_acc_data_type());
@@ -330,7 +330,7 @@ int get_default_block(fma_kind_t fma, const dsl::type_t &type, dim_t elems) {
     return get_default_mad_block(type);
 }
 
-fma_kind_t get_default_fma(const hw_t &hw, const dsl::type_t &type) {
+fma_kind_t get_default_fma(const dsl::hw_t &hw, const dsl::type_t &type) {
     switch (type.size()) {
         case 1:
             if (hw >= ngen::HW::XeHP) return fma_kind_t::dpas;
@@ -356,7 +356,7 @@ struct nc_block_t {
 
     // Ideally, this should only depend on data type, direction, mb, c, and g to
     // enable the same src/dst formats and avoid reorders between convolutions
-    static nc_block_t get_default_blocking(const hw_t &hw, fma_kind_t fma,
+    static nc_block_t get_default_blocking(const dsl::hw_t &hw, fma_kind_t fma,
             dsl::type_t type, bool is_dw, dim_t n, dim_t c, dim_t g,
             bool is_output = false) {
         // Select dst layout to align with fma kind of following conv
@@ -875,13 +875,13 @@ status_t init_tensor_layouts(
     return status::success;
 }
 
-bool hw_ok(const hw_t &hw) {
+bool hw_ok(const dsl::hw_t &hw) {
     if (hw < ngen::HW::XeLP) return false;
     return true;
 }
 
 bool data_types_ok(
-        const problem_t &prb, const hw_t &hw, impl::engine_t *engine) {
+        const problem_t &prb, const dsl::hw_t &hw, impl::engine_t *engine) {
     auto src = prb.src_data_type;
     auto wei = prb.wei_data_type;
     auto dst = prb.dst_data_type;
@@ -960,7 +960,7 @@ bool zero_points_ok(const problem_t &prb) {
     return true;
 }
 
-bool post_ops_ok(const problem_t &prb, const hw_t &hw) {
+bool post_ops_ok(const problem_t &prb, const dsl::hw_t &hw) {
     auto *pd = prb.conv_pd;
     auto *attr = prb.attr;
 
@@ -1135,7 +1135,7 @@ void init_bwd_d_optimize(config_t &cfg) {
 
 status_t init_pd_time_cfg(const problem_t &prb, config_t &cfg,
         impl::engine_t *engine, convolution_pd_t *pd, primitive_attr_t *attr) {
-    hw_t hw(make_ir_hw(engine));
+    dsl::hw_t hw(make_ir_hw(engine));
 
     VDISPATCH_CHECK(pd, engine, hw_ok(hw), VERBOSE_UNSUPPORTED_ISA);
     VDISPATCH_CHECK(
@@ -1148,7 +1148,7 @@ status_t init_pd_time_cfg(const problem_t &prb, config_t &cfg,
     zero_points_config_t zp_cfg(pd);
     cfg.set_zp_cfg(zp_cfg);
     cfg.set_prb(prb);
-    cfg.set_options(kernel::options_t(hw));
+    cfg.set_options(dsl::kernel::options_t(hw));
     cfg.maybe_override_from_env();
 
     CHECK(init_fma_kind(cfg, pd, engine));
@@ -1165,7 +1165,7 @@ status_t init_pd_time_cfg(const problem_t &prb, config_t &cfg,
 }
 
 bool pipeline_unroll_hint(const problem_t &prb, fma_kind_t fma_kind,
-        const kernel::options_t &options,
+        const dsl::kernel::options_t &options,
         bwd_d_optimize_kind_t bwd_d_optimize_kind,
         bool allow_global_reduction) {
     bool do_unroll = true;
@@ -1543,12 +1543,11 @@ public:
         // (WHD, width is first).
         std::sort(entries_.begin(), entries_.end(),
                 [&](const entry_t &a, const entry_t &b) {
-                    int a_sp_idx = spatial_index(a.dim);
-                    int b_sp_idx = spatial_index(b.dim);
-                    if (a_sp_idx >= 0 && b_sp_idx >= 0)
-                        return a_sp_idx > b_sp_idx;
-                    return (a_sp_idx >= 0) && (b_sp_idx < 0);
-                });
+            int a_sp_idx = spatial_index(a.dim);
+            int b_sp_idx = spatial_index(b.dim);
+            if (a_sp_idx >= 0 && b_sp_idx >= 0) return a_sp_idx > b_sp_idx;
+            return (a_sp_idx >= 0) && (b_sp_idx < 0);
+        });
     }
 
     bool has_next() const {
@@ -1813,11 +1812,11 @@ void fixup_config(config_t &cfg) {
 void validate_config_and_plan(config_t &cfg) {
     auto check_if_in_grid_dims
             = [](const std::array<tile_t, 3> &grid, const pvar_t &dim) {
-                  for (auto &tile : grid)
-                      for (auto &d : tile)
-                          if (d == dim) return;
-                  gpu_error_not_expected() << dim.str();
-              };
+        for (auto &tile : grid)
+            for (auto &d : tile)
+                if (d == dim) return;
+        gpu_error_not_expected() << dim.str();
+    };
     const auto &tg_dims = get_thread_group_grid_dims(cfg);
     const auto &grid_dims = get_kernel_grid_dims(cfg);
     for (auto &d : cfg.dims()) {

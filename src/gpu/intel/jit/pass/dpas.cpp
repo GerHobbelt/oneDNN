@@ -16,8 +16,8 @@
 
 #include "gpu/intel/jit/pass/dpas.hpp"
 
+#include "gemmstone/../../dsl/ir/pass/trace.hpp"
 #include "gpu/intel/jit/ir/fma.hpp"
-#include "gpu/intel/jit/utils/trace.hpp"
 
 namespace dnnl {
 namespace impl {
@@ -61,8 +61,8 @@ public:
         return mutate_mul_impl(entries);
     }
 
-    virtual stmt_t mutate_mul_impl(
-            const std::vector<entry_t> &entries) const = 0;
+    virtual stmt_t mutate_mul_impl(const std::vector<entry_t> &entries) const
+            = 0;
 };
 
 class dpas_atomic_mutator_t : public mul_mutator_t {

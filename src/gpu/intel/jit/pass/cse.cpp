@@ -14,8 +14,6 @@
 * limitations under the License.
 *******************************************************************************/
 
-#include "gpu/intel/jit/pass/cse.hpp"
-
 #include <algorithm>
 #include <iostream>
 #include <utility>
@@ -23,10 +21,12 @@
 #include <type_traits>
 #include <unordered_map>
 
+#include "gemmstone/../../dsl/ir/pass/trace.hpp"
 #include "gpu/intel/jit/codegen/allocation_size.hpp"
 #include "gpu/intel/jit/ir/send.hpp"
-#include "gpu/intel/jit/utils/trace.hpp"
+#include "gpu/intel/jit/pass/cse.hpp"
 #include "gpu/intel/jit/utils/utils.hpp"
+#include "gpu/intel/logging.hpp"
 
 namespace dnnl {
 namespace impl {
@@ -233,9 +233,9 @@ public:
             }
             std::sort(it, sorted_var_entries.end(),
                     [&](const cse_var_entry_t *a, const cse_var_entry_t *b) {
-                        // Sort by cost per byte
-                        return a->cost() * b->size() < b->cost() * a->size();
-                    });
+                // Sort by cost per byte
+                return a->cost() * b->size() < b->cost() * a->size();
+            });
             auto &e = **it;
 
             gpu_trace() << "cse_pass: skipping " << e.cse_expr()->expr
@@ -249,7 +249,7 @@ public:
         }
     }
 
-    const std::vector<cse_var_entry_t> &entries() const { return entries_; };
+    const std::vector<cse_var_entry_t> &entries() const { return entries_; }
 
 private:
     std::vector<cse_var_entry_t> entries_;
@@ -342,10 +342,10 @@ public:
         auto sorted_exprs = sort_var_map(cse_exprs_,
                 [](const std::pair<expr_t, cse_expr_t> &a,
                         const std::pair<expr_t, cse_expr_t> &b) {
-                    auto &a_var = a.second.cse_var.as<var_t>();
-                    auto &b_var = b.second.cse_var.as<var_t>();
-                    return a_var.name < b_var.name;
-                });
+            auto &a_var = a.second.cse_var.as<var_t>();
+            auto &b_var = b.second.cse_var.as<var_t>();
+            return a_var.name < b_var.name;
+        });
         for (auto &kv : sorted_exprs)
             f(kv.first);
     }
@@ -604,9 +604,11 @@ private:
             auto ret = seen_vars_.insert(var);
             if (ret.second)
                 lets_.push_back(let_t::make(var,
-                        obj.type.is_bool() ? cast(obj,
-                                bool_imm_t::get_packed_type(obj.type.elems()))
-                                           : obj));
+                        obj.type.is_bool()
+                                ? cast(obj,
+                                          bool_imm_t::get_packed_type(
+                                                  obj.type.elems()))
+                                : obj));
         }
     }
 
@@ -729,7 +731,7 @@ stmt_t eliminate_common_subexprs_impl(const stmt_t &_stmt, cse_context_t &ctx,
 
 stmt_t eliminate_common_subexprs(
         const stmt_t &_stmt, ir_context_t &ir_ctx, int memory_usage_limit) {
-    trace_start();
+    ir::trace_start();
     stmt_t stmt;
     cse_context_t cse_ctx(ir_ctx);
 
@@ -742,7 +744,7 @@ stmt_t eliminate_common_subexprs(
         stmt = eliminate_common_subexprs_impl(
                 _stmt, cse_ctx, grf_size, memory_usage_limit, 1);
     }
-    trace_pass("eliminate_common_subexprs", stmt, ir_ctx);
+    ir::trace_pass("eliminate_common_subexprs", stmt, ir_ctx);
     return stmt;
 }
 

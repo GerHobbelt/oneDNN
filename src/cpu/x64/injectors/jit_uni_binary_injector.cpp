@@ -126,46 +126,44 @@ bool binary_args_broadcast_supported(const post_ops_t &post_ops,
 
     return std::none_of(post_ops.entry_.cbegin(), post_ops.entry_.cend(),
             [&](const post_ops_t::entry_t &entry) -> bool {
-                if (entry.is_like_binary()) {
-                    const auto bcast_type = get_rhs_arg_broadcasting_strategy(
-                            get_src1_desc(entry, dst_d), dst_d,
-                            supported_strategy_set);
-                    return bcast_type == broadcasting_strategy_t::unsupported;
-                }
-                return false;
-            });
+        if (entry.is_like_binary()) {
+            const auto bcast_type = get_rhs_arg_broadcasting_strategy(
+                    get_src1_desc(entry, dst_d), dst_d, supported_strategy_set);
+            return bcast_type == broadcasting_strategy_t::unsupported;
+        }
+        return false;
+    });
 }
 
 bool any_binary_postop_rhs_non_scalar_broadcast(
         const post_ops_t &post_ops, const memory_desc_wrapper &dst_d) {
     return std::any_of(post_ops.entry_.cbegin(), post_ops.entry_.cend(),
             [&](const post_ops_t::entry_t &entry) -> bool {
-                if (entry.is_like_binary()) {
-                    const auto bcast_type = get_rhs_arg_broadcasting_strategy(
-                            get_src1_desc(entry, dst_d), dst_d,
-                            get_all_strategies_supported_by_injector());
-                    return !utils::one_of(bcast_type,
-                                   broadcasting_strategy_t::scalar,
-                                   broadcasting_strategy_t::unsupported)
-                            || entry.is_binary_with_ternary_op();
-                }
-                return false;
-            });
+        if (entry.is_like_binary()) {
+            const auto bcast_type = get_rhs_arg_broadcasting_strategy(
+                    get_src1_desc(entry, dst_d), dst_d,
+                    get_all_strategies_supported_by_injector());
+            return !utils::one_of(bcast_type, broadcasting_strategy_t::scalar,
+                           broadcasting_strategy_t::unsupported)
+                    || entry.is_binary_with_ternary_op();
+        }
+        return false;
+    });
 }
 
 bool any_binary_postop_rhs_with_ternary_scalar_bcast(
         const post_ops_t &post_ops, const memory_desc_wrapper &dst_d) {
     return std::any_of(post_ops.entry_.cbegin(), post_ops.entry_.cend(),
             [&](const post_ops_t::entry_t &entry) -> bool {
-                if (entry.is_like_binary()) {
-                    const auto bcast_type = get_rhs_arg_broadcasting_strategy(
-                            get_src1_desc(entry, dst_d), dst_d,
-                            get_all_strategies_supported_by_injector());
-                    return bcast_type == broadcasting_strategy_t::scalar
-                            && entry.is_binary_with_ternary_op();
-                }
-                return false;
-            });
+        if (entry.is_like_binary()) {
+            const auto bcast_type = get_rhs_arg_broadcasting_strategy(
+                    get_src1_desc(entry, dst_d), dst_d,
+                    get_all_strategies_supported_by_injector());
+            return bcast_type == broadcasting_strategy_t::scalar
+                    && entry.is_binary_with_ternary_op();
+        }
+        return false;
+    });
 }
 
 bool any_binary_postop_rhs_per_oc_broadcast(const post_ops_t &post_ops,
@@ -173,16 +171,14 @@ bool any_binary_postop_rhs_per_oc_broadcast(const post_ops_t &post_ops,
         const bcast_set_t &supported_strategy_set) {
     return std::any_of(post_ops.entry_.cbegin(), post_ops.entry_.cend(),
             [&](const post_ops_t::entry_t &entry) -> bool {
-                if (entry.is_like_binary()) {
-                    const auto bcast_type = get_rhs_arg_broadcasting_strategy(
-                            get_src1_desc(entry, dst_d), dst_d,
-                            supported_strategy_set);
-                    return bcast_type == broadcasting_strategy_t::per_oc
-                            || bcast_type
-                            == broadcasting_strategy_t::per_oc_spatial;
-                }
-                return false;
-            });
+        if (entry.is_like_binary()) {
+            const auto bcast_type = get_rhs_arg_broadcasting_strategy(
+                    get_src1_desc(entry, dst_d), dst_d, supported_strategy_set);
+            return bcast_type == broadcasting_strategy_t::per_oc
+                    || bcast_type == broadcasting_strategy_t::per_oc_spatial;
+        }
+        return false;
+    });
 }
 
 bool all_binary_postop_rhs_per_oc_broadcast(const post_ops_t &post_ops,
@@ -191,17 +187,67 @@ bool all_binary_postop_rhs_per_oc_broadcast(const post_ops_t &post_ops,
         const std::function<bool(const memory_desc_wrapper &)> &predicate) {
     return std::all_of(post_ops.entry_.cbegin(), post_ops.entry_.cend(),
             [&](const post_ops_t::entry_t &entry) -> bool {
-                if (entry.is_like_binary()) {
-                    const auto src1_desc = get_src1_desc(entry, dst_d);
-                    const auto bcast_type = get_rhs_arg_broadcasting_strategy(
-                            src1_desc, dst_d, supported_strategy_set);
-                    if (bcast_type == broadcasting_strategy_t::per_oc
-                            || bcast_type
-                                    == broadcasting_strategy_t::per_oc_spatial)
-                        return predicate(memory_desc_wrapper(src1_desc));
-                }
-                return true;
-            });
+        if (entry.is_like_binary()) {
+            const auto src1_desc = get_src1_desc(entry, dst_d);
+            const auto bcast_type = get_rhs_arg_broadcasting_strategy(
+                    src1_desc, dst_d, supported_strategy_set);
+            if (bcast_type == broadcasting_strategy_t::per_oc
+                    || bcast_type == broadcasting_strategy_t::per_oc_spatial)
+                return predicate(memory_desc_wrapper(src1_desc));
+        }
+        return true;
+    });
+}
+
+bool any_binary_postop_rhs_per_w_broadcast(const post_ops_t &post_ops,
+        const memory_desc_wrapper &dst_d,
+        const bcast_set_t &supported_strategy_set) {
+    return std::any_of(post_ops.entry_.cbegin(), post_ops.entry_.cend(),
+            [&](const post_ops_t::entry_t &entry) -> bool {
+        if (entry.is_like_binary()) {
+            const auto bcast_type = get_rhs_arg_broadcasting_strategy(
+                    get_src1_desc(entry, dst_d), dst_d, supported_strategy_set);
+            return bcast_type == broadcasting_strategy_t::per_w
+                    || bcast_type == broadcasting_strategy_t::per_mb_w;
+        }
+        return false;
+    });
+}
+
+void extend_binary_args_per_w(const post_ops_t &post_ops,
+        const std::vector<const void *> &orig_post_ops_binary_rhs_arg_vec,
+        std::vector<const void *> &post_ops_binary_rhs_arg_vec,
+        uint8_t *expanded_rhs, const std::vector<dim_t> &expanded_elems_len) {
+    size_t offset = 0;
+    const int po_len = post_ops.len();
+    auto binary_post_op_idx = 0;
+
+    for (int i = 0; i < po_len; ++i) {
+        if (!post_ops.entry_[i].is_binary()) { continue; }
+        if (expanded_elems_len[i] > 0) {
+            const auto &rhs_md = post_ops.entry_[i].binary.src1_desc;
+            const memory_desc_wrapper rhs_md_wrap(&rhs_md);
+            const dim_t rhs_len = rhs_md_wrap.nelems();
+            const data_type_t dt = rhs_md.data_type;
+            const auto dt_size = types::data_type_size(dt);
+
+            const uint8_t *src = reinterpret_cast<const uint8_t *>(
+                    orig_post_ops_binary_rhs_arg_vec[binary_post_op_idx]);
+            auto *dst = expanded_rhs + offset;
+
+            for (dim_t j = 0; j < expanded_elems_len[i]; ++j) {
+                const size_t src_idx = j % rhs_len;
+                memcpy(dst + j * dt_size, src + src_idx * dt_size, dt_size);
+            }
+
+            post_ops_binary_rhs_arg_vec[binary_post_op_idx] = dst;
+            offset += expanded_elems_len[binary_post_op_idx] * dt_size;
+        } else {
+            post_ops_binary_rhs_arg_vec[binary_post_op_idx]
+                    = orig_post_ops_binary_rhs_arg_vec[binary_post_op_idx];
+        }
+        binary_post_op_idx++;
+    }
 }
 
 static_params_t::static_params_t(const Xbyak::Reg64 &param1,
@@ -218,12 +264,12 @@ static_params_t::static_params_t(const Xbyak::Reg64 &param1,
         const bcast_set_t &supported_strategy_set,
         const rhs_arg_static_params_t &rhs_arg_static_params)
     : static_params_t(param1, supported_strategy_set, rhs_arg_static_params,
-            nullptr, nullptr) {}
+              nullptr, nullptr) {}
 
 static_params_t::static_params_t(const Xbyak::Reg64 &param1,
         const rhs_arg_static_params_t &rhs_arg_static_params)
     : static_params_t(param1, get_all_strategies_supported_by_injector(),
-            rhs_arg_static_params) {}
+              rhs_arg_static_params) {}
 
 rhs_arg_static_params_t::rhs_arg_static_params_t(
         std::size_t rhs_dt_helper_vmm_idx, const Xbyak::Reg64 &rhs_addr_reg,
@@ -233,10 +279,10 @@ rhs_arg_static_params_t::rhs_arg_static_params_t(
         std::size_t dst_orig_offset, const memory_desc_wrapper &dst_d,
         std::size_t tail_size, bool use_exact_tail_scalar_bcast)
     : rhs_arg_static_params_t(rhs_dt_helper_vmm_idx, rhs_addr_reg,
-            rhs_helper_reg, rhs_addr_cache_reg, preserve_gpr_helpers,
-            preserve_vmm_helper, abi_param_offset, dst_orig_offset, dst_d,
-            tail_size, Xbyak::Opmask(2), use_exact_tail_scalar_bcast,
-            rhs_helper_reg, false /*is_opmask_set*/) {}
+              rhs_helper_reg, rhs_addr_cache_reg, preserve_gpr_helpers,
+              preserve_vmm_helper, abi_param_offset, dst_orig_offset, dst_d,
+              tail_size, Xbyak::Opmask(2), use_exact_tail_scalar_bcast,
+              rhs_helper_reg, false /*is_opmask_set*/) {}
 
 rhs_arg_static_params_t::rhs_arg_static_params_t(
         std::size_t rhs_dt_helper_vmm_idx, const Xbyak::Reg64 &rhs_addr_reg,
@@ -247,10 +293,10 @@ rhs_arg_static_params_t::rhs_arg_static_params_t(
         std::size_t tail_size, const Xbyak::Opmask &tail_opmask,
         bool use_exact_tail_scalar_bcast)
     : rhs_arg_static_params_t(rhs_dt_helper_vmm_idx, rhs_addr_reg,
-            rhs_helper_reg, rhs_addr_cache_reg, preserve_gpr_helpers,
-            preserve_vmm_helper, abi_param_offset, dst_orig_offset, dst_d,
-            tail_size, tail_opmask, use_exact_tail_scalar_bcast, rhs_helper_reg,
-            true /*is_opmask_set*/) {}
+              rhs_helper_reg, rhs_addr_cache_reg, preserve_gpr_helpers,
+              preserve_vmm_helper, abi_param_offset, dst_orig_offset, dst_d,
+              tail_size, tail_opmask, use_exact_tail_scalar_bcast,
+              rhs_helper_reg, true /*is_opmask_set*/) {}
 
 rhs_arg_static_params_t::rhs_arg_static_params_t(
         std::size_t rhs_dt_helper_vmm_idx, const Xbyak::Reg64 &rhs_addr_reg,
@@ -261,10 +307,10 @@ rhs_arg_static_params_t::rhs_arg_static_params_t(
         std::size_t tail_size, const Xbyak::Opmask &tail_opmask,
         const Xbyak::Reg64 &reg_tail_size, bool use_exact_tail_scalar_bcast)
     : rhs_arg_static_params_t(rhs_dt_helper_vmm_idx, rhs_addr_reg,
-            rhs_helper_reg, rhs_addr_cache_reg, preserve_gpr_helpers,
-            preserve_vmm_helper, abi_param_offset, dst_orig_offset, dst_d,
-            tail_size, tail_opmask, use_exact_tail_scalar_bcast, reg_tail_size,
-            true /*is_opmask_set*/) {}
+              rhs_helper_reg, rhs_addr_cache_reg, preserve_gpr_helpers,
+              preserve_vmm_helper, abi_param_offset, dst_orig_offset, dst_d,
+              tail_size, tail_opmask, use_exact_tail_scalar_bcast,
+              reg_tail_size, true /*is_opmask_set*/) {}
 
 rhs_arg_static_params_t::rhs_arg_static_params_t(
         std::size_t rhs_dt_helper_vmm_idx, const Xbyak::Reg64 &rhs_addr_reg,
@@ -485,48 +531,52 @@ void jit_uni_binary_injector_t<isa, Vmm>::compute_vector_range(
     const injector_utils::register_preserve_guard_t register_guard {host_,
             (rhs_arg_static_params_.preserve_gpr_helpers
                                     && should_preserve_w_or_oc_offset_conversion_regs
-                            ? std::initializer_list<Xbyak::Reg64>(
-                                    {rhs_arg_static_params_.rhs_addr_reg,
-                                            rhs_arg_static_params_
-                                                    .rhs_helper_reg,
-                                            rhs_arg_static_params_
-                                                    .rhs_addr_cache_reg,
-                                            host_->rax, host_->rdx, host_->r8})
+                            ? std::initializer_list<
+                                      Xbyak::Reg64>({rhs_arg_static_params_
+                                                             .rhs_addr_reg,
+                                      rhs_arg_static_params_.rhs_helper_reg,
+                                      rhs_arg_static_params_.rhs_addr_cache_reg,
+                                      host_->rax, host_->rdx, host_->r8})
                             : rhs_arg_static_params_.preserve_gpr_helpers
                                     && should_preserve_mb_sp_offset_conversion_regs
                             ? std::initializer_list<Xbyak::Reg64>(
-                                    {rhs_arg_static_params_.rhs_addr_reg,
-                                            rhs_arg_static_params_
-                                                    .rhs_helper_reg,
-                                            rhs_arg_static_params_
-                                                    .rhs_addr_cache_reg,
-                                            host_->rax, host_->rdx, host_->r8,
-                                            host_->r9})
+                                      {rhs_arg_static_params_.rhs_addr_reg,
+                                              rhs_arg_static_params_
+                                                      .rhs_helper_reg,
+                                              rhs_arg_static_params_
+                                                      .rhs_addr_cache_reg,
+                                              host_->rax, host_->rdx, host_->r8,
+                                              host_->r9})
                             : rhs_arg_static_params_.preserve_gpr_helpers
                             ? std::initializer_list<Xbyak::Reg64>(
-                                    {rhs_arg_static_params_.rhs_addr_reg,
-                                            rhs_arg_static_params_
-                                                    .rhs_helper_reg,
-                                            rhs_arg_static_params_
-                                                    .rhs_addr_cache_reg,
-                                            host_->rax, host_->rdx})
+                                      {rhs_arg_static_params_.rhs_addr_reg,
+                                              rhs_arg_static_params_
+                                                      .rhs_helper_reg,
+                                              rhs_arg_static_params_
+                                                      .rhs_addr_cache_reg,
+                                              host_->rax, host_->rdx})
                             : should_preserve_w_or_oc_offset_conversion_regs
                             ? std::initializer_list<Xbyak::Reg64>(
-                                    {rhs_arg_static_params_.rhs_addr_cache_reg,
-                                            host_->rax, host_->rdx, host_->r8})
+                                      {rhs_arg_static_params_
+                                                      .rhs_addr_cache_reg,
+                                              host_->rax, host_->rdx,
+                                              host_->r8})
                             : shoud_preserve_oc_d_offset_conversion_regs
                             ? std::initializer_list<Xbyak::Reg64>(
-                                    {rhs_arg_static_params_.rhs_addr_cache_reg,
-                                            host_->rax, host_->rdx})
+                                      {rhs_arg_static_params_
+                                                      .rhs_addr_cache_reg,
+                                              host_->rax, host_->rdx})
                             : should_preserve_mb_sp_offset_conversion_regs
                             ? std::initializer_list<Xbyak::Reg64>(
-                                    {rhs_arg_static_params_.rhs_addr_cache_reg,
-                                            host_->rax, host_->rdx, host_->r8,
-                                            host_->r9})
+                                      {rhs_arg_static_params_
+                                                      .rhs_addr_cache_reg,
+                                              host_->rax, host_->rdx, host_->r8,
+                                              host_->r9})
                             : use_offset_conversions
                             ? std::initializer_list<Xbyak::Reg64>(
-                                    {rhs_arg_static_params_.rhs_addr_cache_reg,
-                                            host_->rax, host_->rdx})
+                                      {rhs_arg_static_params_
+                                                      .rhs_addr_cache_reg,
+                                              host_->rax, host_->rdx})
                             : std::initializer_list<Xbyak::Reg64>()),
             (rhs_arg_static_params_.preserve_vmm_helper && dt_helper_vmm_needed
                             ? std::initializer_list<Xbyak::Xmm>({Vmm(vmm_hint)})
@@ -579,13 +629,13 @@ void jit_uni_binary_injector_t<isa, Vmm>::compute_vector_range(
                 = (rhs_broadcasting_strategy == broadcasting_strategy_t::scalar)
                 && needs_ternary_input;
 
-        if (is_start_idx
-                || rhs_arg_params_differ(vmm_idx, vmm_idx - 1, rhs_arg_params,
-                        rhs_broadcasting_strategy)
-                || load_addr) {
+        const bool params_differ = rhs_arg_params_differ(vmm_idx, vmm_idx - 1,
+                rhs_arg_params, rhs_broadcasting_strategy);
+        const bool need_new_addr = is_start_idx || params_differ || load_addr;
+        if (need_new_addr) {
             rhs1_arg_addr = prepare_rhs_arg_addr(vmm_idx, rhs_arg_idx, post_op,
-                    rhs_arg_params, rhs_broadcasting_strategy,
-                    is_start_idx || load_addr, false);
+                    rhs_arg_params, rhs_broadcasting_strategy, need_new_addr,
+                    false);
         }
 
         if (vmm_preservation_needed) {
@@ -839,9 +889,10 @@ void jit_uni_binary_injector_t<isa, Vmm>::append_oc_offset(
             const auto r8 = host_->r8;
 
             const injector_utils::conditional_register_preserve_guard_t
-                    register_guard {is_out_reg ? utils::one_of(
-                                            it_out_reg->second, rax, rdx, r8)
-                                               : false,
+                    register_guard {is_out_reg
+                                    ? utils::one_of(
+                                              it_out_reg->second, rax, rdx, r8)
+                                    : false,
                             host_,
                             {is_out_reg ? it_out_reg->second : Xbyak::Reg64()}};
 
@@ -1067,9 +1118,10 @@ void jit_uni_binary_injector_t<isa, Vmm>::append_oc_d_offset(
             const auto rdx = host_->rdx;
 
             const injector_utils::conditional_register_preserve_guard_t
-                    register_guard {is_out_reg ? utils::one_of(
-                                            it_out_reg->second, rax, rdx)
-                                               : false,
+                    register_guard {is_out_reg
+                                    ? utils::one_of(
+                                              it_out_reg->second, rax, rdx)
+                                    : false,
                             host_, {it_out_reg->second}};
 
             switch (layout) {
@@ -1190,7 +1242,7 @@ void jit_uni_binary_injector_t<isa, Vmm>::append_mb_sp_offset(
             const injector_utils::conditional_register_preserve_guard_t
                     register_guard {is_out_reg
                                     ? utils::one_of(it_out_reg->second, rax,
-                                            rdx, r8, r9)
+                                              rdx, r8, r9)
                                     : false,
                             host_,
                             {is_out_reg ? it_out_reg->second : Xbyak::Reg64()}};
@@ -1472,7 +1524,7 @@ void jit_uni_binary_injector_t<isa, Vmm>::append_mb_w_offset(
             const injector_utils::conditional_register_preserve_guard_t
                     register_guard {is_out_reg
                                     ? utils::one_of(it_out_reg->second, rax,
-                                            rdx, r8, r9)
+                                              rdx, r8, r9)
                                     : false,
                             host_,
                             {is_out_reg ? it_out_reg->second : Xbyak::Reg64()}};
@@ -1780,9 +1832,10 @@ void jit_uni_binary_injector_t<isa, Vmm>::append_hw_offset(
             const auto r8 = host_->r8;
 
             const injector_utils::conditional_register_preserve_guard_t
-                    register_guard {is_out_reg ? utils::one_of(
-                                            it_out_reg->second, rax, rdx, r8)
-                                               : false,
+                    register_guard {is_out_reg
+                                    ? utils::one_of(
+                                              it_out_reg->second, rax, rdx, r8)
+                                    : false,
                             host_,
                             {is_out_reg ? it_out_reg->second : Xbyak::Reg64()}};
 
@@ -1913,9 +1966,10 @@ void jit_uni_binary_injector_t<isa, Vmm>::append_w_offset(
             const auto r8 = host_->r8;
 
             const injector_utils::conditional_register_preserve_guard_t
-                    register_guard {is_out_reg ? utils::one_of(
-                                            it_out_reg->second, rax, rdx, r8)
-                                               : false,
+                    register_guard {is_out_reg
+                                    ? utils::one_of(
+                                              it_out_reg->second, rax, rdx, r8)
+                                    : false,
                             host_,
                             {is_out_reg ? it_out_reg->second : Xbyak::Reg64()}};
 
@@ -2122,9 +2176,10 @@ void jit_uni_binary_injector_t<isa, Vmm>::append_mb_offset(
             const auto r8 = host_->r8;
 
             const injector_utils::conditional_register_preserve_guard_t
-                    register_guard {is_out_reg ? utils::one_of(
-                                            it_out_reg->second, rax, rdx, r8)
-                                               : false,
+                    register_guard {is_out_reg
+                                    ? utils::one_of(
+                                              it_out_reg->second, rax, rdx, r8)
+                                    : false,
                             host_,
                             {is_out_reg ? it_out_reg->second : Xbyak::Reg64()}};
 
@@ -2298,9 +2353,10 @@ void jit_uni_binary_injector_t<isa, Vmm>::append_oc_spatial_offset(
             const auto r8 = host_->r8;
 
             const injector_utils::conditional_register_preserve_guard_t
-                    register_guard {is_out_reg ? utils::one_of(
-                                            it_out_reg->second, rax, rdx, r8)
-                                               : false,
+                    register_guard {is_out_reg
+                                    ? utils::one_of(
+                                              it_out_reg->second, rax, rdx, r8)
+                                    : false,
                             host_,
                             {is_out_reg ? it_out_reg->second : Xbyak::Reg64()}};
 
@@ -2468,9 +2524,10 @@ void jit_uni_binary_injector_t<isa, Vmm>::append_mb_oc_offset(
             const auto r8 = host_->r8;
 
             const injector_utils::conditional_register_preserve_guard_t
-                    register_guard {is_out_reg ? utils::one_of(
-                                            it_out_reg->second, rax, rdx, r8)
-                                               : false,
+                    register_guard {is_out_reg
+                                    ? utils::one_of(
+                                              it_out_reg->second, rax, rdx, r8)
+                                    : false,
                             host_,
                             {is_out_reg ? it_out_reg->second : Xbyak::Reg64()}};
 
@@ -3096,11 +3153,11 @@ static void execute_broadcast_f32_tail_avx(jit_generator_t *host,
     const auto init_op = [&] { host->vmovss(tmp_xmm, rhs_addr); };
     const auto upper_half_op
             = [&](int upper_half_data_size, bool should_load_lower_half) {
-                  // one element is already loaded
-                  if (upper_half_data_size > 1)
-                      host->vshufps(tmp_xmm, tmp_xmm, tmp_xmm,
-                              imms.at(upper_half_data_size - 2));
-              };
+        // one element is already loaded
+        if (upper_half_data_size > 1)
+            host->vshufps(tmp_xmm, tmp_xmm, tmp_xmm,
+                    imms.at(upper_half_data_size - 2));
+    };
     const auto lower_half_op = [&](int upper_half_data_size) {
         host->vshufps(tmp_xmm, tmp_xmm, tmp_xmm, 0);
     };
@@ -3258,10 +3315,10 @@ void jit_uni_binary_injector_t<avx,
 
         const auto upper_half_op
                 = [&](int upper_half_data_size, bool should_load_lower_half) {
-                      if (upper_half_data_size > 1)
-                          host_->vshufps(tmp_xmm, tmp_xmm, tmp_xmm,
-                                  imms.at(upper_half_data_size - 2));
-                  };
+            if (upper_half_data_size > 1)
+                host_->vshufps(tmp_xmm, tmp_xmm, tmp_xmm,
+                        imms.at(upper_half_data_size - 2));
+        };
 
         const auto lower_half_op = [&](int upper_half_data_size) {
             host_->vshufps(tmp_xmm, tmp_xmm, tmp_xmm, 0);
@@ -3584,8 +3641,8 @@ void jit_uni_binary_injector_t<avx, Xbyak::Ymm>::load_rhs_tail_statically(
     const auto tmp_xmm = Xbyak::Xmm(vmm_idx);
 
     if (data_type == data_type::f32 || data_type == data_type::s32) {
-        const auto upper_half_op = [&](int upper_half_data_size,
-                                           bool should_load_lower_half) {
+        const auto upper_half_op
+                = [&](int upper_half_data_size, bool should_load_lower_half) {
             const int offset = should_load_lower_half
                     ? xmm_size_elem * sizeof(float)
                     : 0;
@@ -3608,8 +3665,8 @@ void jit_uni_binary_injector_t<avx, Xbyak::Ymm>::load_rhs_tail_statically(
                 host_->vpmovzxbd(tmp_xmm, operand);
         };
 
-        const auto upper_half_op = [&](int upper_half_data_size,
-                                           bool should_load_lower_half) {
+        const auto upper_half_op
+                = [&](int upper_half_data_size, bool should_load_lower_half) {
             const int offset = should_load_lower_half ? xmm_size_elem : 0;
             for (int i = 0; i < upper_half_data_size; i++)
                 host_->vpinsrb(tmp_xmm, tmp_xmm,
@@ -3788,8 +3845,8 @@ void jit_uni_binary_injector_t<avx, Xbyak::Ymm>::execute_binary(
     const auto execute_cmp_binary_lam
             = [this](const Xbyak::Ymm &dst, const Xbyak::Ymm &lhs, const T &rhs,
                       const unsigned int cmp_predicate) {
-                  this->execute_cmp_binary<T>(dst, lhs, rhs, cmp_predicate);
-              };
+        this->execute_cmp_binary<T>(dst, lhs, rhs, cmp_predicate);
+    };
     helper_binary_t<avx, Xbyak::Ymm>::execute_binary<T>(
             host_, execute_cmp_binary_lam, binary_alg, dst, lhs, rhs);
 }
@@ -3803,8 +3860,8 @@ void jit_uni_binary_injector_t<avx, Xbyak::Xmm>::execute_binary(
     const auto execute_cmp_binary_lam
             = [this](const Xbyak::Xmm &dst, const Xbyak::Xmm &lhs, const T &rhs,
                       const unsigned int cmp_predicate) {
-                  this->execute_cmp_binary<T>(dst, lhs, rhs, cmp_predicate);
-              };
+        this->execute_cmp_binary<T>(dst, lhs, rhs, cmp_predicate);
+    };
     helper_binary_t<avx, Xbyak::Xmm>::execute_binary<T>(
             host_, execute_cmp_binary_lam, binary_alg, dst, lhs, rhs);
 }

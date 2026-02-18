@@ -52,62 +52,58 @@ void compute_ref_conv_fwd(const test_convolution_sizes_t &c,
     dnnl::impl::parallel_nd(c.mb, c.ng, c.oc / c.ng, c.oh, c.ow,
             [&](memory::dim n, memory::dim g, memory::dim oc, memory::dim oh,
                     memory::dim ow) {
-                data_t_acc a = 0;
-                for (memory::dim ic = 0; ic < c.ic / c.ng; ic++) {
-                    for (memory::dim kh = 0; kh < c.kh; kh++) {
-                        for (memory::dim kw = 0; kw < c.kw; kw++) {
-                            memory::dim iw
-                                    = ow * c.strw - c.padw + kw * (1 + c.dilw);
-                            memory::dim ih
-                                    = oh * c.strh - c.padh + kh * (1 + c.dilh);
-                            if (iw < 0 || iw >= c.iw) continue;
-                            if (ih < 0 || ih >= c.ih) continue;
-                            memory::dim iidx = n * padded_ic * c.ih * c.iw
-                                    + g * padded_ic / c.ng * c.ih * c.iw
-                                    + ic * c.ih * c.iw + ih * c.iw + iw;
-                            memory::dim widx = g * padded_oc / c.ng * padded_ic
-                                            / c.ng * c.kh * c.kw
-                                    + oc * padded_ic / c.ng * c.kh * c.kw
-                                    + ic * c.kh * c.kw + kh * c.kw + kw;
-                            a += ((data_t_acc)src_data[src_mdw.off_l(
-                                         iidx, true)])
-                                    * weights_data[weights_mdw.off_l(
-                                            widx, true)];
-                        }
-                    }
+        data_t_acc a = 0;
+        for (memory::dim ic = 0; ic < c.ic / c.ng; ic++) {
+            for (memory::dim kh = 0; kh < c.kh; kh++) {
+                for (memory::dim kw = 0; kw < c.kw; kw++) {
+                    memory::dim iw = ow * c.strw - c.padw + kw * (1 + c.dilw);
+                    memory::dim ih = oh * c.strh - c.padh + kh * (1 + c.dilh);
+                    if (iw < 0 || iw >= c.iw) continue;
+                    if (ih < 0 || ih >= c.ih) continue;
+                    memory::dim iidx = n * padded_ic * c.ih * c.iw
+                            + g * padded_ic / c.ng * c.ih * c.iw
+                            + ic * c.ih * c.iw + ih * c.iw + iw;
+                    memory::dim widx = g * padded_oc / c.ng * padded_ic / c.ng
+                                    * c.kh * c.kw
+                            + oc * padded_ic / c.ng * c.kh * c.kw
+                            + ic * c.kh * c.kw + kh * c.kw + kw;
+                    a += ((data_t_acc)src_data[src_mdw.off_l(iidx, true)])
+                            * weights_data[weights_mdw.off_l(widx, true)];
                 }
+            }
+        }
 
-                float a_fp = (float)a;
+        float a_fp = (float)a;
 
-                if (attr.src_scale.is_def()) {
-                    const auto &s = attr.src_scale;
-                    using P = test_convolution_attr_t::scale_t;
-                    if (s.policy == P::policy_t::COMMON) { a_fp *= s.scale; }
-                }
+        if (attr.src_scale.is_def()) {
+            const auto &s = attr.src_scale;
+            using P = test_convolution_attr_t::scale_t;
+            if (s.policy == P::policy_t::COMMON) { a_fp *= s.scale; }
+        }
 
-                if (attr.wei_scale.is_def()) {
-                    const auto &s = attr.wei_scale;
-                    using P = test_convolution_attr_t::scale_t;
-                    if (s.policy == P::policy_t::COMMON) { a_fp *= s.scale; }
-                }
+        if (attr.wei_scale.is_def()) {
+            const auto &s = attr.wei_scale;
+            using P = test_convolution_attr_t::scale_t;
+            if (s.policy == P::policy_t::COMMON) { a_fp *= s.scale; }
+        }
 
-                a_fp += (float)(bias_data ? bias_data[bias_mdw.off_l(
-                                        g * c.oc / c.ng + oc, true)]
-                                          : 0);
+        a_fp += (float)(bias_data
+                        ? bias_data[bias_mdw.off_l(g * c.oc / c.ng + oc, true)]
+                        : 0);
 
-                if (attr.dst_scale.is_def()) {
-                    const auto &s = attr.dst_scale;
-                    using P = test_convolution_attr_t::scale_t;
-                    if (s.policy == P::policy_t::COMMON) { a_fp /= s.scale; }
-                }
+        if (attr.dst_scale.is_def()) {
+            const auto &s = attr.dst_scale;
+            using P = test_convolution_attr_t::scale_t;
+            if (s.policy == P::policy_t::COMMON) { a_fp /= s.scale; }
+        }
 
-                a_fp = out_round<data_t_dst>(a_fp);
+        a_fp = out_round<data_t_dst>(a_fp);
 
-                memory::dim oidx = n * padded_oc * c.oh * c.ow
-                        + g * padded_oc / c.ng * c.oh * c.ow + oc * c.oh * c.ow
-                        + oh * c.ow + ow;
-                dst_data[dst_mdw.off_l(oidx, true)] = (data_t_dst)a_fp;
-            });
+        memory::dim oidx = n * padded_oc * c.oh * c.ow
+                + g * padded_oc / c.ng * c.oh * c.ow + oc * c.oh * c.ow
+                + oh * c.ow + ow;
+        dst_data[dst_mdw.off_l(oidx, true)] = (data_t_dst)a_fp;
+    });
 }
 
 template <typename data_t_src, typename data_t_wei, typename data_t_acc,
@@ -239,9 +235,9 @@ protected:
                 p.formats.src_format);
         auto c_weights_desc = cd.ng > 1
                 ? create_md({cd.ng, cd.oc / cd.ng, cd.ic / cd.ng, cd.kh, cd.kw},
-                        data_type_wei, p.formats.weights_format)
+                          data_type_wei, p.formats.weights_format)
                 : create_md({cd.oc, cd.ic, cd.kh, cd.kw}, data_type_wei,
-                        p.formats.weights_format);
+                          p.formats.weights_format);
         auto c_dst_desc = create_md({cd.mb, cd.oc, cd.oh, cd.ow}, data_type_dst,
                 p.formats.dst_format);
         auto c_bias_desc = with_bias
@@ -302,12 +298,12 @@ protected:
 
         auto conv_primitive_desc = with_bias
                 ? convolution_forward::primitive_desc(eng, aprop_kind,
-                        p.aalgorithm, c_src_desc, c_weights_desc, c_bias_desc,
-                        c_dst_desc, strides, dilations, padL, padR,
-                        attr.dnnl_attr)
+                          p.aalgorithm, c_src_desc, c_weights_desc, c_bias_desc,
+                          c_dst_desc, strides, dilations, padL, padR,
+                          attr.dnnl_attr)
                 : convolution_forward::primitive_desc(eng, aprop_kind,
-                        p.aalgorithm, c_src_desc, c_weights_desc, c_dst_desc,
-                        strides, dilations, padL, padR, attr.dnnl_attr);
+                          p.aalgorithm, c_src_desc, c_weights_desc, c_dst_desc,
+                          strides, dilations, padL, padR, attr.dnnl_attr);
 
         conv_primitive_desc = convolution_forward::primitive_desc(
                 conv_primitive_desc.get()); // test construction from a C pd

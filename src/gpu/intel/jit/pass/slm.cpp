@@ -16,10 +16,10 @@
 
 #include "gpu/intel/jit/pass/slm.hpp"
 
+#include "gemmstone/../../dsl/ir/pass/trace.hpp"
 #include "gpu/intel/jit/ir/reorder.hpp"
 #include "gpu/intel/jit/ir/send.hpp"
 #include "gpu/intel/jit/ir/tensor.hpp"
-#include "gpu/intel/jit/utils/trace.hpp"
 
 namespace dnnl {
 namespace impl {
@@ -68,20 +68,20 @@ private:
 };
 
 stmt_t merge_slm_buffers(const stmt_t &_stmt, ir_context_t &ir_ctx) {
-    trace_start();
+    ir::trace_start();
     stmt_t stmt = _stmt;
     slm_buffer_merger_t merger;
     stmt = merger.mutate(stmt);
     stmt = alloc_t::make(merger.slm_base(), into<uint32_t>(merger.slm_size()),
             alloc_kind_t::slm, stmt);
-    trace_pass("merge_slm_buffers", stmt, ir_ctx);
+    ir::trace_pass("merge_slm_buffers", stmt, ir_ctx);
     return stmt;
 }
 
 class slm_reorder_injector_t : public ir_mutator_t {
 public:
     slm_reorder_injector_t(
-            const stmt_t &root, const hw_t &hw, const grid_info_t &tg_grid)
+            const stmt_t &root, const dsl::hw_t &hw, const grid_info_t &tg_grid)
         : hw_(hw), tg_grid_(tg_grid) {
         alloc_manager_t alloc_mgr(root);
         auto slm_buffers = alloc_mgr.find_buffers(alloc_kind_t::slm);
@@ -218,7 +218,7 @@ private:
         return true;
     }
 
-    hw_t hw_;
+    dsl::hw_t hw_;
     grid_info_t tg_grid_;
 
     expr_t slm_base_;
@@ -227,7 +227,7 @@ private:
 
 stmt_t inject_slm_reorder(const stmt_t &s, ir_context_t &ir_ctx,
         const grid_info_t &tg_grid, bool has_slm_usage) {
-    trace_start();
+    ir::trace_start();
     if (has_slm_usage) return s;
     if (ir_ctx.hw() < ngen::HW::XeHPC) return s;
     slm_reorder_injector_t injector(s, ir_ctx.hw(), tg_grid);
@@ -239,7 +239,7 @@ stmt_t inject_slm_reorder(const stmt_t &s, ir_context_t &ir_ctx,
     alloc_updater.resize(slm_buf, slm_size);
     ret = alloc_updater.update(ret);
 
-    trace_pass("inject_slm_reorder", ret, ir_ctx);
+    ir::trace_pass("inject_slm_reorder", ret, ir_ctx);
     return ret;
 }
 

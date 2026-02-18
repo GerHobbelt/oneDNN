@@ -20,9 +20,9 @@
 #include <vector>
 #include <unordered_set>
 
+#include "gemmstone/dsl/ir.hpp"
 #include "gpu/intel/jit/codegen/register_allocator.hpp"
 #include "gpu/intel/jit/ir/grf_permutation.hpp"
-#include "gpu/intel/jit/ir/include/ir.hpp"
 #include "gpu/intel/jit/utils/utils.hpp"
 #include "ngen.hpp"
 
@@ -142,7 +142,7 @@ public:
 
     reg_buf_data_t(ngen::HW hw, const ngen::Subregister &sub)
         : reg_buf_(std::make_shared<reg_buf_t>(
-                hw, ngen::GRFRange(sub.getBase(), 1)))
+                  hw, ngen::GRFRange(sub.getBase(), 1)))
         , rd_(sub) {}
 
     const reg_buf_t &reg_buf() const { return *reg_buf_; }

@@ -14,8 +14,8 @@
 * limitations under the License.
 *******************************************************************************/
 
-#ifndef GEMMSTONE_GUARD_STRATEGY_HPP
-#define GEMMSTONE_GUARD_STRATEGY_HPP
+#ifndef GEMMSTONE_INCLUDE_GEMMSTONE_STRATEGY_HPP
+#define GEMMSTONE_INCLUDE_GEMMSTONE_STRATEGY_HPP
 
 #include "gemmstone/config.hpp"
 
@@ -46,17 +46,17 @@ enum class AccessType : uint8_t {
 
 static inline bool isBlocklike(AccessType t)
 {
-    return one_of(t, AccessType::Block, AccessType::PseudoBlock);
+    return one_of(t, {AccessType::Block, AccessType::PseudoBlock});
 }
 
 static inline bool isBlock2D(AccessType t)
 {
-    return one_of(t, AccessType::Block2D, AccessType::Block2DTranspose, AccessType::Block2DVNNI);
+    return one_of(t, {AccessType::Block2D, AccessType::Block2DTranspose, AccessType::Block2DVNNI});
 }
 
 static inline bool isTransposing(AccessType t)
 {
-    return one_of(t, AccessType::Scattered, AccessType::ChannelScattered, AccessType::Block2DTranspose);
+    return one_of(t, {AccessType::Scattered, AccessType::ChannelScattered, AccessType::Block2DTranspose});
 }
 
 // Strategies for choosing scattered access SIMD width.

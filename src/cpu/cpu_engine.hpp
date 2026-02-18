@@ -87,7 +87,7 @@ public:
             const op_desc_t *desc) {
         static const impl_list_item_t empty_list[] = {nullptr};
 
-// clang-format off
+        // clang-format off
 #define CASE(kind) \
     case primitive_kind::kind: \
         return get_##kind##_impl_list((const kind##_desc_t *)desc);
@@ -163,7 +163,7 @@ public:
         dnnl::impl::cpu::aarch64::acl_thread_utils::set_acl_threading();
 #endif
         return status::success;
-    };
+    }
 };
 
 engine_t *get_service_engine();

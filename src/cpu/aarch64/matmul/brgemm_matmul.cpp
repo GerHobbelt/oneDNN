@@ -93,6 +93,9 @@ status_t brgemm_matmul_t<isa>::pd_t::init(engine_t *engine) {
     const auto wei_dt = weights_md_.data_type;
     const auto dst_dt = dst_md_.data_type;
 
+    // skip unsupported shapes until issue caused by PR #4100 is sorted
+    if (src_md_.ndims == 4) { return status::unimplemented; }
+
     const bool is_f32 = everyone_is(f32, src_dt, wei_dt, dst_dt);
     const bool is_int8 = one_of(src_dt, u8, s8) && wei_dt == s8
             && one_of(dst_dt, u8, s8, s32, f32, bf16);
@@ -198,9 +201,14 @@ status_t brgemm_matmul_t<isa>::pd_t::init(engine_t *engine) {
                 ? (dim_t)bgmmc_.wei_k_blk
                 : bgmmc_.LDA;
         const auto kernel_isa = i_M == max_m_ker_idx - 1 ? backup_isa : isa;
+        // In the case of BA 1xK gemmv, we set the layout to column major, so there is no
+        // need to transpose the weights.
+        const auto layout = (one_of(bgmmc_.wei_tag, ba) && bgmmc_.M == 1)
+                ? brgemm_col_major
+                : brgemm_row_major;
         CHECK(brgemm_desc_init(&brg, kernel_isa, bgmmc_.brg_type, bgmmc_.src_dt,
-                bgmmc_.wei_dt, false, false, brgemm_row_major, alpha, vbeta,
-                LDA, bgmmc_.LDB, bgmmc_.LDC, vM, vN, vK));
+                bgmmc_.wei_dt, false, false, layout, alpha, vbeta, LDA,
+                bgmmc_.LDB, bgmmc_.LDC, vM, vN, vK));
 
         auto LDD = bgmmc_.LDD;
         CHECK(brgemm_desc_set_postops(
@@ -254,8 +262,9 @@ status_t brgemm_matmul_t<isa>::init(engine_t *engine) {
         CHECK(safe_ptr_assign(brg_kernels_[idx], ker));
     }
 
-    if (bgmmc.use_buffer_b)
+    if (bgmmc.use_buffer_b) {
         CHECK(create_brgemm_matmul_copy_b(copy_B_kernel_, &bgmmc));
+    }
 
     if (bgmmc.use_buffer_a || bgmmc.use_buffer_a_tail_only)
         CHECK(create_brgemm_matmul_copy_a(copy_A_kernel_, &bgmmc));
@@ -746,20 +755,20 @@ struct brgemm_matmul_t<isa>::brg_matmul_exec_ctx_t {
 
         zero_point_a_negative_val_ = src_zero_points
                 ? -cpu::io::load_int_value(
-                        pd->attr()->zero_points_.get_data_type(DNNL_ARG_SRC),
-                        src_zero_points, 0)
+                          pd->attr()->zero_points_.get_data_type(DNNL_ARG_SRC),
+                          src_zero_points, 0)
                 : 0;
         const int zero_point_b_val = wei_zero_points
                 ? cpu::io::load_int_value(
-                        pd->attr()->zero_points_.get_data_type(
-                                DNNL_ARG_WEIGHTS),
-                        wei_zero_points, 0)
+                          pd->attr()->zero_points_.get_data_type(
+                                  DNNL_ARG_WEIGHTS),
+                          wei_zero_points, 0)
                 : 0;
         zero_point_b_negative_val_ = -zero_point_b_val;
         zero_point_c_val_ = dst_zero_points
                 ? cpu::io::load_int_value(
-                        pd->attr()->zero_points_.get_data_type(DNNL_ARG_DST),
-                        dst_zero_points, 0)
+                          pd->attr()->zero_points_.get_data_type(DNNL_ARG_DST),
+                          dst_zero_points, 0)
                 : 0;
 
         const auto &scratchpad = ctx.get_scratchpad_grantor();
@@ -791,22 +800,22 @@ struct brgemm_matmul_t<isa>::brg_matmul_exec_ctx_t {
                 * (weights_d.size() - weights_d.additional_buffer_size());
         s8s8_compensation_ptr_ = (bgmmc.s8s8_compensation_required)
                 ? ((bgmmc.use_buffer_b)
-                                ? scratchpad.template get<int32_t>(
-                                        key_brgemm_primitive_buffer_comp)
-                                : const_cast<int32_t *>(
-                                        reinterpret_cast<const int32_t *>(
-                                                &data_B_ptr_[comp_offset])))
+                                  ? scratchpad.template get<int32_t>(
+                                            key_brgemm_primitive_buffer_comp)
+                                  : const_cast<int32_t *>(
+                                            reinterpret_cast<const int32_t *>(
+                                                    &data_B_ptr_[comp_offset])))
                 : nullptr;
         assert(IMPLICATION(bgmmc.s8s8_compensation_required,
                 bgmmc_.b_dt_sz == bgmmc_.tr_b_dt_sz));
 
         zero_point_a_compensations_ptr_ = bgmmc.has_zero_point_a
                 ? scratchpad.template get<int32_t>(
-                        key_brgemm_primitive_zp_comp_a)
+                          key_brgemm_primitive_zp_comp_a)
                 : nullptr;
         zero_point_b_compensations_ptr_ = bgmmc.has_zero_point_b
                 ? scratchpad.template get<int32_t>(
-                        key_brgemm_primitive_zp_comp_b)
+                          key_brgemm_primitive_zp_comp_b)
                 : nullptr;
 
         zero_point_mixed_ab_compensation_component_

@@ -22,8 +22,8 @@
 
 #include "gpu/intel/jit/ir/eltwise.hpp"
 #include "gpu/intel/jit/ir/gemm_schedule.hpp"
-#include "gpu/intel/jit/ir/ir.hpp"
 #include "gpu/intel/jit/ir/kernel_info.hpp"
+#include "gpu/intel/jit/ir/legacy.hpp"
 #include "gpu/intel/jit/ir/tensor.hpp"
 
 namespace dnnl {
@@ -55,7 +55,7 @@ public:
 
     zero_points_config_t(const primitive_desc_t *pd = nullptr)
         : do_src_compensation(pd
-                && !pd->attr()->zero_points_.has_default_values(DNNL_ARG_SRC))
+                  && !pd->attr()->zero_points_.has_default_values(DNNL_ARG_SRC))
         , do_wei_compensation(pd
                   && !pd->attr()->zero_points_.has_default_values(
                           DNNL_ARG_WEIGHTS))
@@ -234,7 +234,7 @@ public:
     post_op_view_mapper_t(const view_t &cp_view) : cp_view_(cp_view) {}
     virtual ~post_op_view_mapper_t() = default;
 
-    const view_t &cp_view() const { return cp_view_; };
+    const view_t &cp_view() const { return cp_view_; }
 
     virtual view_t create_view(
             const dsl::type_t &type, uint32_t rhs_mask) const {
@@ -262,7 +262,7 @@ public:
 
     virtual view_t try_create_bias_view(uint32_t mask) const { return {}; }
 
-    virtual bool is_spurious_spatial(const pvar_t &dim) const { return false; };
+    virtual bool is_spurious_spatial(const pvar_t &dim) const { return false; }
     virtual bool need_to_restore_zero_padding() const { return false; }
     virtual bool use_dst_in_sum_post_op() const { return true; }
     virtual bool can_use_scales() const { return true; }

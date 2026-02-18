@@ -1709,7 +1709,7 @@ status_t conv_bwd_data_canonicalization(std::shared_ptr<subgraph_t> &sg) {
                 : false;
         bool need_permute_1 = cur_op->has_attr(op_attr::weights_format)
                 ? (cur_op->get_attr<std::string>(op_attr::weights_format)
-                        == "XIO")
+                          == "XIO")
                 : false;
 
         if (need_permute_0) {
@@ -1790,7 +1790,7 @@ status_t conv_bwd_weights_canonicalization(std::shared_ptr<subgraph_t> &sg) {
                 : false;
         bool need_permute_1 = cur_op->has_attr(op_attr::weights_format)
                 ? (cur_op->get_attr<std::string>(op_attr::weights_format)
-                        != "OIX")
+                          != "OIX")
                 : false;
 
         if (need_permute_0) {
@@ -2617,7 +2617,7 @@ status_t fuse_adjacent_reorders(std::shared_ptr<subgraph_t> &sg) {
             // md. If they are not equal, the origin md may has extra flags.
             auto fused_out_lt = next_op.get_output_logical_tensor(0);
             auto fused_out_md = make_dnnl_memory_desc(fused_out_lt);
-            auto format_tag = get_format_tag_str(fused_out_md);
+            auto format_tag = md2fmt_tag_str(fused_out_md.get());
             const auto &dims = fused_out_md.get_dims();
             const auto &dtype = fused_out_md.get_data_type();
             dnnl_memory_desc_t temp_md;
@@ -2653,10 +2653,10 @@ status_t fuse_adjacent_reorders(std::shared_ptr<subgraph_t> &sg) {
             auto op2 = fuse_group.second;
 
             // get the src_zps, dst_zps and scales.
-            auto get_scales_zps = [](const op_t *op, std::vector<float> &scales,
-                                          std::vector<int64_t> &src_zps,
-                                          std::vector<int64_t> &dst_zps,
-                                          size_t &num) {
+            auto get_scales_zps
+                    = [](const op_t *op, std::vector<float> &scales,
+                              std::vector<int64_t> &src_zps,
+                              std::vector<int64_t> &dst_zps, size_t &num) {
                 scales = op->has_attr(op_attr::scales)
                         ? op->get_attr<std::vector<float>>(op_attr::scales)
                         : std::vector<float> {1.0};

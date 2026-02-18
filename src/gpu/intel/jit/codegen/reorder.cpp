@@ -18,6 +18,12 @@
 
 #include "gpu/intel/logging.hpp"
 
+namespace gemmstone {
+namespace dsl {
+extern bool is_subset(const dsl::type_t &a, const dsl::type_t &b);
+}
+} // namespace gemmstone
+
 namespace dnnl {
 namespace impl {
 namespace gpu {
@@ -255,8 +261,8 @@ void reorder_2d_impl_t::tile_to_2d_dims(
 }
 
 auto reorder_2d_impl_t::find_min_cost_path(ngen::HW hw, const layout_t &src,
-        const layout_t &dst, dim_t tile_a, dim_t tile_b)
-        -> std::vector<reorder_step_t> {
+        const layout_t &dst, dim_t tile_a,
+        dim_t tile_b) -> std::vector<reorder_step_t> {
     // Create all possible edges - 2D reorders.
     std::vector<edge_t> edges;
     for (int a = 1; a <= tile_a; a *= 2) {
@@ -522,7 +528,7 @@ void reorder_impl_t::emit(copy_plan_t &plan, const reorder_operand_t &src,
     auto emit = [&](reorder_operand_t &dst, const reorder_operand_t &src) {
         if (src == dst) return;
         if (!try_emit_2d(plan, dst, src)) emit_1d(plan, dst, src);
-        if (dsl::is_subset(src.type(), dst.type()))
+        if (gemmstone::dsl::is_subset(src.type(), dst.type()))
             dst.buffer.range = src.buffer.type;
     };
 

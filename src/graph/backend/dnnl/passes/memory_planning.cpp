@@ -114,7 +114,7 @@ std::vector<op_inplace_pair_t> get_op_inplace_pairs(op_t &op) {
             if (op.get_kind() == op_kind::dnnl_convolution
                     && post_sum_input_lt.data_type == data_type::s8
                     && output_lt.data_type == data_type::u8) {
-                auto format_tag = get_format_tag_str(post_sum_input_desc);
+                auto format_tag = md2fmt_tag_str(post_sum_input_desc.get());
                 const auto &dims = post_sum_input_desc.get_dims();
                 dnnl_memory_desc_t temp_md;
                 dnnl_memory_desc_create_with_string_tag(&temp_md,
@@ -191,8 +191,8 @@ std::shared_ptr<execution_args_set_t> execution_args_set_t::clone() const {
     auto find_val = [&](const memory &mem) -> value_t * {
         auto pos = std::find_if(value_mem_map_.begin(), value_mem_map_.end(),
                 [&](const std::pair<value_t *, memory> &val_mem) {
-                    return val_mem.second.get() == mem.get();
-                });
+            return val_mem.second.get() == mem.get();
+        });
         assertm(pos != value_mem_map_.end(), "can't find such mem");
         if (pos != value_mem_map_.end())
             return pos->first;

@@ -135,12 +135,10 @@
         void Test_failures(); \
     }; \
     TEST(test_fixture, test_name) { \
-        catch_expected_failures( \
-                [=]() { \
-                    DERIVED_TEST_CLASS(test_fixture, test_name) \
-                    ().Test_failures(); \
-                }, \
-                false, dnnl_success, false); \
+        catch_expected_failures([=]() { \
+            DERIVED_TEST_CLASS(test_fixture, test_name) \
+            ().Test_failures(); \
+        }, false, dnnl_success, false); \
     } \
     void DERIVED_TEST_CLASS(test_fixture, test_name)::Test_failures()
 
@@ -151,16 +149,16 @@
         void TestBody() override {} \
 \
     public: \
-        DERIVED_TEST_CLASS(test_fixture, test_name)() { SetUp(); } \
+        DERIVED_TEST_CLASS(test_fixture, test_name)() { \
+            SetUp(); \
+        } \
         void Test_failures(); \
     }; \
     TEST_F(test_fixture, test_name) { \
-        catch_expected_failures( \
-                [=]() { \
-                    DERIVED_TEST_CLASS(test_fixture, test_name) \
-                    ().Test_failures(); \
-                }, \
-                false, dnnl_success, false); \
+        catch_expected_failures([=]() { \
+            DERIVED_TEST_CLASS(test_fixture, test_name) \
+            ().Test_failures(); \
+        }, false, dnnl_success, false); \
     } \
     void DERIVED_TEST_CLASS(test_fixture, test_name)::Test_failures()
 
@@ -171,16 +169,16 @@
         void TestBody() override {} \
 \
     public: \
-        DERIVED_TEST_CLASS(test_fixture, test_name)() { SetUp(); } \
+        DERIVED_TEST_CLASS(test_fixture, test_name)() { \
+            SetUp(); \
+        } \
         void Test_failures(); \
     }; \
     TEST_P(test_fixture, test_name) { \
-        catch_expected_failures( \
-                [=]() { \
-                    DERIVED_TEST_CLASS(test_fixture, test_name) \
-                    ().Test_failures(); \
-                }, \
-                false, dnnl_success); \
+        catch_expected_failures([=]() { \
+            DERIVED_TEST_CLASS(test_fixture, test_name) \
+            ().Test_failures(); \
+        }, false, dnnl_success); \
     } \
     void DERIVED_TEST_CLASS(test_fixture, test_name)::Test_failures()
 

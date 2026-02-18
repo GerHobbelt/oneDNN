@@ -30,7 +30,7 @@
 #include "gpu/intel/jit/codegen/register_scope.hpp"
 #include "gpu/intel/jit/codegen/reorder.hpp"
 #include "gpu/intel/jit/ir/builder.hpp"
-#include "gpu/intel/jit/ir/ir.hpp"
+#include "gpu/intel/jit/ir/legacy.hpp"
 #include "gpu/intel/jit/ir/walk_order.hpp"
 #include "gpu/intel/logging.hpp"
 #include "ngen.hpp"
@@ -149,8 +149,8 @@ class ir_to_ngen_generator_t : public BaseGeneratorT {
 public:
     NGEN_FORWARD_SCOPE(BaseGeneratorT)
 
-    ir_to_ngen_generator_t(const kernel::iface_t &kernel_iface,
-            const kernel::options_t &options,
+    ir_to_ngen_generator_t(const dsl::kernel::iface_t &kernel_iface,
+            const dsl::kernel::options_t &options,
             const ngen::DebugConfig &debug_config)
         : BaseGeneratorT(options.hw().product(), debug_config)
         , kernel_iface_(kernel_iface)
@@ -163,17 +163,17 @@ public:
 
     void force_emulate64() { emu_strategy_.emulate64 = true; }
 
-    reg_allocator_t &ra() { return ra_; };
-    const reg_allocator_t &ra() const { return ra_; };
+    reg_allocator_t &ra() { return ra_; }
+    const reg_allocator_t &ra() const { return ra_; }
 
-    expr_binding_t &expr_binding() { return expr_binding_; };
-    const expr_binding_t &expr_binding() const { return expr_binding_; };
+    expr_binding_t &expr_binding() { return expr_binding_; }
+    const expr_binding_t &expr_binding() const { return expr_binding_; }
 
     ngen::Subregister grid_ids[3] = {r0.ud(1), r0.ud(6), r0.ud(7)};
 
-    const kernel::iface_t &kernel_iface() const { return kernel_iface_; }
-    const kernel::options_t &options() const { return options_; }
-    const hw_t &hw_info() const { return options_.hw(); }
+    const dsl::kernel::iface_t &kernel_iface() const { return kernel_iface_; }
+    const dsl::kernel::options_t &options() const { return options_; }
+    const dsl::hw_t &hw_info() const { return options_.hw(); }
 
     void generate_prologue() {
         BaseGeneratorT::setDefaultNoMask();
@@ -1131,8 +1131,8 @@ protected:
                 : retn;
     }
 
-    kernel::iface_t kernel_iface_;
-    kernel::options_t options_;
+    dsl::kernel::iface_t kernel_iface_;
+    dsl::kernel::options_t options_;
     reg_allocator_t ra_;
     expr_binding_t expr_binding_;
     ngen::GRF signal_header_;

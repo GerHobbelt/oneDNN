@@ -340,7 +340,8 @@ public:
         descs_.push_back(desc);
     }
 
-    bench_input_params_t bench_input_params(int nprbs, const hw_t &hw) const {
+    bench_input_params_t bench_input_params(
+            int nprbs, const dsl::hw_t &hw) const {
         if (descs_.empty()) return bench_input_params_t();
         auto &kd = descs_.front();
         bench_input_params_t params;
@@ -529,8 +530,8 @@ public:
         }
         std::sort(entry_it_, entries_.end(),
                 [&](const entry_t &a, const entry_t &b) {
-                    return min_dists[a.id] < min_dists[b.id];
-                });
+            return min_dists[a.id] < min_dists[b.id];
+        });
     }
 
 private:

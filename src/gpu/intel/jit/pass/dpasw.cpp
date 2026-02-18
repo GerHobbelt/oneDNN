@@ -16,11 +16,12 @@
 
 #include "gpu/intel/jit/pass/dpasw.hpp"
 
+#include "gemmstone/../../dsl/ir/pass/simplify.hpp"
+#include "gemmstone/../../dsl/ir/pass/trace.hpp"
 #include "gpu/intel/jit/ir/fma.hpp"
 #include "gpu/intel/jit/ir/grf_permutation.hpp"
 #include "gpu/intel/jit/ir/send.hpp"
-#include "gpu/intel/jit/pass/simplify.hpp"
-#include "gpu/intel/jit/utils/trace.hpp"
+#include "gpu/intel/logging.hpp"
 
 namespace dnnl {
 namespace impl {
@@ -30,7 +31,7 @@ namespace jit {
 
 class dpasw_injector_t {
 public:
-    dpasw_injector_t(const hw_t &hw, const stmt_t &load_mul_stmt,
+    dpasw_injector_t(const dsl::hw_t &hw, const stmt_t &load_mul_stmt,
             const expr_t &c_buf, const stmt_t &c_store_stmt,
             alloc_updater_t &alloc_updater, const expr_t &tg_idx0)
         : hw_(hw)
@@ -458,7 +459,7 @@ private:
         return true;
     }
 
-    hw_t hw_;
+    dsl::hw_t hw_;
     stmt_t load_mul_stmt_;
     expr_t c_buf_;
     stmt_t c_store_stmt_;
@@ -469,9 +470,9 @@ private:
     std::vector<send_info_t> send_infos_;
 };
 
-void inject_dpasw(const hw_t &hw, stmt_t &load_mul_stmt, const expr_t &c_buf,
-        stmt_t &c_store_stmt, alloc_updater_t &alloc_updater,
-        const expr_t &tg_idx0) {
+void inject_dpasw(const dsl::hw_t &hw, stmt_t &load_mul_stmt,
+        const expr_t &c_buf, stmt_t &c_store_stmt,
+        alloc_updater_t &alloc_updater, const expr_t &tg_idx0) {
     dpasw_injector_t injector(
             hw, load_mul_stmt, c_buf, c_store_stmt, alloc_updater, tg_idx0);
 

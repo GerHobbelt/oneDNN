@@ -251,9 +251,9 @@ void brdgmm_dw_convolution_fwd_t<isa>::pd_t::init_batch_elements() {
 
     auto &jcp = jcp_;
 
-    auto gen_batch_elements = [&jcp](int fpad, int backpad, int tpad, int bpad,
-                                      int lpad, int rpad, int &bs,
-                                      brgemm_batch_element_t *batches) {
+    auto gen_batch_elements
+            = [&jcp](int fpad, int backpad, int tpad, int bpad, int lpad,
+                      int rpad, int &bs, brgemm_batch_element_t *batches) {
         const size_t src_w_stride = jcp.ngroups * jcp.src_dsz;
         const size_t src_h_stride = jcp.ngroups * jcp.iw * jcp.src_dsz;
         const size_t src_d_stride = jcp.ngroups * jcp.ih * jcp.iw * jcp.src_dsz;
@@ -333,14 +333,14 @@ void brdgmm_dw_convolution_fwd_t<isa>::pd_t::init_batch_elements() {
         const int oh = ohb < h_blk_info.n_lpad_blks
                 ? ohb
                 : (h_blk_info.rpad_blk_start_idx
-                        + (ohb - h_blk_info.n_lpad_blks));
+                          + (ohb - h_blk_info.n_lpad_blks));
         const int bpad = oh * h_shift + jcp.kh - (jcp.ih + jcp.t_pad);
 
         const int fpad = jcp.f_pad - odb * d_shift;
         const int od = odb < d_blk_info.n_lpad_blks
                 ? odb
                 : (d_blk_info.rpad_blk_start_idx
-                        + (odb - d_blk_info.n_lpad_blks));
+                          + (odb - d_blk_info.n_lpad_blks));
         const int backpad = od * d_shift + jcp.kd - (jcp.id + jcp.f_pad);
 
         gen_batch_elements(fpad, backpad, tpad, bpad, lpad, rpad, bs_[bi],
@@ -418,9 +418,7 @@ status_t brdgmm_dw_convolution_fwd_t<isa>::pd_t::init_brdgmm_conf() {
 
                 if (ow_tail_block && (jcp.ow % ow_tail_block == 0))
                     jcp.ow_block = ow_tail_block;
-                else {
-                    jcp.ow_block = jcp.ow;
-                }
+                else { jcp.ow_block = jcp.ow; }
             } else {
                 const int max_ow_block = is_superset(jcp.isa, sve_512)
                         ? 6
