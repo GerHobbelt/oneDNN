@@ -39,7 +39,8 @@ status_t gen_t::launch_nocopy(const exec_ctx_t &ctx,
         intel::stream_t *compute_stream, zero_pool_t *zero_pool,
         const memory_storage_t &a, const memory_storage_t &b,
         const memory_storage_t &c, const memory_storage_t *ao,
-        const memory_storage_t *bo, const memory_storage_t *a_scales,
+        const memory_storage_t *bo, int16_t ao_hostscalar,
+        int16_t bo_hostscalar, const memory_storage_t *a_scales,
         const memory_storage_t *b_scales, const memory_storage_t *c_scales,
         const memory_storage_t *ag, const memory_storage_t *bg,
         const memory_storage_t &co, const memory_storage_t *c_temp,
@@ -82,8 +83,12 @@ status_t gen_t::launch_nocopy(const exec_ctx_t &ctx,
     set_scalar_arg_cvt(arg_list, argn++, alpha, scalar_type_);
     set_scalar_arg_cvt(arg_list, argn++, beta, scalar_type_);
 
-    if (pd()->with_a_zero_points()) arg_list.set(argn++, *ao);
-    if (pd()->with_b_zero_points()) arg_list.set(argn++, *bo);
+    if (pd()->with_a_zero_points() && !problem->aOffsetHostScalar())
+        arg_list.set(argn++, *ao);
+    if (pd()->with_b_zero_points() && !problem->bOffsetHostScalar())
+        arg_list.set(argn++, *bo);
+    if (problem->aOffsetHostScalar()) arg_list.set(argn++, ao_hostscalar);
+    if (problem->bOffsetHostScalar()) arg_list.set(argn++, bo_hostscalar);
     if (problem->aScale2D()) arg_list.set(argn++, *a_scales);
     if (problem->bScale2D()) arg_list.set(argn++, *b_scales);
     if (problem->needsAGroupSums()) arg_list.set(argn++, *ag);
@@ -365,6 +370,8 @@ status_t gen_t::execute(const exec_ctx_t &ctx) const {
     const memory_storage_t *a_scales = nullptr, *b_scales = nullptr;
     const memory_storage_t *c_scales = nullptr;
     const memory_storage_t *ag = nullptr, *bg = nullptr;
+    int16_t ao_hostscalar = 0;
+    int16_t bo_hostscalar = 0;
 
     std::unique_ptr<memory_storage_t> c_temp;
     if (nocopy_info()->needsTempC()) {
@@ -448,9 +455,18 @@ status_t gen_t::execute(const exec_ctx_t &ctx) const {
         cmask = pd()->sum_ab_cmask();
     }
 
+    // Get host scalar zero-poins values
     if (pd()->with_a_zero_points() || pd()->with_b_zero_points()) {
         ao = &GEMM_CTX_ARG_STORAGE(a_zero_point);
         bo = &GEMM_CTX_ARG_STORAGE(b_zero_point);
+        int a_hostscalar_val = 0;
+        int b_hostscalar_val = 0;
+        if (ao->is_host_scalar())
+            CHECK(maybe_get_host_scalar_value(*ao, a_hostscalar_val));
+        if (bo->is_host_scalar())
+            CHECK(maybe_get_host_scalar_value(*bo, b_hostscalar_val));
+        ao_hostscalar = static_cast<int16_t>(-1 * a_hostscalar_val);
+        bo_hostscalar = static_cast<int16_t>(-1 * b_hostscalar_val);
     }
 
     // Convert host scalar scales to Alpha
@@ -527,10 +543,11 @@ status_t gen_t::execute(const exec_ctx_t &ctx) const {
         if (k_parallel_global && !nocopy_info()->fusedBeta() && beta != 1.0f
                 && (k > k0 * pd()->kernel_desc()->aux_params()->wgK)) {
             status = launch_nocopy(ctx, compute_stream, zero_pool, a, b, c, ao,
-                    bo, a_scales, b_scales, c_scales, ag, bg, *co, nullptr,
-                    sround_seed, po_count, po_srcs, off_a0, off_b0, off_c0,
-                    off_aq0, off_bq0, off_co0, po_offsets0, lda, ldb, ldc, m, n,
-                    0, 1, 1.0f, beta, 0, false, swapab, true);
+                    bo, ao_hostscalar, bo_hostscalar, a_scales, b_scales,
+                    c_scales, ag, bg, *co, nullptr, sround_seed, po_count,
+                    po_srcs, off_a0, off_b0, off_c0, off_aq0, off_bq0, off_co0,
+                    po_offsets0, lda, ldb, ldc, m, n, 0, 1, 1.0f, beta, 0,
+                    false, swapab, true);
             if (status) return status;
             beta = 1.0f;
         }
@@ -590,12 +607,13 @@ status_t gen_t::execute(const exec_ctx_t &ctx) const {
 
                 float eff_beta = (Bk == 0) ? beta : 1.0f;
                 status = launch_nocopy(ctx, compute_stream, zero_pool, a, b, c,
-                        ao, bo, a_scales, b_scales, c_scales, ag, bg, *co,
-                        c_temp.get(), sround_seed, po_count, po_srcs, off_a_src,
-                        off_b_src, off_c, off_aq, off_bq, off_co, po_offsets,
-                        lda, ldb, ldc, into<int32_t>(size_m),
-                        into<int32_t>(size_n), into<int32_t>(size_k), k0, alpha,
-                        eff_beta, cmask, last_k_block, swapab, disable_hilbert);
+                        ao, bo, ao_hostscalar, bo_hostscalar, a_scales,
+                        b_scales, c_scales, ag, bg, *co, c_temp.get(),
+                        sround_seed, po_count, po_srcs, off_a_src, off_b_src,
+                        off_c, off_aq, off_bq, off_co, po_offsets, lda, ldb,
+                        ldc, into<int32_t>(size_m), into<int32_t>(size_n),
+                        into<int32_t>(size_k), k0, alpha, eff_beta, cmask,
+                        last_k_block, swapab, disable_hilbert);
 
                 if (status) return status;
             }

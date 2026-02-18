@@ -305,6 +305,11 @@ int test_persistent_cache_api(
                                     != std::string::npos))
                 return OK;
 
+            // If the operation is trivial, there may be no kernel in the cache.
+            const auto dst_md = query_md(pd, DNNL_ARG_DST);
+            for (int i = 0; i < dst_md->ndims; ++i)
+                if (dst_md->padded_dims[i] == 0) return OK;
+
             BENCHDNN_PRINT(
                     0, "error: %s\n", "cache blob is not expected to be empty");
             res->state = FAILED;
@@ -1860,6 +1865,18 @@ void erase_unused_args(
     }
 }
 
+// Appends data kinds to check during comparison into `check_kinds` vector
+// coming from extensions through `attr`.
+void get_kinds_to_check_shared(
+        std::vector<data_kind_t> &check_kinds, const attr_t &attr) {
+    if (!attr.dropout.is_def() && attr.dropout.has_output_mask())
+        check_kinds.push_back(DROPOUT_MASK);
+
+    if (!attr.scales.get(DNNL_ARG_DST).is_def()
+            && attr.scales.get(DNNL_ARG_DST).is_dynamic())
+        check_kinds.push_back(DST_SCALES);
+}
+
 // This function handles cases when optimized CPU primitive is used as a
 // reference for a problem. Optimized primitive means custom memory formats
 // which require reorder to them. Since `ref_mem_map` is passed to optimized
@@ -1967,6 +1984,7 @@ int init_ref_memory_args_default_case(int exec_arg, dnn_mem_t &mem,
     const bool is_zero_point_arg = (exec_arg & DNNL_ARG_ATTR_ZERO_POINTS);
     const bool is_dropout_p = (exec_arg == DNNL_ARG_ATTR_DROPOUT_PROBABILITY);
     const bool is_dropout_seed = (exec_arg == DNNL_ARG_ATTR_DROPOUT_SEED);
+    const bool is_dropout_offset = (exec_arg == DNNL_ARG_ATTR_DROPOUT_OFFSET);
     const bool is_rounding_seed = (exec_arg == DNNL_ARG_ATTR_ROUNDING_SEED);
 
     if (is_post_ops_arg) {
@@ -2023,11 +2041,18 @@ int init_ref_memory_args_default_case(int exec_arg, dnn_mem_t &mem,
         int local_exec_arg = exec_arg ^ DNNL_ARG_ATTR_ZERO_POINTS;
         TIME_FILL(SAFE(
                 fill_zero_points(attr, local_exec_arg, mem, ref_mem), WARN));
-    } else if (is_dropout_p) {
+    } else if (is_dropout_p && !attr.dropout.use_host_scalars) {
         ref_mem.set_f32_elem(0, attr.dropout.p);
         TIME_FILL(SAFE(mem.reorder(ref_mem), WARN));
-    } else if (is_dropout_seed) {
-        ref_mem.set_elem(0, attr.dropout.seed);
+    } else if (is_dropout_seed && !attr.dropout.use_host_scalars) {
+        ref_mem = dnn_mem_t(mem.md_, dnnl_s64, tag::abx, get_cpu_engine(),
+                /* prefill = */ false);
+        ref_mem.set_s64_elem(0, attr.dropout.seed);
+        TIME_FILL(SAFE(mem.reorder(ref_mem), WARN));
+    } else if (is_dropout_offset && !attr.dropout.use_host_scalars) {
+        ref_mem = dnn_mem_t(mem.md_, dnnl_s64, tag::abx, get_cpu_engine(),
+                /* prefill = */ false);
+        ref_mem.set_s64_elem(0, attr.dropout.offset);
         TIME_FILL(SAFE(mem.reorder(ref_mem), WARN));
     } else if (is_rounding_seed) {
         ref_mem.set_elem(0, attr.rounding_mode.seed);
