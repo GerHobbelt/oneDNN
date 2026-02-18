@@ -185,6 +185,12 @@ status_t gen_t::launch_nocopy(const exec_ctx_t &ctx,
             if (problem->hasBOffset()) {
                 arg_list.set(argn++, pd()->eff_zp_stride(i, DNNL_ARG_B));
             }
+            if (problem->needsAGroupSums()) {
+                arg_list.set(argn++, pd()->eff_gs_stride(i, DNNL_ARG_A));
+            }
+            if (problem->needsBGroupSums()) {
+                arg_list.set(argn++, pd()->eff_gs_stride(i, DNNL_ARG_B));
+            }
         }
         for (int i = 0; i < po_count; i++) {
             if (problem->postOps.binaryBatch[i]) {
@@ -446,6 +452,7 @@ status_t gen_t::execute(const exec_ctx_t &ctx) const {
         // Limited support of host scalar dst scales
         if (c_scales.is_host_scalar() && pd()->attr()->post_ops_.len() == 0) {
             CHECK(maybe_get_scale_as_float(c_scales_storage, scale_val));
+            gpu_assert(scale_val != 0);
             alpha /= scale_val;
         }
     }

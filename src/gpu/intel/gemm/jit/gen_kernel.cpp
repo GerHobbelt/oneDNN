@@ -1057,6 +1057,14 @@ void gen_kernel_t::init_interface() {
                 interface_.newArgument(
                         "offset_stride_B" + std::to_string(i), DataType::d);
             }
+            if (problem.needsAGroupSums()) {
+                interface_.newArgument(
+                        "group_sums_stride_A" + std::to_string(i), DataType::d);
+            }
+            if (problem.needsBGroupSums()) {
+                interface_.newArgument(
+                        "group_sums_stride_B" + std::to_string(i), DataType::d);
+            }
         }
         for (size_t i = 0; i < problem.postOps.len(); i++) {
             if (problem.postOps[i].is_binary()
@@ -1131,7 +1139,7 @@ dsl::kernel_t get_dsl_kernel(const GEMMProblem &problem,
         if (k != -1)
             cset.add_constraint(gemm_desc.kernel_iface().find_arg("k") == k);
     }
-    return make_kernel(gemm_desc, cset);
+    return make_kernel(gemm_desc, std::move(cset));
 };
 
 status_t gen_kernel_t::get_kernel(
