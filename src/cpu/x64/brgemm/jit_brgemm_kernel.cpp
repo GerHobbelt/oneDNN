@@ -25,6 +25,7 @@
 #include "cpu/x64/brgemm/brgemm.hpp"
 #include "cpu/x64/brgemm/brgemm_types.hpp"
 #include "cpu/x64/cpu_barrier.hpp"
+#include "cpu/x64/cpu_isa_traits.hpp"
 #include "cpu/x64/injectors/jit_uni_postops_injector.hpp"
 #include "cpu/x64/jit_avx512_core_bf16cvt.hpp"
 #include "cpu/x64/jit_avx512_core_fp8cvt.hpp"
@@ -1739,7 +1740,7 @@ void jit_brgemm_kernel_t<Wmm>::store_accumulators(dim_t bd_block2,
             if (brg.brgattr.max_bs > 1) reg_aux_D.restore();
 
             reg64_savable_guard_t reg_aux_D_bdb_loop_backup_guard(
-                    {{{&reg_C_backup}, !apply_post_ops},
+                    {{{&reg_C_backup}, true},
                             {{&reg_aux_D_bdb_loop_backup}, apply_post_ops}});
 
             const bool do_accum_ops = need_to_apply_alpha_beta
@@ -1806,9 +1807,11 @@ void jit_brgemm_kernel_t<Wmm>::store_accumulators(dim_t bd_block2,
                         } else {
                             store_accumulators_without_post_ops(
                                     adj_bd_block, 1, is_ld_tail);
-                            if (ldb < ld_block2 - 1)
-                                add(reg_aux_C, ldb_C_offset(1));
                         }
+
+                        if (ldb < ld_block2 - 1)
+                            add(reg_aux_C, ldb_C_offset(1));
+
                         reg_buf.restore();
                     } else {
                         auto tmm = Tmm(c_tensor);
@@ -2114,6 +2117,8 @@ bool jit_brgemm_kernel_t<Wmm>::maybe_pre_process_k_tail(bool last_bdb,
             + brg.get_convert_wsp_buffer_size();
 
     //TODO: reuse transformed data from matrix A for ldi > 0
+    const int max_tiles = amx::get_max_palette_size();
+    JIT_ASSERT_RET(t1.getIdx() >= 0 && t1.getIdx() < max_tiles, false);
     const dim_t num_rows = palette_.rows[t1.getIdx()];
     const dim_t num_col_bytes = palette_.cols[t1.getIdx()];
 

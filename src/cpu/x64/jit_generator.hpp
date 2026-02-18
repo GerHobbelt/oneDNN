@@ -54,6 +54,11 @@
         assert(condition); \
         if (!(condition)) XBYAK_THROW(Xbyak::ERR_INTERNAL); \
     } while (false)
+#define JIT_ASSERT_RET(condition, ret) \
+    do { \
+        assert(condition); \
+        if (!(condition)) XBYAK_THROW_RET(Xbyak::ERR_INTERNAL, ret); \
+    } while (false)
 
 namespace dnnl {
 namespace impl {
@@ -508,13 +513,13 @@ public:
             movups(addr, x);
     }
 
-    void uni_vmovdqu16(const Xbyak::Xmm &x, const Xbyak::Address &addr) {
+    void uni_vmovdqu16(const Xbyak::Xmm &x, const Xbyak::Operand &op) {
         if (is_valid_isa(avx512_core))
-            vmovdqu16(x, addr);
+            vmovdqu16(x, op);
         else if (is_valid_isa(avx))
-            vmovups(x, addr);
+            vmovups(x, op);
         else
-            movups(x, addr);
+            movups(x, op);
     }
 
     void uni_vmovups(const Xbyak::Address &addr, const Xbyak::Xmm &x) {
