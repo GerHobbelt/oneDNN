@@ -437,7 +437,8 @@ bool pd_t::scales_ok() {
             // Dynamic Dst Quant only supported with `1x32` groups.
             if (s == DNNL_ARG_C && with_mx_scale()
                     && (x_scales.get_group(0) != 1
-                            || x_scales.get_group(1) != 32))
+                            || x_scales.get_group(1) != 32
+                            || arch_ < compute::gpu_arch_t::xe_hpc))
                 return false;
         }
     }
@@ -693,7 +694,11 @@ status_t pd_t::init_GEMMProblem(
             gpu_post_ops, post_ops_, dst_md(), get_post_op_specializations()));
 
     CHECK(transfer_post_ops(problem, std::move(gpu_post_ops)));
-    if (swap_ab()) problem.postOps.transpose();
+    if (swap_ab()) {
+        problem.postOps.transpose();
+        for (auto &b : problem.binary)
+            b.transpose();
+    }
 
     auto reduce_ab = sum_ab();
     if (c_offset || bias || reduce_ab != sum_ab::sum_none) {

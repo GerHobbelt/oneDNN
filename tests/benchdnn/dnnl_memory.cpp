@@ -162,12 +162,23 @@ int execute_reorder(const dnn_mem_t &src, dnn_mem_t &dst,
         auto status = dnnl_reorder_primitive_desc_create(
                 &r_pd_, src.md_, src.engine(), dst.md_, dst.engine(), attr);
         if (status == dnnl_success) break;
-        if (dnnl_memory_desc_equal(src.md_, dst.md_)) {
-            // If fail to create reorder pd, use plain data copy for identical
-            // mds.
-            //
-            // For unknown reason using memcpy with int4 data types leads to
-            // the double corruption error. Stick for per element copy for now.
+        // If fail to create reorder pd, use plain data copy for identical
+        // mds.
+        //
+        // Notes:
+        // - For unknown reason using memcpy with int4 data types leads to
+        //   the double corruption error. Stick for per element copy for now.
+        // - For grouped to plain and plain to grouped,
+        //   values reside in buffer 0 only.
+        const bool can_plain_copy = dnnl_memory_desc_equal(src.md_, dst.md_)
+#if DNNL_EXPERIMENTAL_GROUPED_MEMORY
+                || (query_md_sparse_encoding(src.md_) == dnnl_grouped
+                        && query_md_num_handles(dst.md_) == 1)
+                || (query_md_sparse_encoding(dst.md_) == dnnl_grouped
+                        && query_md_num_handles(src.md_) == 1)
+#endif
+                ;
+        if (can_plain_copy) {
             BENCHDNN_PRINT(2, "%s\n", "[REORDER] Fallback to plain copy.");
             const int64_t chunk_size = 64;
             const int64_t n_chunks = div_up(src.nelems(), chunk_size);
@@ -753,6 +764,18 @@ benchdnn_dnnl_wrapper_t<dnnl_memory_desc_t> dnn_mem_t::init_host_scalar_md(
     DNN_SAFE_V(dnnl_memory_desc_create_host_scalar(&md, data_type));
     return md;
 }
+
+#if DNNL_EXPERIMENTAL_GROUPED_MEMORY
+benchdnn_dnnl_wrapper_t<dnnl_memory_desc_t> dnn_mem_t::init_grouped_md(
+        int ndims, const dnnl_dims_t dims, dnnl_data_type_t data_type,
+        int variable_dim_idx, dnnl_dim_t group_count,
+        dnnl_data_type_t offsets_dt) {
+    dnnl_memory_desc_t md {};
+    DNN_SAFE_V(dnnl_memory_desc_create_with_grouped_encoding(&md, ndims, dims,
+            data_type, variable_dim_idx, group_count, offsets_dt));
+    return md;
+}
+#endif
 
 int dnn_mem_t::initialize_memory_create_sycl(const handle_info_t &handle_info) {
 #ifdef DNNL_WITH_SYCL
