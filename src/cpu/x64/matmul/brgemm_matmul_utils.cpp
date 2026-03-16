@@ -93,7 +93,16 @@ int get_wei_k_blk(data_type_t wei_dt) {
 
 void mem_advice_init(brgemm_matmul_conf_t &bgmmc) {
 
-    dim_t parallel_work_amount = bgmmc.batch * bgmmc.M_chunks * bgmmc.N_chunks;
+    // TODO: Verify whether using a chunk count of 1 for runtime M and N is optimal for
+    // this heuristic. The previous implementation inadvertently used values calculated
+    // as div_up(bgmmc.M, bgmmc.M_chunk_elems) and div_up(bgmmc.N, bgmmc.N_chunk_elems)
+    // respectively with bgmmc.M or bgmmc.N being equal to DNNL_RUNTIME_DIM_VAL, and
+    // div_up(a,b) calculated as ((a + b - 1) / b). If e.g. bgmmc.M_chunk_elems==256
+    // then (DNNL_RUNTIME_DIM_VAL + 256 - 1)/256==0xff80000000000001, and
+    // static_cast<int>(0xff80000000000001) == 1, so bgmmc.M_chunks=1.
+    const auto M_chunks = is_runtime_value(bgmmc.M_chunks) ? 1 : bgmmc.M_chunks;
+    const auto N_chunks = is_runtime_value(bgmmc.N_chunks) ? 1 : bgmmc.N_chunks;
+    const dim_t parallel_work_amount = bgmmc.batch * M_chunks * N_chunks;
     int nthr_bmn = bgmmc.nthr / bgmmc.nthr_k;
     dim_t start {0}, end {0};
     balance211(parallel_work_amount, nthr_bmn, 0, start, end);
@@ -108,7 +117,7 @@ void mem_advice_init(brgemm_matmul_conf_t &bgmmc) {
     if (bgmmc.is_thread_chunks_exec_order_horizontal) {
         bgmmc.mem_advice
                 = brgemm_kernel_hint_mem_advice_t::brgemm_hint_mem_advice_B;
-        if (nchunks_per_thread % bgmmc.N_chunks && bgmmc.is_amx)
+        if (nchunks_per_thread % N_chunks && bgmmc.is_amx)
             bgmmc.mem_advice = brgemm_kernel_hint_mem_advice_t::
                     brgemm_hint_mem_advice_A_B;
     } else {
@@ -116,7 +125,7 @@ void mem_advice_init(brgemm_matmul_conf_t &bgmmc) {
                 && "this mode is not operational at the moment");
         bgmmc.mem_advice
                 = brgemm_kernel_hint_mem_advice_t::brgemm_hint_mem_advice_A;
-        if (nchunks_per_thread % bgmmc.M_chunks)
+        if (nchunks_per_thread % M_chunks)
             bgmmc.mem_advice = brgemm_kernel_hint_mem_advice_t::
                     brgemm_hint_mem_advice_A_B;
     }
@@ -2039,12 +2048,21 @@ void init_aux_values(brgemm_matmul_conf_t &bgmmc,
     bgmmc.N_chunk_elems = bgmmc.N_blk * bgmmc.N_chunk_size;
     bgmmc.K_chunk_elems
             = bgmmc.K_blk * bgmmc.K_chunk_size * bgmmc.brgemm_batch_size;
-    bgmmc.M_chunks = div_up(bgmmc.M, bgmmc.M_chunk_elems);
-    bgmmc.N_chunks = div_up(bgmmc.N, bgmmc.N_chunk_elems);
-    bgmmc.K_chunks = div_up(bgmmc.K, bgmmc.K_chunk_elems);
-    bgmmc.num_M_blocks = div_up(bgmmc.M, bgmmc.M_blk);
-    bgmmc.num_N_blocks = div_up(bgmmc.N, bgmmc.N_blk);
-    bgmmc.num_K_blocks = div_up(bgmmc.K, bgmmc.K_blk * bgmmc.brgemm_batch_size);
+    bgmmc.M_chunks = bgmmc.is_runtime_M ? runtime_value_for(bgmmc.M_chunks)
+                                        : div_up(bgmmc.M, bgmmc.M_chunk_elems);
+    bgmmc.N_chunks = bgmmc.is_runtime_N ? runtime_value_for(bgmmc.N_chunks)
+                                        : div_up(bgmmc.N, bgmmc.N_chunk_elems);
+    bgmmc.K_chunks = bgmmc.is_runtime_K ? runtime_value_for(bgmmc.K_chunks)
+                                        : div_up(bgmmc.K, bgmmc.K_chunk_elems);
+    bgmmc.num_M_blocks = bgmmc.is_runtime_M
+            ? runtime_value_for(bgmmc.num_M_blocks)
+            : div_up(bgmmc.M, bgmmc.M_blk);
+    bgmmc.num_N_blocks = bgmmc.is_runtime_N
+            ? runtime_value_for(bgmmc.num_N_blocks)
+            : div_up(bgmmc.N, bgmmc.N_blk);
+    bgmmc.num_K_blocks = bgmmc.is_runtime_K
+            ? runtime_value_for(bgmmc.num_K_blocks)
+            : div_up(bgmmc.K, bgmmc.K_blk * bgmmc.brgemm_batch_size);
 
     const int last_chunck_batch_size
             = (nstl::max(bgmmc.K, bgmmc.K_blk)
@@ -2127,7 +2145,8 @@ void init_aux_values(brgemm_matmul_conf_t &bgmmc,
             = bgmmc.use_buffer_b ? bgmmc.wei_n_blk * bgmmc.N_chunk_size : 0;
     bgmmc.s8s8_comp_b_str = bgmmc.use_buffer_b
             ? 0
-            : div_up(bgmmc.N, bgmmc.wei_n_blk) * bgmmc.wei_n_blk;
+            : (bgmmc.is_runtime_N ? runtime_value_for(bgmmc.s8s8_comp_b_str)
+                                  : rnd_up(bgmmc.N, bgmmc.wei_n_blk));
     bgmmc.s8s8_comp_n_str = bgmmc.wei_n_blk;
 
     bgmmc.A_ptr_shift_b = 0;

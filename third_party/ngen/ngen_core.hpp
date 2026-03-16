@@ -231,9 +231,9 @@ class invalid_address_modifier_exception : public std::runtime_error {
 public:
     invalid_address_modifier_exception(SourceLocation loc = {}) : std::runtime_error("Invalid address offset or scaling factor" + loc.str(" at ")) {}
 };
-class limited_to_256_grf_exception : public std::runtime_error {
+class grf_out_of_bounds_exception : public std::runtime_error {
 public:
-    limited_to_256_grf_exception(SourceLocation loc = {}) : std::runtime_error("This instruction only supports r0-r255" + loc.str(" at ")) {}
+    grf_out_of_bounds_exception(SourceLocation loc = {}) : std::runtime_error("This instruction uses an unsupported register" + loc.str(" at ")) {}
 };
 class r511_not_allowed_exception : public std::runtime_error {
 public:
@@ -900,10 +900,14 @@ inline RegData abs(const RegData &r)
     return result.setMods(1);
 }
 
+// Forward declare
+static constexpr int maxRegs(HW hw);
+
 inline void RegData::fixup(HW hw, int execSize, int execWidth, DataType defaultType, int srcN, int arity)
 {
 #ifdef NGEN_SAFE
     if (isInvalid()) throw invalid_object_exception();
+    if (!isARF() && !isIndirect() && static_cast<int>(base) >= maxRegs(hw)) throw grf_out_of_bounds_exception();
 #endif
 
     if (getType() == DataType::invalid) {
@@ -1293,7 +1297,16 @@ public:
     static constexpr int bytesToGRFs(HW hw, unsigned x)    { return (x + bytes(hw) - 1) >> log2Bytes(hw); }
 
     static constexpr int maxRegs()                         { return 512; }
+    static constexpr int maxRegs(HW hw) {
+        return (hw < HW::XeHP) ? 128
+            : (hw == HW::XE3P_35_11) ? 512
+            : 256;
+    }
 };
+
+static constexpr int maxRegs(HW hw) {
+    return GRF::maxRegs(hw);
+}
 
 class ARF : public Register
 {

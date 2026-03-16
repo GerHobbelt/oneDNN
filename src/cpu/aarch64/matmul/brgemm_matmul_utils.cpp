@@ -21,6 +21,7 @@
 #include "common/dnnl_thread.hpp"
 #include "common/type_helpers.hpp"
 #include "common/utils.hpp"
+#include "cpu/aarch64/cpu_isa_traits.hpp"
 #include "cpu/aarch64/injectors/jit_uni_postops_injector.hpp"
 
 #include "cpu/binary_injector_utils.hpp"
@@ -221,6 +222,13 @@ status_t brgemm_matmul_conf_utils_t::set_or_check_B_tag(
                     = bgmmc.b_dt_sz * B_d.blocking_desc().strides[dim];
         }
     } else {
+        // Allows tranposed only for sve_256, since it has a copy_b_transpose
+        // implemented, and for gemv cases since they do not use copy_b.
+        // TODO: a working copy_b_transpose for sve_128
+        const bool allow_transposed_b = bgmmc.isa == sve_256
+                || (bgmmc.M == 1
+                        && transposed_tensor_layout_tag == format_tag::ba)
+                || bgmmc.N == 1;
         switch (bgmmc.wei_dt) {
             case f32:
                 // If the B memory descriptor matches both the transposed
@@ -233,15 +241,18 @@ status_t brgemm_matmul_conf_utils_t::set_or_check_B_tag(
                 }
                 if (blocked_B_layouts_allowed) {
                     bgmmc.wei_tag = memory_desc_matches_one_of_tag(B_md,
-                            plain_tensor_layout_tag, blocked_64n_B_layout_tag,
-                            blocked_48n_B_layout_tag, blocked_32n_B_layout_tag,
-                            blocked_16n_B_layout_tag);
+                            plain_tensor_layout_tag,
+                            transposed_tensor_layout_tag,
+                            blocked_64n_B_layout_tag, blocked_48n_B_layout_tag,
+                            blocked_32n_B_layout_tag, blocked_16n_B_layout_tag);
                 } else {
-                    bgmmc.wei_tag = memory_desc_matches_one_of_tag(
-                            B_md, plain_tensor_layout_tag);
-                    if (bgmmc.wei_tag != plain_tensor_layout_tag)
-                        return status::unimplemented;
+                    bgmmc.wei_tag = memory_desc_matches_one_of_tag(B_md,
+                            plain_tensor_layout_tag,
+                            transposed_tensor_layout_tag);
                 }
+                if (!allow_transposed_b
+                        && bgmmc.wei_tag == transposed_tensor_layout_tag)
+                    return status::unimplemented;
                 break;
 
             case bf16:
@@ -1167,11 +1178,18 @@ void init_aux_values(brgemm_matmul_conf_t &bgmmc,
     bgmmc.M_chunk_elems = bgmmc.M_blk * bgmmc.M_chunk_size;
     bgmmc.N_chunk_elems = bgmmc.N_blk * bgmmc.N_chunk_size;
     bgmmc.K_chunk_elems = bgmmc.K_blk * bgmmc.brgemm_batch_size;
-    bgmmc.M_chunks = div_up(bgmmc.M, bgmmc.M_chunk_elems);
-    bgmmc.N_chunks = div_up(bgmmc.N, bgmmc.N_chunk_elems);
-    bgmmc.K_chunks = div_up(bgmmc.K, bgmmc.K_chunk_elems);
-    bgmmc.num_M_blocks = div_up(bgmmc.M, bgmmc.M_blk);
-    bgmmc.num_N_blocks = div_up(bgmmc.N, bgmmc.N_blk);
+    bgmmc.M_chunks = bgmmc.is_runtime_M ? runtime_value_for(bgmmc.M_chunks)
+                                        : div_up(bgmmc.M, bgmmc.M_chunk_elems);
+    bgmmc.N_chunks = bgmmc.is_runtime_N ? runtime_value_for(bgmmc.N_chunks)
+                                        : div_up(bgmmc.N, bgmmc.N_chunk_elems);
+    bgmmc.K_chunks = bgmmc.is_runtime_K ? runtime_value_for(bgmmc.K_chunks)
+                                        : div_up(bgmmc.K, bgmmc.K_chunk_elems);
+    bgmmc.num_M_blocks = bgmmc.is_runtime_M
+            ? runtime_value_for(bgmmc.num_M_blocks)
+            : div_up(bgmmc.M, bgmmc.M_blk);
+    bgmmc.num_N_blocks = bgmmc.is_runtime_N
+            ? runtime_value_for(bgmmc.num_N_blocks)
+            : div_up(bgmmc.N, bgmmc.N_blk);
     const int last_chunck_batch_size
             = (nstl::max(bgmmc.K, bgmmc.K_blk)
                       - (bgmmc.K_chunks - 1) * bgmmc.K_chunk_elems)
@@ -1200,7 +1218,8 @@ void init_aux_values(brgemm_matmul_conf_t &bgmmc,
             = bgmmc.use_buffer_b ? bgmmc.wei_n_blk * bgmmc.N_chunk_size : 0;
     bgmmc.s8s8_comp_b_str = bgmmc.use_buffer_b
             ? 0
-            : div_up(bgmmc.N, bgmmc.wei_n_blk) * bgmmc.wei_n_blk;
+            : (bgmmc.is_runtime_N ? runtime_value_for(bgmmc.s8s8_comp_b_str)
+                                  : rnd_up(bgmmc.N, bgmmc.wei_n_blk));
     bgmmc.s8s8_comp_n_str = bgmmc.wei_n_blk;
 
     bgmmc.A_ptr_shift_b = 0;
