@@ -69,6 +69,15 @@ void add_option_to_help(const std::string &option,
     help_added.push_back(option);
 }
 
+bool has_only_digits(const std::string &s) {
+    if (s.empty()) return false;
+
+    return std::all_of(s.cbegin(), s.cend(), [](int c) {
+        assert(c < UINT8_MAX);
+        return std::isdigit(c);
+    });
+}
+
 // Covers all integer parsing routines: `atoi`, `atol, `atoll`, `stoi`, `stol`.
 int64_t stoll_safe(const std::string &s) {
     int64_t value = 0;
@@ -273,26 +282,18 @@ attr_t::post_ops_t parse_attr_post_ops_func(const std::string &s) {
 
                 // parse mask input - processed for both src1/src2 tensors.
                 const auto mask_input_str = get_substr(s, src_subpos, delim);
-                // Check if `mask_input_str` consists of only digits.
-                const bool only_digits = std::all_of(mask_input_str.cbegin(),
-                        mask_input_str.cend(), [](int c) {
-                    assert(c < UINT8_MAX);
-                    return std::isdigit(c);
-                });
-
-                using mask_input_t
-                        = attr_t::post_ops_t::entry_t::binary_t::mask_input_t;
-                if (only_digits) {
-                    // If digits only, then read it as integer value.
+                if (parser_utils::has_only_digits(mask_input_str)) {
+                    // If an input consists of digits only, then read it as the
+                    // int value.
                     const auto src_mask
                             = parser_utils::stoll_safe(mask_input_str);
 
                     if (!is_ternary) {
                         e.binary.mask = src_mask;
-                        e.binary.mask_input = mask_input_t::mask;
+                        e.binary.mask_input = attr_t::mask_input_t::mask;
                     } else {
                         e.binary.src2_mask = src_mask;
-                        e.binary.src2_mask_input = mask_input_t::mask;
+                        e.binary.src2_mask_input = attr_t::mask_input_t::mask;
                         if (e.binary.src2_mask > 0)
                             BENCHDNN_PRINT(0, "%s \'%s\' %s\n",
                                     "Error: binary post-op policy for the "
@@ -307,7 +308,7 @@ attr_t::post_ops_t parse_attr_post_ops_func(const std::string &s) {
 
                     if (!is_ternary) {
                         e.binary.policy = src_policy;
-                        e.binary.mask_input = mask_input_t::policy;
+                        e.binary.mask_input = attr_t::mask_input_t::policy;
 
                         if (e.binary.policy == attr_t::policy_t::POLICY_TOTAL) {
                             BENCHDNN_PRINT(0, "%s \'%s\' %s\n",
@@ -321,7 +322,7 @@ attr_t::post_ops_t parse_attr_post_ops_func(const std::string &s) {
                         }
                     } else {
                         e.binary.src2_policy = src_policy;
-                        e.binary.src2_mask_input = mask_input_t::policy;
+                        e.binary.src2_mask_input = attr_t::mask_input_t::policy;
 
                         if (e.binary.src2_policy != attr_t::policy_t::COMMON) {
                             BENCHDNN_PRINT(0, "%s \'%s\' %s\n",
@@ -347,6 +348,14 @@ attr_t::post_ops_t parse_attr_post_ops_func(const std::string &s) {
                 }
                 e.binary.tag = tag_str;
 
+                if (src_subpos == std::string::npos) return;
+
+                const auto strides_str = get_substr(s, src_subpos, delim);
+                if (!strides_str.empty()) {
+                    parse_vector_str(e.binary.strides, dims_t(),
+                            parser_utils::stoll_safe, strides_str, 'x');
+                }
+
                 if (src_subpos != std::string::npos) {
                     const auto unknown_str = get_substr(s, src_subpos, delim);
                     BENCHDNN_PRINT(0, "%s \'%s\' %s\n",
@@ -365,13 +374,22 @@ attr_t::post_ops_t parse_attr_post_ops_func(const std::string &s) {
             }
 
         } else if (e.is_prelu_kind()) {
-            const auto policy_str = get_substr(subs, subs_pos, ':');
-            e.prelu.policy = attr_t::str2policy(policy_str);
-            if (e.prelu.policy == attr_t::policy_t::POLICY_TOTAL) {
-                BENCHDNN_PRINT(0, "%s \'%s\' %s\n",
-                        "Error: prelu post-op policy", policy_str.c_str(),
-                        "is not recognized.");
-                SAFE_V(FAIL);
+            const auto mask_input_str = get_substr(subs, subs_pos, ':');
+            if (parser_utils::has_only_digits(mask_input_str)) {
+                // If an input consists of digits only, then read it as the int
+                // value.
+                e.prelu.mask_input = attr_t::mask_input_t::mask;
+                e.prelu.mask = parser_utils::stoll_safe(mask_input_str);
+            } else {
+                // Otherwise, re-direct to policy parsing.
+                e.prelu.mask_input = attr_t::mask_input_t::policy;
+                e.prelu.policy = attr_t::str2policy(mask_input_str);
+                if (e.prelu.policy == attr_t::policy_t::POLICY_TOTAL) {
+                    BENCHDNN_PRINT(0, "%s \'%s\' %s\n",
+                            "Error: prelu post-op policy",
+                            mask_input_str.c_str(), "is not recognized.");
+                    SAFE_V(FAIL);
+                }
             }
         }
         if (subs_pos == std::string::npos) continue;
@@ -721,7 +739,8 @@ bool parse_attr_post_ops(std::vector<attr_t::post_ops_t> &po, const char *str,
             = "POST-OPS\n    Specifies post-ops attribute. `POST-OPS` syntax "
               "is one of those:\n    * SUM[:SCALE[:ZERO_POINT[:DATA_TYPE]]]\n  "
               "  * ELTWISE[:ALPHA[:BETA[:SCALE]]]\n    * DW:KkSsPp[:DST_DT]\n  "
-              "  * BINARY:DT[:MASK_INPUT[:TAG]]\n    More details at "
+              "  * BINARY:DT[:MASK_INPUT[:TAG]]\n    * PRELU[:MASK_INPUT]\n    "
+              "More details at "
             + doc_url + "knobs_attr.md\n";
     std::vector<attr_t::post_ops_t> def {attr_t::post_ops_t()};
     return parse_vector_option(po, def, parser_utils::parse_attr_post_ops_func,
@@ -731,7 +750,7 @@ bool parse_attr_post_ops(std::vector<attr_t::post_ops_t> &po, const char *str,
 bool parse_attr_scales(std::vector<attr_t::arg_scales_t> &scales,
         const char *str, const std::string &option_name = "attr-scales") {
     static const std::string help
-            = "ARG:POLICY[:SCALE[:DATA_TYPE[:GROUPS]]][+...]\n"
+            = "ARG:MASK_INPUT[:SCALE[:DATA_TYPE[:GROUPS]]][+...]\n"
               "    Specifies input scales attribute.\n"
               "    More details at "
             + doc_url + "knobs_attr.md\n";
@@ -741,7 +760,7 @@ bool parse_attr_scales(std::vector<attr_t::arg_scales_t> &scales,
 bool parse_attr_zero_points(std::vector<attr_t::zero_points_t> &zp,
         const char *str, const std::string &option_name = "attr-zero-points") {
     static const std::string help
-            = "ARG:POLICY[:ZEROPOINT[:DATA_TYPE[:GROUPS]]][+...]\n"
+            = "ARG:MASK_INPUT[:ZEROPOINT[:DATA_TYPE[:GROUPS]]][+...]\n"
               "    Specifies zero-points attribute.\n"
               "    More details at "
             + doc_url + "knobs_attr.md\n";
@@ -752,10 +771,9 @@ bool parse_attr_precomputed_reductions(
         std::vector<attr_t::precomputed_reductions_t> &pr, const char *str,
         const std::string &option_name = "attr-precomputed-reductions") {
     static const std::string help
-            = "ARG:POLICY:DATA_TYPE:GROUPS[+...]\n    Specifies precomputed "
-              "reductions attribute.\n    More details at "
-              "https://github.com/uxlfoundation/oneDNN/blob/main/tests/"
-              "benchdnn/doc/knobs_attr.md\n";
+            = "ARG:MASK_INPUT:DATA_TYPE:GROUPS[+...]\n    Specifies "
+              "precomputed reductions attribute.\n    More details at "
+            + doc_url + "knobs_attr.md\n";
     return parse_subattr(pr, str, option_name, help);
 }
 

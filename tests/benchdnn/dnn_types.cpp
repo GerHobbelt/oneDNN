@@ -301,18 +301,25 @@ int attr_t::arg_scales_t::entry_t::from_str(const std::string &s) {
     if (s.empty()) return OK;
 
     size_t start_pos = 0;
-    // process policy
-    const auto policy_str = parser::get_substr(s, start_pos, ':');
-    this->policy = str2policy(policy_str);
-    if (this->policy == POLICY_TOTAL) {
-        BENCHDNN_PRINT(0, "%s \'%s\' %s\n", "Error: Scale entry policy",
-                policy_str.c_str(), "is not recognized.");
-        SAFE_V(FAIL);
+    const auto mask_input_str = parser::get_substr(s, start_pos, ':');
+    if (parser::parser_utils::has_only_digits(mask_input_str)) {
+        // If an input consists of digits only, then read it as the int value.
+        this->mask_input = attr_t::mask_input_t::mask;
+        this->mask = parser::parser_utils::stoll_safe(mask_input_str);
+    } else {
+        // Otherwise, re-direct to policy parsing.
+        this->mask_input = attr_t::mask_input_t::policy;
+        this->policy = attr_t::str2policy(mask_input_str);
+        if (this->policy == POLICY_TOTAL) {
+            BENCHDNN_PRINT(0, "%s \'%s\' %s\n", "Error: Scale entry policy",
+                    mask_input_str.c_str(), "is not recognized.");
+            SAFE_V(FAIL);
+        }
     }
     HANDLE_DANGLING_SYMBOL_AND_END_OF_STRING();
 
-    // process scale value for COMMON policy
-    if (this->policy == COMMON || this->policy == HOST_SCALAR) {
+    // process scale value if a single value is expected
+    if (this->has_single_element()) {
         SAFE(parse_value_and_runtime(
                      this->scale, parser::get_substr(s, start_pos, ':')),
                 WARN);
@@ -339,26 +346,10 @@ int attr_t::arg_scales_t::entry_t::from_str(const std::string &s) {
     parser::parse_vector_str(this->groups, dims_t(),
             parser::parser_utils::stoll_safe, g_str, 'x');
 
-    if (!groups.empty()) {
-        switch (this->policy) {
-            case PER_TENSOR:
-            case PER_OC:
-            case PER_OCIC:
-            case MX:
-            case DYNAMIC_FP:
-                if (this->groups.size() != 2) {
-                    BENCHDNN_PRINT(0, "%s\n",
-                            "Error: number of groups should be equal to number "
-                            "of dimension bits set in the mask.");
-                    SAFE_V(FAIL);
-                }
-                break;
-            default:
-                BENCHDNN_PRINT(0, "%s\n",
-                        "Error: groups are supported only for PER_OC and "
-                        "PER_OCIC policies.");
-                SAFE_V(FAIL);
-        }
+    if (!this->groups.empty() && this->groups.size() != 2) {
+        BENCHDNN_PRINT(
+                0, "%s\n", "Error: the number of groups is expected to be 2.");
+        SAFE_V(FAIL);
     }
     HANDLE_DANGLING_SYMBOL_AND_END_OF_STRING();
 
@@ -370,18 +361,25 @@ int attr_t::zero_points_t::entry_t::from_str(const std::string &s) {
     if (s.empty()) return OK;
 
     size_t start_pos = 0;
-
-    // process policy
-    const auto policy_str = parser::get_substr(s, start_pos, ':');
-    this->policy = str2policy(policy_str);
-    if (this->policy == POLICY_TOTAL) {
-        BENCHDNN_PRINT(0, "Error: policy \'%s\' was not recognized.\n",
-                policy_str.c_str());
-        SAFE_V(FAIL);
+    const auto mask_input_str = parser::get_substr(s, start_pos, ':');
+    if (parser::parser_utils::has_only_digits(mask_input_str)) {
+        // If an input consists of digits only, then read it as the int value.
+        this->mask_input = attr_t::mask_input_t::mask;
+        this->mask = parser::parser_utils::stoll_safe(mask_input_str);
+    } else {
+        // Otherwise, re-direct to policy parsing.
+        this->mask_input = attr_t::mask_input_t::policy;
+        this->policy = attr_t::str2policy(mask_input_str);
+        if (this->policy == POLICY_TOTAL) {
+            BENCHDNN_PRINT(0, "%s \'%s\' %s\n",
+                    "Error: Zero-point entry policy", mask_input_str.c_str(),
+                    "is not recognized.");
+            SAFE_V(FAIL);
+        }
     }
     HANDLE_DANGLING_SYMBOL_AND_END_OF_STRING();
 
-    if (this->policy == COMMON || this->policy == HOST_SCALAR) {
+    if (this->has_single_element()) {
         float value = 0.0f;
         SAFE(parse_value_and_runtime(
                      value, parser::get_substr(s, start_pos, ':')),
@@ -410,23 +408,10 @@ int attr_t::zero_points_t::entry_t::from_str(const std::string &s) {
     const auto g_str = parser::get_substr(s, start_pos, ':');
     parser::parse_vector_str(this->groups, dims_t(),
             parser::parser_utils::stoll_safe, g_str, 'x');
-    if (!groups.empty()) {
-        switch (this->policy) {
-            case PER_TENSOR:
-            case PER_OC:
-            case PER_OCIC:
-                if (this->groups.size() != 2) {
-                    BENCHDNN_PRINT(0, "%s\n",
-                            "Error: number of groups should be equal to number "
-                            "of dimension bits set in the mask.");
-                    SAFE_V(FAIL);
-                }
-                break;
-            default:
-                BENCHDNN_PRINT(0, "%s\n",
-                        "Error: groups are supported only for policy PER_OCIC");
-                SAFE_V(FAIL);
-        }
+    if (!this->groups.empty() && this->groups.size() != 2) {
+        BENCHDNN_PRINT(
+                0, "%s\n", "Error: the number of groups is expected to be 2.");
+        SAFE_V(FAIL);
     }
     HANDLE_DANGLING_SYMBOL_AND_END_OF_STRING();
 
@@ -438,14 +423,22 @@ int attr_t::precomputed_reductions_t::entry_t::from_str(const std::string &s) {
     if (s.empty()) return OK;
 
     size_t start_pos = 0;
-
-    // process policy
-    const auto policy_str = parser::get_substr(s, start_pos, ':');
-    this->policy = str2policy(policy_str);
-    if (this->policy == POLICY_TOTAL || this->policy != policy_t::PER_TENSOR) {
-        BENCHDNN_PRINT(0, "Error: policy \'%s\' was not recognized.\n",
-                policy_str.c_str());
-        SAFE_V(FAIL);
+    const auto mask_input_str = parser::get_substr(s, start_pos, ':');
+    if (parser::parser_utils::has_only_digits(mask_input_str)) {
+        // If an input consists of digits only, then read it as the int value.
+        this->mask_input = attr_t::mask_input_t::mask;
+        this->mask = parser::parser_utils::stoll_safe(mask_input_str);
+    } else {
+        // Otherwise, re-direct to policy parsing.
+        this->mask_input = attr_t::mask_input_t::policy;
+        this->policy = attr_t::str2policy(mask_input_str);
+        if (this->policy == POLICY_TOTAL
+                || this->policy != policy_t::PER_TENSOR) {
+            BENCHDNN_PRINT(0, "%s \'%s\' %s\n",
+                    "Error: Precomputed reductions entry policy",
+                    mask_input_str.c_str(), "is not recognized.");
+            SAFE_V(FAIL);
+        }
     }
     HANDLE_DANGLING_SYMBOL_AND_END_OF_STRING();
 
@@ -463,22 +456,10 @@ int attr_t::precomputed_reductions_t::entry_t::from_str(const std::string &s) {
     const auto g_str = parser::get_substr(s, start_pos, ':');
     parser::parse_vector_str(this->groups, dims_t(),
             parser::parser_utils::stoll_safe, g_str, 'x');
-    if (!groups.empty()) {
-        switch (this->policy) {
-            case PER_TENSOR:
-                if (this->groups.size() != 2) {
-                    BENCHDNN_PRINT(0, "%s\n",
-                            "Error: number of groups should be equal to number "
-                            "of dimension bits set in the mask.");
-                    SAFE_V(FAIL);
-                }
-                break;
-            default:
-                BENCHDNN_PRINT(0, "%s\n",
-                        "Error: groups are supported only for policy "
-                        "PER_TENSOR");
-                SAFE_V(FAIL);
-        }
+    if (!this->groups.empty() && this->groups.size() != 2) {
+        BENCHDNN_PRINT(
+                0, "%s\n", "Error: the number of groups is expected to be 2.");
+        SAFE_V(FAIL);
     }
     HANDLE_DANGLING_SYMBOL_AND_END_OF_STRING();
 
@@ -582,6 +563,54 @@ int attr_t::arg_scales_t::from_str(const std::string &s) {
         set(arg, arg_scale);
     }
     return OK;
+}
+
+int attr_t::zero_points_t::get_mask(int arg, dnnl_primitive_kind_t prim_kind,
+        int ndims, bool has_groups) const {
+    const auto &e = get(arg);
+    switch (e.mask_input) {
+        // `none` is treated as `policy_t::COMMON` for convenience of calling
+        // `get_mask` without extra guards.
+        case mask_input_t::none: return 0;
+        case mask_input_t::mask: return e.mask;
+        case mask_input_t::policy:
+            return attr_t::policy2mask(
+                    arg, e.policy, ndims, prim_kind, has_groups);
+        default: assert(!"unknown mask_input value"); break;
+    }
+    return INT_MIN;
+}
+
+int attr_t::precomputed_reductions_t::get_mask(int arg,
+        dnnl_primitive_kind_t prim_kind, int ndims, bool has_groups) const {
+    const auto &e = get(arg);
+    switch (e.mask_input) {
+        // `none` is treated as `policy_t::COMMON` for convenience of calling
+        // `get_mask` without extra guards.
+        case mask_input_t::none: return 0;
+        case mask_input_t::mask: return e.mask;
+        case mask_input_t::policy:
+            return attr_t::policy2mask(
+                    arg, e.policy, ndims, prim_kind, has_groups);
+        default: assert(!"unknown mask_input value"); break;
+    }
+    return INT_MIN;
+}
+
+int attr_t::arg_scales_t::get_mask(int arg, dnnl_primitive_kind_t prim_kind,
+        int ndims, bool has_groups) const {
+    const auto &e = get(arg);
+    switch (e.mask_input) {
+        // `none` is treated as `policy_t::COMMON` for convenience of calling
+        // `get_mask` without extra guards.
+        case mask_input_t::none: return 0;
+        case mask_input_t::mask: return e.mask;
+        case mask_input_t::policy:
+            return attr_t::policy2mask(
+                    arg, e.policy, ndims, prim_kind, has_groups);
+        default: assert(!"unknown mask_input value"); break;
+    }
+    return INT_MIN;
 }
 
 using pk_t = attr_t::post_ops_t::kind_t;
@@ -702,18 +731,33 @@ std::vector<std::pair<int, int>> attr_t::post_ops_t::get_po_masks(
     std::vector<std::pair<int, int>> v_masks;
     for (int idx = 0; idx < len(); ++idx) {
         const auto &e = this->entry[idx];
-        int mask = -1;
+        int mask = INT_MIN;
         int arg = DNNL_ARG_UNDEF;
         if (e.is_binary_kind()) {
-            using mask_input_t = entry_t::binary_t::mask_input_t;
-            auto mask_input = e.binary.mask_input;
-            mask = mask_input == mask_input_t::mask
-                    ? e.binary.mask
-                    : policy2mask(DNNL_ARG_SRC_1, e.binary.policy, ndims,
-                              prim_kind);
+            switch (e.binary.mask_input) {
+                // `none` is treated as `policy_t::COMMON` for convenience of
+                // calling reference compute paths.
+                case attr_t::mask_input_t::none: mask = 0; break;
+                case attr_t::mask_input_t::mask: mask = e.binary.mask; break;
+                case attr_t::mask_input_t::policy:
+                    mask = attr_t::policy2mask(
+                            DNNL_ARG_SRC_1, e.binary.policy, ndims, prim_kind);
+                    break;
+                default: assert(!"unknown mask_input value"); break;
+            }
             arg = DNNL_ARG_SRC_1;
         } else if (e.is_prelu_kind()) {
-            mask = attr_t::get_default_mask(e.prelu.policy, ndims);
+            switch (e.prelu.mask_input) {
+                // `none` is treated as `policy_t::COMMON` for convenience of
+                // calling reference compute paths.
+                case attr_t::mask_input_t::none: mask = 0; break;
+                case attr_t::mask_input_t::mask: mask = e.prelu.mask; break;
+                case attr_t::mask_input_t::policy:
+                    mask = attr_t::policy2mask(
+                            DNNL_ARG_WEIGHTS, e.prelu.policy, ndims, prim_kind);
+                    break;
+                default: assert(!"unknown mask_input value"); break;
+            }
             arg = DNNL_ARG_WEIGHTS;
         } else
             continue;
@@ -804,10 +848,13 @@ std::ostream &operator<<(
         std::ostream &s, const attr_t::arg_scales_t::entry_t &scale) {
     using ::operator<<;
 
-    s << scale.policy;
-    if (scale.policy == policy_t::COMMON
-            || scale.policy == policy_t::HOST_SCALAR)
-        s << ":" << scale.scale;
+    if (scale.mask_input == attr_t::mask_input_t::mask) {
+        s << scale.mask;
+    } else {
+        assert(scale.mask_input == attr_t::mask_input_t::policy);
+        s << scale.policy;
+    }
+    if (scale.has_single_element()) s << ":" << scale.scale;
     if (scale.dt != dnnl_f32 || !scale.groups.empty()) s << ':' << scale.dt;
     if (!scale.groups.empty()) s << ":" << dims2str(scale.groups);
     return s;
@@ -819,11 +866,14 @@ std::ostream &operator<<(
 
     const char *delim = "";
     for (const auto &point : zero_points.points) {
-        s << delim;
-        s << arg2str(point.first) << ":" << point.second.policy;
-        if (point.second.policy == policy_t::COMMON
-                || point.second.policy == policy_t::HOST_SCALAR)
-            s << ":" << point.second.value;
+        s << delim << arg2str(point.first);
+        if (point.second.mask_input == attr_t::mask_input_t::mask) {
+            s << ":" << point.second.mask;
+        } else {
+            assert(point.second.mask_input == attr_t::mask_input_t::policy);
+            s << ":" << point.second.policy;
+        }
+        if (point.second.has_single_element()) s << ":" << point.second.value;
         if (point.second.dt != dnnl_s32 || !point.second.groups.empty())
             s << ':' << point.second.dt;
         if (!point.second.groups.empty())
@@ -840,8 +890,13 @@ std::ostream &operator<<(std::ostream &s,
 
     const char *delim = "";
     for (const auto &entry : precomputed_reductions.entries) {
-        s << delim;
-        s << arg2str(entry.first) << ":" << entry.second.policy;
+        s << delim << arg2str(entry.first);
+        if (entry.second.mask_input == attr_t::mask_input_t::mask) {
+            s << ":" << entry.second.mask;
+        } else {
+            assert(entry.second.mask_input == attr_t::mask_input_t::policy);
+            s << ":" << entry.second.policy;
+        }
         if (entry.second.dt != dnnl_s32 || !entry.second.groups.empty())
             s << ':' << entry.second.dt;
         if (!entry.second.groups.empty())
@@ -898,32 +953,31 @@ std::ostream &operator<<(std::ostream &s, const attr_t::post_ops_t &post_ops) {
             const auto src_delim
                     = e.is_binary_kind_with_ternary_op() ? "." : ":";
 
-            using mask_input_t
-                    = attr_t::post_ops_t::entry_t::binary_t::mask_input_t;
-
-            if (e.binary.mask_input != mask_input_t::none
+            if (e.binary.mask_input != attr_t::mask_input_t::none
                     || e.binary.tag != tag::any) {
-                if (e.binary.mask_input == mask_input_t::mask) {
+                if (e.binary.mask_input == attr_t::mask_input_t::mask) {
                     s << src_delim << e.binary.mask;
                 } else {
-                    assert(e.binary.mask_input == mask_input_t::policy);
+                    assert(e.binary.mask_input == attr_t::mask_input_t::policy);
                     s << src_delim << e.binary.policy;
                 }
             }
             if (e.binary.tag != tag::any) s << src_delim << e.binary.tag;
+            if (!e.binary.strides.empty()) s << src_delim << e.binary.strides;
 
             if (e.is_binary_kind_with_ternary_op()) {
                 bool delim_added = false;
 
-                if (e.binary.src2_mask_input != mask_input_t::none
+                if (e.binary.src2_mask_input != attr_t::mask_input_t::none
                         || e.binary.src2_tag != tag::any) {
                     s << ":";
                     delim_added = true;
-                    if (e.binary.src2_mask_input == mask_input_t::mask) {
+                    if (e.binary.src2_mask_input
+                            == attr_t::mask_input_t::mask) {
                         s << e.binary.src2_mask;
                     } else {
                         assert(e.binary.src2_mask_input
-                                == mask_input_t::policy);
+                                == attr_t::mask_input_t::policy);
                         s << e.binary.src2_policy;
                     }
                 }
@@ -932,8 +986,11 @@ std::ostream &operator<<(std::ostream &s, const attr_t::post_ops_t &post_ops) {
                 }
             }
         } else if (e.is_prelu_kind()) {
-            if (e.prelu.policy != policy_t::COMMON) {
-                s << ":" << e.prelu.policy;
+            if (e.prelu.mask_input == attr_t::mask_input_t::mask) {
+                if (e.prelu.mask > 0) s << ':' << e.prelu.mask;
+            } else if (e.prelu.mask_input == attr_t::mask_input_t::policy) {
+                if (e.prelu.policy != policy_t::COMMON)
+                    s << ':' << e.prelu.policy;
             }
         } else {
             assert(!"unknown kind");
@@ -1198,6 +1255,7 @@ struct post_ops_rhs_tensor_entry_t {
     dnnl_data_type_t dt;
     int mask;
     std::string tag;
+    dims_t strides;
     int arg_attr_mask;
 };
 
@@ -1208,24 +1266,35 @@ post_ops_rhs_tensor_entry_t get_po_rhs_tensor_entry(
         dnnl_primitive_kind_t prim_kind) {
     if (entry.is_prelu_kind()) {
         const auto &prelu = entry.prelu;
-        const int mask = attr_t::get_default_mask(prelu.policy, ndims);
-        return {dnnl_f32, mask, tag::axb, DNNL_ARG_WEIGHTS};
+        int mask = INT_MIN;
+        switch (prelu.mask_input) {
+            // `none` is treated as `policy_t::COMMON` for convenience of
+            // calling `get_po_rhs_tensor_entry` without extra guards.
+            case attr_t::mask_input_t::none: mask = 0; break;
+            case attr_t::mask_input_t::mask: mask = prelu.mask; break;
+            case attr_t::mask_input_t::policy:
+                mask = attr_t::policy2mask(
+                        DNNL_ARG_WEIGHTS, prelu.policy, ndims, prim_kind);
+                break;
+            default: assert(!"unknown mask_input value"); break;
+        }
+        return {dnnl_f32, mask, tag::axb, dims_t(), DNNL_ARG_WEIGHTS};
     } else if (entry.is_binary_kind()) {
         const auto &binary = entry.binary;
-        using mask_input_t
-                = attr_t::post_ops_t::entry_t::binary_t::mask_input_t;
-        int mask = -1;
+        int mask = INT_MIN;
         switch (binary.mask_input) {
-            // `none` is treated as `policy_t::COMMON`.
-            case mask_input_t::none: mask = 0; break;
-            case mask_input_t::mask: mask = binary.mask; break;
-            case mask_input_t::policy:
+            // `none` is treated as `policy_t::COMMON` for convenience of
+            // calling `get_po_rhs_tensor_entry` without extra guards.
+            case attr_t::mask_input_t::none: mask = 0; break;
+            case attr_t::mask_input_t::mask: mask = binary.mask; break;
+            case attr_t::mask_input_t::policy:
                 mask = attr_t::policy2mask(
                         DNNL_ARG_SRC_1, binary.policy, ndims, prim_kind);
                 break;
             default: assert(!"unknown mask_input value"); break;
         }
-        return {binary.src1_dt, mask, binary.tag, DNNL_ARG_SRC_1};
+        return {binary.src1_dt, mask, binary.tag, binary.strides,
+                DNNL_ARG_SRC_1};
     }
 
     return post_ops_rhs_tensor_entry_t {};
@@ -1242,9 +1311,8 @@ int attr_args_t::prepare_post_ops_mds(const attr_t &attr, int ndims,
     // iterate over all post ops and prepare md for each binary
     for (int idx = 0; idx < po.len(); ++idx) {
         const auto &e = po.entry[idx];
-        if (e.is_binary_kind() || e.is_prelu_kind()) {
-
-            const auto po_rhs_tensor_entry
+        if (e.is_binary_kind()) {
+            const auto &po_rhs_tensor_entry
                     = get_po_rhs_tensor_entry(e, ndims, prim_kind);
             const int mask = po_rhs_tensor_entry.mask;
 
@@ -1254,7 +1322,8 @@ int attr_args_t::prepare_post_ops_mds(const attr_t &attr, int ndims,
                 rhs_tensor_dims[d] = (!(mask & (1 << d))) ? 1 : dims[d];
 
             auto rhs_tensor_desc = dnn_mem_t::init_md(ndims, rhs_tensor_dims,
-                    po_rhs_tensor_entry.dt, po_rhs_tensor_entry.tag);
+                    po_rhs_tensor_entry.dt, po_rhs_tensor_entry.tag,
+                    po_rhs_tensor_entry.strides);
             mds.emplace((DNNL_ARG_ATTR_MULTIPLE_POST_OP(idx)
                                 | po_rhs_tensor_entry.arg_attr_mask),
                     std::move(rhs_tensor_desc));
@@ -1266,7 +1335,14 @@ int attr_args_t::prepare_post_ops_mds(const attr_t &attr, int ndims,
                         (DNNL_ARG_ATTR_MULTIPLE_POST_OP(idx) | DNNL_ARG_SRC_2),
                         std::move(rhs_src2_tensor_desc));
             }
-
+        } else if (e.is_prelu_kind()) {
+            // Prelu doesn't rely on md anywhere so far. Treat it as a quant
+            // entry.
+            const auto &po_rhs_tensor_entry
+                    = get_po_rhs_tensor_entry(e, ndims, prim_kind);
+            entries.insert(std::make_pair(
+                    DNNL_ARG_ATTR_MULTIPLE_POST_OP(idx) | DNNL_ARG_WEIGHTS,
+                    po_rhs_tensor_entry.mask));
         } else if (e.is_convolution_kind()) {
             // Update dims for post operations appended after conv_dw
             conv_dw_fusion::get_fused_conv_dst_dims(ndims, e, dims, dims);
@@ -1312,7 +1388,7 @@ dnnl_primitive_attr_t create_dnnl_attr(
             // If it's non-default, use it, otherwise, deduce it.
             int mask = args_mask != attr_args_t::undefined_mask
                     ? args_mask
-                    : attr_t::policy2mask(arg_name, e.policy, ndims);
+                    : as.get_mask(arg_name, dnnl_undefined_primitive, ndims);
 
             DNN_SAFE_V(dnnl_primitive_attr_set_scales_v3(dnnl_attr, arg_name,
                     mask, static_cast<int>(e.groups.size()), e.groups.data(),
@@ -1343,7 +1419,7 @@ dnnl_primitive_attr_t create_dnnl_attr(
             // If it's non-default, use it, otherwise, deduce it.
             int mask = args_mask != attr_args_t::undefined_mask
                     ? args_mask
-                    : attr_t::policy2mask(arg_name, e.policy, ndims);
+                    : zp.get_mask(arg_name, dnnl_undefined_primitive, ndims);
 
             int group_ndims = static_cast<int>(e.groups.size());
             const auto &groups = e.groups.data();
@@ -1367,7 +1443,7 @@ dnnl_primitive_attr_t create_dnnl_attr(
             // If it's non-default, use it, otherwise, deduce it.
             int mask = args_mask != attr_args_t::undefined_mask
                     ? args_mask
-                    : attr_t::policy2mask(arg_name, e.policy, ndims);
+                    : pr.get_mask(arg_name, dnnl_undefined_primitive, ndims);
 
             int group_ndims = static_cast<int>(e.groups.size());
             const auto &groups = e.groups.data();
@@ -1420,8 +1496,8 @@ dnnl_primitive_attr_t create_dnnl_attr(
                         ops, e.binary.alg, src1_md, src2_md));
 
             } else if (e.is_prelu_kind()) {
-                const auto &policy = e.prelu.policy;
-                const auto mask = attr_t::get_default_mask(policy, ndims);
+                const auto mask = attr_args.get_mask(
+                        DNNL_ARG_ATTR_MULTIPLE_POST_OP(idx) | DNNL_ARG_WEIGHTS);
                 DNN_SAFE_V(dnnl_post_ops_append_prelu(ops, mask));
             } else {
                 assert(!"unknown attr::post_ops::kind");
@@ -1739,7 +1815,7 @@ void maybe_scale(const attr_t &attr, float &d, const float *scales, int64_t c,
 
     const auto &e = attr.scales.get(arg);
     if (!e.is_def()) {
-        int64_t idx = e.policy == policy_t::COMMON ? 0 : c;
+        int64_t idx = e.has_single_element() ? 0 : c;
         float s = scales[idx];
         if (opposite_scale) s = 1.f / s;
         d *= s;
@@ -1752,7 +1828,7 @@ void maybe_zero_point(const attr_t &attr, float &d, const int32_t *zero_points,
 
     const auto &e = attr.zero_points.get(arg);
     if (!e.is_def()) {
-        const int idx = e.policy == policy_t::COMMON ? 0 : c;
+        const int idx = e.has_single_element() ? 0 : c;
         const int zp_sign = opposite_zero_point ? -1 : 1;
         d -= zp_sign * zero_points[idx];
     }
@@ -1970,12 +2046,6 @@ void update_cpu_ref_attrs(attr_t &attr, dnnl_data_type_t dst_dt) {
         if (e.is_binary_kind()) {
             e.binary.src1_dt = dnnl_f32;
             e.binary.tag = tag::any;
-            // Since tag is updated, it might get printed with policy, which
-            // means that mask_input should be specified.
-            using mask_input_t
-                    = attr_t::post_ops_t::entry_t::binary_t::mask_input_t;
-            if (e.binary.mask_input == mask_input_t::none)
-                e.binary.mask_input = mask_input_t::policy;
         } else if (e.is_sum_kind()) {
             if (dst_dt == dnnl_f32) e.sum.dt = dnnl_data_type_undef;
         }
