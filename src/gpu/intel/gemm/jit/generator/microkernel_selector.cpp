@@ -24,6 +24,7 @@
 #include "gemmstone/strategy_parser.hpp"
 #include "ngen_decoder.hpp"
 #include "npack/neo_packager.hpp"
+#include "pieces/hw_utils.hpp"
 
 GEMMSTONE_NAMESPACE_START
 namespace microkernel {
@@ -139,11 +140,24 @@ InterfaceHandler GEMMOptions::generateInterface(HW hw) const {
 }
 
 GEMMOptions GEMMOptions::transpose() const {
-      GEMMOptions ret = *this;
-      std::swap(ret.localA, ret.localB);
-      std::swap(ret.scaleA, ret.scaleB);
-      std::swap(ret.offsetA, ret.offsetB);
-      return ret;
+    GEMMOptions ret = *this;
+    std::swap(ret.localA, ret.localB);
+    std::swap(ret.scaleA, ret.scaleB);
+    std::swap(ret.offsetA, ret.offsetB);
+    return ret;
+}
+
+std::string strategyToString(HW hw, GEMMProblem problem, GEMMStrategy strategy) {
+    std::stringstream ss;
+    ss << problem.toString() << " "
+       << std::to_string(strategy.unroll[LoopM])
+       << " "
+       << std::to_string(strategy.unroll[LoopN])
+       << " "
+       << problem.scalarsToString()
+       << " "
+       << unparseStrategy(hw, problem, strategy);
+    return ss.str();
 }
 
 Package selectGEMM(const GEMMOptions &options, HWInformation hwInfo, SizeParams sizes,
@@ -242,24 +256,42 @@ Package selectGEMM(const GEMMOptions &options, HWInformation hwInfo, SizeParams 
     /* Call kernel selector */
     EvaluateAuxOutput auxParams;
     std::vector<const kcatalog::Entry*> entries = select(catalog, 1, &matchParams, evalParams, auxParams);
-    if(!kParallelLocal) {
-        auto last_entry = std::remove_if(begin(entries), end(entries), [&](const kcatalog::Entry* e) {
-            GEMMStrategy strategy(hw, stepping);
-            strategy.unroll[LoopM] = e->driverInfo.unroll[LoopM];
-            strategy.unroll[LoopN] = e->driverInfo.unroll[LoopN];
-            parseStrategy(e->strategy, hw, problem, strategy);
-            return !kParallelLocal && strategy.kParallelLocal;
-        });
-        entries.erase(last_entry, end(entries));
+    auto last_entry = std::remove_if(begin(entries), end(entries), [&](const kcatalog::Entry* e) {
+        GEMMStrategy strategy(hw, stepping);
+        strategy.unroll[LoopM] = e->driverInfo.unroll[LoopM];
+        strategy.unroll[LoopN] = e->driverInfo.unroll[LoopN];
+        parseStrategy(e->strategy, hw, problem, strategy);
+        return !kParallelLocal && strategy.kParallelLocal
+          // named barriers are not supported by generateShim
+          && strategy.namedBarriers[LoopM] > 0
+          && strategy.namedBarriers[LoopN] > 0;
+    });
+    entries.erase(last_entry, end(entries));
+    if(!reqs.empty())
+        entries.push_back(nullptr); // Try heuristics if no kernel found
+    if (getVerbose(gemmstone::GEMMVerbose::DebugInfo) >= 4) {
+        for(const kcatalog::Entry *e : entries) {
+            if(e) {
+                GEMMStrategy strategy(hw, stepping);
+                strategy.unroll[LoopM] = e->driverInfo.unroll[LoopM];
+                strategy.unroll[LoopN] = e->driverInfo.unroll[LoopN];
+                parseStrategy(e->strategy, hw, problem, strategy);
+                std::cout << "entry candidate: "
+                          << e->selector.hw << " "
+                          << strategyToString(hw, problem, strategy) << std::endl;
+            } else {
+                if(!reqs.empty())
+                    std::cout << "entry candidate: heuristics\n";
+            }
+        }
     }
-    entries.push_back(nullptr); // Try heuristics if no kernel found
 
     for(const kcatalog::Entry *entry : entries) {
         GEMMStrategy strategy(hw, stepping);
 
         if (entry) {
-            problem.A.setAlignment(std::max(problem.Ta.size(), entry->driverInfo.alignment[0]));
-            problem.B.setAlignment(std::max(problem.Tb.size(), entry->driverInfo.alignment[1]));
+            problem.A.setAlignment(std::max(problem.Ta.paddedSize(), entry->driverInfo.alignment[0]));
+            problem.B.setAlignment(std::max(problem.Tb.paddedSize(), entry->driverInfo.alignment[1]));
 
             /* Prepare strategy parameters */
             strategy.unroll[LoopM] = entry->driverInfo.unroll[LoopM];
@@ -285,7 +317,8 @@ Package selectGEMM(const GEMMOptions &options, HWInformation hwInfo, SizeParams 
                 if (block2DB && strategy.legalBAlignment(problem, 16))
                     problem.B.setAlignment(std::max<int>(problem.B.alignment, 16));
             }
-        } else if (!getStrategyByHeuristics(hw, strategy, localA, localB, problem, hwInfo, sizes, reqs))
+        } else if (!reqs.empty() &&
+                   !getStrategyByHeuristics(hw, strategy, localA, localB, problem, hwInfo, sizes, reqs))
             continue; /* No heuristic strategy found */
 
         strategy.systolicAvailable &= hwInfo.systolicAvailable;
@@ -313,7 +346,15 @@ Package selectGEMM(const GEMMOptions &options, HWInformation hwInfo, SizeParams 
         /* Allow caller to adjust strategy further */
         if (strategyAdjuster) strategyAdjuster(strategy);
 
-        strategy.preflight(hw, problem);
+        try {
+            strategy.preflight(hw, problem);
+        } catch (const std::runtime_error &ex) {
+            if (getVerbose(gemmstone::GEMMVerbose::DebugInfo) >= 2) {
+                std::cout << "preflight failed(" << ex.what() << "):"
+                          << strategyToString(hw, problem, strategy) << std::endl;
+            }
+            continue;
+        }
 
         /* Update problem from strategy */
         if (isPacked(problem.A.layout))
@@ -321,23 +362,9 @@ Package selectGEMM(const GEMMOptions &options, HWInformation hwInfo, SizeParams 
         if (isPacked(problem.B.layout))
             problem.B.packSize = strategy.unroll[LoopN];
 
-        if (getVerbose(gemmstone::GEMMVerbose::DebugInfo) >= 10) {
-            if (entry)
-                std::cout << "Selected microkernel catalog entry: " << entry->str() << std::endl;
-            else
-                std::cout << "Microkernel generated heuristically" << std::endl;
-        }
         if (getVerbose(gemmstone::GEMMVerbose::DebugInfo) >= 2) {
-            std::string result = problem.toString();
-            result.append(" ");
-            result.append(std::to_string(strategy.unroll[LoopM]));
-            result.append(" ");
-            result.append(std::to_string(strategy.unroll[LoopN]));
-            result.append(" ");
-            result.append(problem.scalarsToString());
-            result.append(" ");
-            result.append(unparseStrategy(hw, problem, strategy));
-            std::cout << "attempting kernel: " << result << std::endl;
+            std::cout << "attempting " << (entry ? "db " : "heuristic ")
+                      << "strategy: " << strategyToString(hw, problem, strategy) << std::endl;
         }
 
         try {
@@ -357,13 +384,17 @@ Package selectGEMM(const GEMMOptions &options, HWInformation hwInfo, SizeParams 
                 REG_XEHPC_ISA(ARCH_DISPATCH(XeHPC))
                 REG_XE2_ISA(ARCH_DISPATCH(Xe2))
                 REG_XE3_ISA(ARCH_DISPATCH(Xe3))
+                REG_XE3P_ISA(ARCH_DISPATCH(XE3P_35_10))
+                REG_XE3P_ISA(ARCH_DISPATCH(XE3P_35_11))
+                REG_XE3P_ISA(ARCH_DISPATCH(XE3P_UNKNOWN))
                 default: throw std::runtime_error("Unsupported architecture");
             }
             #undef ARCH_DISPATCH
         } catch (const std::runtime_error &ex) {
             /* Try next strategy */
             if (getVerbose(gemmstone::GEMMVerbose::DebugInfo) >= 2) {
-                std::cout << "strategy failed: " << ex.what() << std::endl;
+                std::cout << "strategy failed(" << ex.what() << "):"
+                          << strategyToString(hw, problem, strategy) << std::endl;
             }
             continue;
         }
@@ -378,15 +409,14 @@ static inline bool getStrategyByHeuristics(HW hw, GEMMStrategy &strategy, bool l
     if (hw < HW::XeHPG) return false;
     if (problem.C.layout == MatrixLayout::T) return false;
 
-    bool systolic = hwInfo.systolicAvailable;
-    bool block2DA = (hw >= HW::XeHPC) && systolic && (problem.A.alignment % 16) == 0;
-    bool block2DB = (hw >= HW::XeHPC) && systolic && (problem.B.alignment % 16) == 0;
+    int min2DAlignmentA = block2DMinAlignment(hw, problem.A, strategy.A, /* asIfBlock2D */ true);
+    int min2DAlignmentB = block2DMinAlignment(hw, problem.B, strategy.B, /* asIfBlock2D */ true);
 
-    problem.A.alignment = std::min<int>(problem.A.alignment, 16);
-    problem.B.alignment = std::min<int>(problem.B.alignment, 16);
+    bool systolic = hwInfo.systolicAvailable;
+    bool block2DA = (hw >= HW::XeHPC) && systolic && (problem.A.alignment % min2DAlignmentA) == 0;
+    bool block2DB = (hw >= HW::XeHPC) && systolic && (problem.B.alignment % min2DAlignmentB) == 0;
 
     auto &s = strategy;
-
     s.ka_load = s.kb_load = 16;
     if (!systolic)
         s.ka_load = s.kb_load = 4;
@@ -403,10 +433,17 @@ static inline bool getStrategyByHeuristics(HW hw, GEMMStrategy &strategy, bool l
 
     } else if (problem.A.layout == MatrixLayout::T) {
         s.A.accessType = AccessType::Block2DTranspose;
-        s.ka_load = 64 / problem.Ta_ext;
+        s.ka_load = 64.f / ceil(( 1.f * problem.Ta) +
+                                (problem.aOffset2D() ? (1.f * problem.Tao) : 0));
+        s.ka_load = utils::roundup_pow2(s.ka_load);
     } else if (problem.A.layout == MatrixLayout::N) {
-        s.A.accessType = AccessType::Block2DVNNI;
-        s.A_copies = 2;
+        if(problem.Ta.isInt4()) {
+            s.A.accessType = AccessType::Block2D;
+            s.A_copies = 2;
+        } else {
+            s.A.accessType = AccessType::Block2DVNNI;
+            s.A_copies = 2;
+        }
     }
 
     if (problem.B.layout == MatrixLayout::Pr) {
@@ -427,6 +464,10 @@ static inline bool getStrategyByHeuristics(HW hw, GEMMStrategy &strategy, bool l
         s.kb_load = 32;
     }
 
+    problem.A.alignment = std::max(min2DAlignmentA,
+                                   block2DMinAlignment(hw, problem.A, strategy.A));
+    problem.B.alignment = std::max(min2DAlignmentB,
+                                   block2DMinAlignment(hw, problem.B, strategy.B));
     s.C.accessType = AccessType::Block;
 
     s.A.base = localA ? AddressBase::createSLM() : AddressBase::createA64(true);
@@ -472,6 +513,9 @@ static inline bool getStrategyByHeuristics(HW hw, GEMMStrategy &strategy, bool l
 
     if (s.wgTile(LoopM) * s.wgTile(LoopN) == 0)
         return false;
+
+    if(s.A.accessType == AccessType::Block2DVNNI)
+        s.ka_load =  s.unroll[LoopN] / problem.Ta_ext;
 
     s.systolic = systolic;
     if (systolic && hw >= HW::XeHPC)

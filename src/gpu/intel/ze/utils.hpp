@@ -31,7 +31,7 @@ status_t init_gpu_hw_info(impl::engine_t *engine, ze_device_handle_t device,
         ze_context_handle_t context, uint32_t &ip_version,
         compute::gpu_arch_t &gpu_arch, compute::gpu_product_t &product,
         uint64_t &native_extensions, bool &mayiuse_systolic,
-        bool &mayiuse_ngen_kernels);
+        bool &mayiuse_ngen_kernels, bool &is_efficient_64bit);
 
 status_t get_module_binary(
         ze_module_handle_t module_handle, xpu::binary_t &binary);
@@ -47,7 +47,8 @@ status_t compile_ocl_module_to_binary(ze_device_handle_t device,
 
 status_t create_kernels(ze_device_handle_t device, ze_context_handle_t context,
         const std::vector<const char *> &kernel_names,
-        const xpu::binary_t &binary, ze_module_handle_t *module_ptr,
+        const xpu::binary_t &binary,
+        std::shared_ptr<xpu::ze::wrapper_t<ze_module_handle_t>> &module_ptr,
         std::vector<ze_kernel_handle_t> &kernels);
 
 } // namespace ze

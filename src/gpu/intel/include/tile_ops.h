@@ -275,6 +275,17 @@ DEF_BLOCK2D_LOAD_STORE(float, uint, 8, 16, u32_m8k16v1, 16, 8)
                 = __builtin_convertvector(t.x[i], __typeof__(t_new.x[i])); \
     } while (0)
 
+#define tile_convert(t, t_new, conversion_func) \
+    do { \
+        _Pragma("unroll") for (int i = 0; i < sizeof(t.x) / sizeof(t.x[0]); \
+                               i++) { \
+            _Pragma("unroll") for (int s = 0; \
+                                   s < sizeof(t.x[0]) / sizeof(t.x[0][0]); \
+                                   s++) t_new.x[i][s] \
+                    = conversion_func(t.x[i][s]); \
+        } \
+    } while (0)
+
 #define tile_copy_to_vec2(t, t_new, type) \
     do { \
         _Pragma("unroll") for (int i = 0; i < sizeof(t.x) / sizeof(t.x[0]); \
@@ -513,6 +524,15 @@ DEF_BLOCK2D_LOAD_STORE(float, uint, 8, 16, u32_m8k16v1, 16, 8)
                 tile_access(*tr, i0, 0, rsg, rbr, rbc, rnbr) \
                         = max(tile_access(t, i0, j, sg, br, bc, nbr), \
                                 tile_access(*tr, i0, 0, rsg, rbr, rbc, rnbr)); \
+            } \
+        } \
+    } \
+    __attribute__((overloadable)) void tile_vbroadcast_add( \
+            tile_type *t, rtile_type tr) { \
+        _Pragma("unroll") for (int j = 0; j < bc * nbc; j++) { \
+            _Pragma("unroll") for (int i0 = 0; i0 < br * nbr; i0 += sg) { \
+                tile_access(*t, i0, j, sg, br, bc, nbr) \
+                        += tile_access(tr, i0, 0, rsg, rbr, rbc, rnbr); \
             } \
         } \
     } \

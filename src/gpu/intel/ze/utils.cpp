@@ -161,7 +161,7 @@ status_t init_gpu_hw_info(impl::engine_t *engine, ze_device_handle_t device,
         ze_context_handle_t context, uint32_t &ip_version,
         compute::gpu_arch_t &gpu_arch, compute::gpu_product_t &product_,
         uint64_t &native_extensions, bool &mayiuse_systolic,
-        bool &mayiuse_ngen_kernels) {
+        bool &mayiuse_ngen_kernels, bool &is_efficient_64bit) {
     using namespace ngen;
     ngen::Product product = LevelZeroCodeGenerator<HW::Unknown>::detectHWInfo(
             context, device);
@@ -186,6 +186,9 @@ status_t init_gpu_hw_info(impl::engine_t *engine, ze_device_handle_t device,
     CHECK(get_ze_device_enabled_native_float_atomics(
             device, native_extensions));
 
+    is_efficient_64bit
+            = LevelZeroCodeGenerator<HW::Unknown>::detectEfficient64Bit(
+                    context, device, getCore(product.family));
     auto status
             = jit::gpu_supports_binary_format(&mayiuse_ngen_kernels, engine);
     if (status != status::success) mayiuse_ngen_kernels = false;
@@ -243,9 +246,14 @@ status_t compile_ocl_module_to_binary(ze_device_handle_t device,
 
 status_t create_kernels(ze_device_handle_t device, ze_context_handle_t context,
         const std::vector<const char *> &kernel_names,
-        const xpu::binary_t &binary, ze_module_handle_t *module_ptr,
+        const xpu::binary_t &binary,
+        std::shared_ptr<xpu::ze::wrapper_t<ze_module_handle_t>> &module_ptr,
         std::vector<ze_kernel_handle_t> &kernels) {
-    CHECK(compile_native_module(module_ptr, device, context, binary));
+    ze_module_handle_t ze_module = nullptr;
+    CHECK(compile_native_module(&ze_module, device, context, binary));
+
+    module_ptr = std::make_shared<xpu::ze::wrapper_t<ze_module_handle_t>>(
+            ze_module);
 
     kernels.resize(kernel_names.size(), nullptr);
     for (size_t i = 0; i < kernel_names.size(); i++) {
