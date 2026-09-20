@@ -213,14 +213,6 @@ struct gen_t : public primitive_t {
                                    !(A_grouped || B_grouped)),
                     VERBOSE_UNSUPPORTED_FEATURE, "grouped scales");
 
-            bool has_systolic
-                    = intel_engine->mayiuse(compute::device_ext_t::
-                                      intel_subgroup_matrix_multiply_accumulate)
-                    || intel_engine->mayiuse(compute::device_ext_t::
-                                    intel_subgroup_split_matrix_multiply_accumulate);
-
-            bool is_integrated = dev_info_->is_integrated();
-
             // Size checks for fused reduction kernels.
             if (with_sum_ab()) {
                 auto mnk = d->m() * d->n() * d->k();
@@ -272,11 +264,8 @@ struct gen_t : public primitive_t {
             auto lda = ld(DNNL_ARG_A);
             auto ldb = ld(DNNL_ARG_B);
             if (swap_ab_) std::swap(lda, ldb);
-            auto product = intel_engine->device_info()->gpu_product();
-            int stepping = dev_info_->stepping_id();
-            auto entries = kernel_desc_.select_kernel(product, stepping,
-                    dev_info_->eu_count(), has_systolic, is_integrated, mode,
-                    problem, alpha(), beta(), m, n, d->k(), lda, ldb, d->ldc(),
+            auto entries = kernel_desc_.select_kernel(*dev_info_, mode, problem,
+                    alpha(), beta(), m, n, d->k(), lda, ldb, d->ldc(),
                     d->batch());
 
             for (auto &entry : entries) {
