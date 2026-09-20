@@ -99,8 +99,9 @@ struct jit_brgemm_amx_uker_base_t : public jit_base_brgemm_kernel_t {
             esp.preserve_vmm = preserve_vmm;
             esp.preserve_p_table = false;
 
-            postops_injector_ = utils::make_unique<po_injector_t>(
-                    this, brg.attr()->post_ops_, bsp, esp);
+            postops_injector_ = utils::make_unique<po_injector_t>(this,
+                    brg.attr()->post_ops_, bsp, esp,
+                    /* inject_sum = */ brg.with_sum);
 
             using namespace dnnl::impl::cpu::binary_injector_utils;
             std::tie(with_binary_per_oc_bcast_, with_binary_per_oc_sp_bcast_,
@@ -180,7 +181,6 @@ private:
     const reg64_t reg_do_post_ops = rbx;
     const reg64_t reg_do_skip_accum = reg_do_post_ops;
     const reg64_t reg_tmp_gpr = rbx;
-    const reg64_t reg_ptr_sum_scale = rbx;
 
     const reg64_savable_t reg_zp_comp_a {regscratchpad_, rbx, r17};
     const reg64_savable_t reg_zp_a_values {regscratchpad_, rbx, r18};
@@ -188,7 +188,6 @@ private:
     const reg64_savable_t reg_zp_c_values {regscratchpad_, rbx, r20};
     const reg64_savable_t reg_src_scales_per_k {regscratchpad_, rbx, r21};
     const reg64_savable_t reg_per_mn_comp {regscratchpad_, rbx, r22};
-    const reg64_t reg_ptr_sum_zp = rbx;
     const reg64_t reg_converted_stride = rsi;
     const reg64_t reg_zp_comp_pad_a = rsi;
 
@@ -532,11 +531,9 @@ private:
             reg64_t reg_base, dim_t offset, reg64_t reg_stride,
             matrix_kind_t mk);
 
-    bool maybe_pre_process_k_tail(brgemm_iteration_t &bi, int bdb,
-            const Tmm &t1, reg64_t reg_base, dim_t offset, reg64_t reg_stride,
+    bool maybe_pre_process_k_tail(brgemm_iteration_t &bi, const Tmm &t1,
+            reg64_t reg_base, dim_t offset, reg64_t reg_stride,
             matrix_kind_t mk, bool use_memadvice);
-
-    bool process_k_tail_only_last_tile();
 
     void pre_process_k_tail_fused_copy_a(brgemm_iteration_t &bi, int bdb,
             const Tmm &t1, reg64_t reg_base, dim_t offset_src, dim_t offset_dst,
@@ -1049,75 +1046,25 @@ void jit_brgemm_amx_uker_base_t::apply_post_ops_to_range(
     const auto ldb_pos = bi.ldi->pos(ldb);
     const auto is_ld_tail = bi.ldi->is_tail(ldb);
 
-    if (brg.with_binary) {
-        if (handle_binary_po_offset_) {
-            for (auto bd = bd_start; bd < bd_finish; bd++) {
-                // We have no way to tell the injector to skip some vectors.
-                // Therefore, we must set parameters correctly for all registers.
-                // TODO: Make it possible to specify "skipped" vectors to injector
-                const auto idx = accm(bd).getIdx();
-                if (is_ld_tail) rhs_arg_params.vmm_tail_idx_.emplace(idx);
-                rhs_arg_params.vmm_idx_to_out_reg.emplace(idx, reg_D);
+    // Sum post-op requires binary parameters to be set.
+    const bool set_for_binary = brg.with_binary && handle_binary_po_offset_;
+    if (set_for_binary || brg.with_sum) {
+        for (auto bd = bd_start; bd < bd_finish; bd++) {
+            // We have no way to tell the injector to skip some vectors.
+            // Therefore, we must set parameters correctly for all registers.
+            // TODO: Make it possible to specify "skipped" vectors to injector
+            const auto idx = accm(bd).getIdx();
+            if (is_ld_tail) rhs_arg_params.vmm_tail_idx_.emplace(idx);
+            rhs_arg_params.vmm_idx_to_out_reg.emplace(idx, reg_D);
 
-                if (!is_out_bd(bi.bdi, bdb, bd)) continue;
+            // Rows that are not stored keep the default zero offset. Sum then
+            // reads the head of `reg_D`, which stays in bounds, and the result
+            // is dropped along with the accumulator.
+            if (!is_out_bd(bi.bdi, bdb, bd)) continue;
 
-                const auto d_offset = D_offset(bi, bdb, bd, ldb_pos);
-                rhs_arg_params.vmm_idx_to_out_elem_off_val.emplace(
-                        idx, d_offset);
-            }
+            const auto d_offset = D_offset(bi, bdb, bd, ldb_pos);
+            rhs_arg_params.vmm_idx_to_out_elem_off_val.emplace(idx, d_offset);
         }
-    }
-
-    const auto sum_injector = [&] {
-        const float *p_sum_scale = &brg.sum_scale;
-        const int32_t *p_sum_zp = &brg.sum_zp;
-        const bool p_sum_scale_reg_set = *p_sum_scale != 1.f;
-        const bool p_sum_zp_reg_set = *p_sum_zp != 0;
-
-        {
-            const auto &zmm_sum_zp = zmm_tmp_2();
-            if (p_sum_zp_reg_set) {
-                mov(reg_ptr_sum_zp, reinterpret_cast<size_t>(p_sum_zp));
-                vcvtdq2ps(zmm_sum_zp, ptr_b[reg_ptr_sum_zp]);
-            }
-            if (p_sum_scale_reg_set)
-                mov(reg_ptr_sum_scale, reinterpret_cast<size_t>(p_sum_scale));
-
-            const auto k_mask = (!is_ld_tail) ? ld_full_mask : ld_tail_mask;
-            const auto zmm_prev_dst = Xbyak::Zmm(0);
-
-            const auto max_d_offset = [&]() {
-                dim_t result = 0;
-                for (auto bd = bd_start; bd < bd_finish; bd++) {
-                    if (!is_out_bd(bi.bdi, bdb, bd)) continue;
-                    result = nstl::max(result, D_offset(bi, bdb, bd, ldb_pos));
-                }
-                return result;
-            }();
-            reg64_savable_guard_t reg_A_guard(
-                    {&reg_long_offt}, max_d_offset > INT_MAX);
-
-            for (auto bd = bd_start; bd < bd_finish; bd++) {
-                if (!is_out_bd(bi.bdi, bdb, bd)) continue;
-
-                auto zmm = accm(bd);
-                const auto d_offset = D_offset(bi, bdb, bd, ldb_pos);
-                auto addr = EVEX_compress_addr_safe(
-                        reg_D, d_offset, reg_long_offt);
-
-                cvt2ps(brg.sum_dt, zmm_prev_dst, addr, true, false, k_mask);
-                if (p_sum_zp_reg_set) vsubps(zmm_prev_dst, zmm_sum_zp);
-                if (!p_sum_scale_reg_set)
-                    vaddps(zmm, zmm_prev_dst);
-                else
-                    vfmadd231ps(zmm, zmm_prev_dst, zword_b[reg_ptr_sum_scale]);
-            }
-        }
-    };
-
-    if (brg.with_sum) {
-        postops_injector_->set_lambda_injector(
-                primitive_kind::sum, sum_injector);
     }
 
     // Using knowledge how "accm" assign zmm registers.
@@ -2074,7 +2021,7 @@ void jit_brgemm_amx_uker_base_t::maybe_tileloadd_nt(
     }
 
     if (maybe_pre_process_k_tail(
-                bi, xdb, t1, reg_base, offset, reg_stride, mk, has_mem_advice))
+                bi, t1, reg_base, offset, reg_stride, mk, has_mem_advice))
         return;
 
     if (load_nt) {
@@ -2186,9 +2133,7 @@ void jit_brgemm_amx_uker_base_t::tdpbxxd(brgemm_iteration_t &bi, int bdb_idx,
     const Tmm &x3 = Tmm(brg.get_B_tensor(ldb_idx, bi.ldi->is_tail(ldb_idx)));
 
     using namespace data_type;
-    if (brg.is_tf32) {
-        tmmultf32ps(x1, x2, x3);
-    } else if (brg.is_bf32 || (brg.dt_a == bf16 && brg.dt_b == bf16)) {
+    if (brg.is_bf32 || (brg.dt_a == bf16 && brg.dt_b == bf16)) {
         tdpbf16ps(x1, x2, x3);
     } else if (brg.dt_a == f16 && brg.dt_b == f16) {
         tdpfp16ps(x1, x2, x3);
@@ -2486,28 +2431,22 @@ void jit_brgemm_amx_uker_base_t::pre_process_k_tail_fused_copy_a(
     if (offset_dst) sub(reg_buf, offset_dst);
 }
 
-bool jit_brgemm_amx_uker_base_t::process_k_tail_only_last_tile() {
-    // Check whether loading from the original A matrix will cause out of bounds exception.
-    // The check is on the last tile on K dim and tile before last on M dim. If
-    // loading that tile exceeds the A matrix, then we need to process K tail
-    // on every M tile.
-    int last_bd_block = brg.bdb_tail == 0 ? brg.bd_block : brg.bdb_tail;
-    return brg.rd_block - brg.rdb_tail <= last_bd_block * brg.reduce_dim;
-}
-
 bool jit_brgemm_amx_uker_base_t::maybe_pre_process_k_tail(
-        brgemm_iteration_t &bi, int bdb, const Tmm &t1, reg64_t reg_base,
-        dim_t offset, reg64_t reg_stride, matrix_kind_t mk,
-        bool use_memadvice) {
+        brgemm_iteration_t &bi, const Tmm &t1, reg64_t reg_base, dim_t offset,
+        reg64_t reg_stride, matrix_kind_t mk, bool use_memadvice) {
     const auto &tloop = imap_[bi.apply_postops];
 
-    bool need_k_tail_processing = mk == matrix_A && brg.amx_wary_k_tail()
+    // With the extendable_k strategy matrix B is zero-padded along the K
+    // dimension, so brgemm reads the full K-tail tile from matrix A and relies
+    // on B's zeros to cancel the columns beyond the valid K range. Reading past
+    // the valid K columns of A, however, pulls in bytes that belong to adjacent
+    // rows of A. If those bytes contain NaN/Inf the identity 'NaN * 0 == 0' no
+    // longer holds and the garbage leaks into otherwise clean output rows. To
+    // avoid this the K-tail of A is copied into a zero-padded scratch buffer
+    // for every M tile (not only the last one) before it is loaded into the
+    // AMX tile.
+    const bool need_k_tail_processing = mk == matrix_A && brg.amx_wary_k_tail()
             && brg.rdb_tail != 0 && tloop.is_last_rdi(bi.rdi);
-
-    if (process_k_tail_only_last_tile()) {
-        need_k_tail_processing &= bi.bdi->idx == tloop.bdis.size() - 1
-                && bdb == bi.bdi->block2() - 1 && bi.last_bsi;
-    }
 
     if (!need_k_tail_processing) return false;
 
@@ -2517,10 +2456,7 @@ bool jit_brgemm_amx_uker_base_t::maybe_pre_process_k_tail(
     if (transform_offset) add(reg_buf, transform_offset);
     mov(reg_converted_stride, zmm_width_in_bytes);
 
-    // reuse transformed data from matrix A for ldi > 0 if using only one tile
-    if (bi.ldi->idx == 0 || !process_k_tail_only_last_tile()) {
-        copy_k_tail_to_wsp(t1, reg_base, offset, reg_stride, use_memadvice);
-    }
+    copy_k_tail_to_wsp(t1, reg_base, offset, reg_stride, use_memadvice);
     // load into tmm from the transformed data.
     tileloadd(t1, ptr[reg_buf + reg_converted_stride]);
 
@@ -3282,7 +3218,7 @@ void jit_brgemm_amx_uker_base_t::generate() {
 
     postamble();
 
-    if (brg.with_eltwise)
+    if (brg.with_eltwise || brg.with_sum)
         postops_injector_->prepare_table(/* generate = */ true);
 
     if (brg.is_fp8_via_convert()) {
