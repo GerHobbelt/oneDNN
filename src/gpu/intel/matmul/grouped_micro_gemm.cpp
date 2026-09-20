@@ -58,6 +58,7 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(impl::engine_t *engine) {
     hw_info.euCount = dev_info->eu_count();
     hw_info.gmdid = dev_info->ip_version();
     hw_info.systolicAvailable = use_systolic_ukernel;
+    hw_info.isEfficient64Bit = dev_info->is_efficient_64bit();
 
     if (hw_info.gmdid == 0) return status::unimplemented;
 
@@ -456,8 +457,13 @@ status_t grouped_micro_gemm_t::pd_t::init(impl::engine_t *engine) {
 
     kernel_ctx_.set_data_type(dst_dt);
 
-    if (gemm_.grfMin > 128 || strategyGRFs_ > 128)
+    const int grf_min = std::max(strategyGRFs_, gemm_.grfMin);
+    const bool is_xe3p = dev_info->gpu_arch() >= compute::gpu_arch_t::xe3p;
+    if (is_xe3p && grf_min > 256) {
+        kernel_ctx_.add_option("-cl-intel-512-GRF-per-thread");
+    } else if (grf_min > 128) {
         kernel_ctx_.add_option("-cl-intel-256-GRF-per-thread");
+    }
 
     def_data_type(kernel_ctx_, src_dt, "SRC");
     def_data_type(kernel_ctx_, wei_dt, "WEI");

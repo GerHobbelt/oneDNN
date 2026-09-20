@@ -235,6 +235,7 @@ status_t micro_fwd_t::pd_t::init_conf_microkernels(impl::engine_t *engine) {
     hw_info.euCount = dev_info->eu_count();
     hw_info.gmdid = dev_info->ip_version();
     hw_info.systolicAvailable = use_systolic_ukernel_;
+    hw_info.isEfficient64Bit = dev_info->is_efficient_64bit();
 
     VDISPATCH_SDPA(
             hw_info.gmdid != 0, "gmdid is 0, microkernels not supported.");
@@ -268,6 +269,14 @@ status_t micro_fwd_t::pd_t::init_conf_microkernels(impl::engine_t *engine) {
     }
     problem.Tc = problem.Tc_ext = Type::f32;
     problem.Ts = problem.Tc;
+
+    // Disable bdpas with unsupported k dim.
+    // TODO: Enable 2D block, masking scale loads.
+    if (problem.nativeBDPAS()) {
+        if (((!problem.Ta.isF4() || !problem.Tb.isF4())
+                    || d->head_size() % 64 == 0))
+            problem.bdpasEnabled = true;
+    }
 
     auto problem_kq = problem;
 
@@ -539,6 +548,7 @@ status_t micro_bwd_t::pd_t::init_conf_microkernels(impl::engine_t *engine) {
     hw_info.euCount = dev_info->eu_count();
     hw_info.gmdid = dev_info->ip_version();
     hw_info.systolicAvailable = use_systolic_ukernel_;
+    hw_info.isEfficient64Bit = dev_info->is_efficient_64bit();
 
     VDISPATCH_SDPA(
             hw_info.gmdid != 0, "gmdid is 0, microkernels not supported.");
@@ -1250,8 +1260,14 @@ status_t micro_fwd_params_t::get_kernel_ctx(
     kernel_ctx.add_custom_header("gemm_vs.h",
             micro::generateShim(gemm_vs, HostLanguage::OpenCL_C, shimOptions));
 
-    if (gemm_kq.grfMin > 128 || gemm_vs.grfMin > 128)
+    const int grf_min = std::max(gemm_kq.grfMin, gemm_vs.grfMin);
+    const auto product = ngen::npack::decodeHWIPVersion(hw_info.gmdid);
+    const bool is_xe3p = getCore(product.family) >= ngen::HW::Xe3p;
+    if (is_xe3p && grf_min > 256) {
+        kernel_ctx.add_option("-cl-intel-512-GRF-per-thread");
+    } else if (grf_min > 128) {
         kernel_ctx.add_option("-cl-intel-256-GRF-per-thread");
+    }
 
     return status::success;
 }
@@ -1459,9 +1475,15 @@ status_t micro_bwd_params_t::get_kernel_ctx(
             gemm_qdSt, HostLanguage::OpenCL_C, shimOptions);
     kernel_ctx.add_custom_header("gemm_qdSt.h", std::move(gemm_qdSt_header));
 
-    if (gemm_kq.grfMin > 128 || gemm_vs.grfMin > 128 || gemm_vtdA.grfMin > 128
-            || gemm_ktq.grfMin > 128 || gemm_qdSt.grfMin > 128)
+    const int grf_min = std::max({gemm_kq.grfMin, gemm_vs.grfMin,
+            gemm_vtdA.grfMin, gemm_ktq.grfMin, gemm_qdSt.grfMin});
+    const auto product = ngen::npack::decodeHWIPVersion(hw_info.gmdid);
+    const bool is_xe3p = getCore(product.family) >= ngen::HW::Xe3p;
+    if (is_xe3p && grf_min > 256) {
+        kernel_ctx.add_option("-cl-intel-512-GRF-per-thread");
+    } else if (grf_min > 128) {
         kernel_ctx.add_option("-cl-intel-256-GRF-per-thread");
+    }
 
     return status::success;
 }

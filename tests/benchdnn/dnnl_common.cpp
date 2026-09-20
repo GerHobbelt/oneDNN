@@ -52,6 +52,7 @@
 
 #include "utils/cold_cache.hpp"
 #include "utils/dnnl_query.hpp"
+#include "utils/execution_mode.hpp"
 #include "utils/fill.hpp"
 #include "utils/stream_kind.hpp"
 
@@ -384,51 +385,13 @@ int execute_and_wait(perf_function_t &exec_func, const dnnl_engine_t &engine,
     TIME_EXECUTE(execute_unmap_args(args, dnnl_args));
 
     dnnl_status_t status = dnnl_runtime_error;
-    if (is_gpu(engine) && execution_mode == execution_mode_t::graph) {
-#if DNNL_GPU_RUNTIME == DNNL_RUNTIME_DPCPP
-        void *queue_ptr;
-        DNN_SAFE(dnnl_sycl_interop_stream_get_queue(stream, &queue_ptr), CRIT);
-        ::sycl::queue queue = *static_cast<::sycl::queue *>(queue_ptr);
-        if (queue.get_device().get_backend()
-                != ::sycl::backend::ext_oneapi_level_zero) {
-            BENCHDNN_PRINT(0, "%s %s\n",
-                    "[ERROR] SYCL graph execution is only available on Level "
-                    "Zero backend; currently using:",
-                    ::sycl::detail::get_backend_name_no_vendor(
-                            queue.get_device().get_backend())
-                            .data());
-            if (res) res->state = FAILED;
-            return FAIL;
-        }
-
-        BENCHDNN_PRINT(
-                2, "%s\n", "[INFO] Using experimental SYCL graph execution.");
-        ::sycl::ext::oneapi::experimental::command_graph graph {
-                queue.get_context(), queue.get_device(),
-                {::sycl::ext::oneapi::experimental::property::graph::
-                                assume_buffer_outlives_graph {}}};
-
-        try {
-            graph.begin_recording(queue);
-            status = exec_func(stream, dnnl_args);
-            graph.end_recording(queue);
-            DNN_SAFE(dnnl_stream_wait(stream), CRIT);
-
-            auto exec = graph.finalize();
-            TIME_EXECUTE(queue.ext_oneapi_graph(exec).wait());
-        } catch (const std::exception &e) {
-            BENCHDNN_PRINT(0, "%s %s\n",
-                    "[ERROR] SYCL graph execution exception:", e.what());
-            if (res) res->state = FAILED;
-            return FAIL;
-        }
-#else
-        BENCHDNN_PRINT(0, "%s\n",
-                "[ERROR] Graph execution is only available on SYCL runtime "
-                "with Level Zero backend.");
-        if (res) res->state = FAILED;
-        return FAIL;
-#endif
+    if (use_sycl_graph_exec(engine)) {
+        std::function<void()> record_fn
+                = std::bind(exec_func, std::ref(stream), std::cref(dnnl_args));
+        // TIME_EXECUTE is done inside this call.
+        int st = execute_in_graph_mode(stream, record_fn, res);
+        // Update status only on success.
+        if (st == OK) status = dnnl_success;
     } else {
         stream_staller_t staller(stream);
         TIME_EXECUTE(status = exec_func(stream, dnnl_args));
@@ -898,6 +861,16 @@ void skip_unimplemented_binary_po(const attr_t &attr, res_t *res) {
             return;
         }
     }
+
+    std::vector<dnnl_data_type_t> dts;
+    for (int i = 0; i < po.len(); i++) {
+        const auto &e = po.entry[i];
+        if (!e.is_binary_kind()) continue;
+
+        dts.push_back(e.binary.src1_dt);
+        if (e.is_binary_kind_with_ternary_op()) dts.push_back(e.binary.src2_dt);
+    }
+    skip_unimplemented_data_type(dts, FLAG_INF, res);
 }
 
 void skip_unimplemented_prelu_po(
@@ -1698,32 +1671,6 @@ memory_kind_ext_t str2memory_kind(const char *str) {
     return memory_kind_ext_t::usm;
 }
 
-const char *execution_mode2str(execution_mode_t mode) {
-#define EXECUTION_MODE_TO_STR(name, ...) \
-    if (execution_mode_t::name == mode) return #name;
-
-    EXECUTION_MODE_TO_STR(direct);
-    EXECUTION_MODE_TO_STR(graph);
-#undef EXECUTION_MODE_STR
-
-    BENCHDNN_PRINT(0, "%s", "Error: execution mode value is not recognized.\n");
-    SAFE_V(FAIL);
-    return "";
-}
-
-execution_mode_t str2execution_mode(const char *str) {
-#define STR_TO_EXECUTION_MODE(name, ...) \
-    if (!strcasecmp(#name, str)) return execution_mode_t::name;
-
-    STR_TO_EXECUTION_MODE(direct);
-    STR_TO_EXECUTION_MODE(graph);
-#undef STR_TO_EXECUTION_MODE
-
-    BENCHDNN_PRINT(0, "%s", "Error: execution mode value is not recognized.\n");
-    SAFE_V(FAIL);
-    return execution_mode_t::direct;
-}
-
 float reorder_rescale_factor() {
     float factor = 1.f;
 #if DNNL_CPU_RUNTIME != DNNL_RUNTIME_NONE
@@ -1980,7 +1927,8 @@ int init_ref_memory_args_default_case(int exec_arg, dnn_mem_t &mem,
         }
     } else if (is_scales_arg) {
         int local_exec_arg = exec_arg ^ DNNL_ARG_ATTR_SCALES;
-        TIME_FILL(SAFE(fill_scales(attr, local_exec_arg, mem, ref_mem), WARN));
+        TIME_FILL(SAFE(
+                fill_scales(attr, local_exec_arg, mem, ref_mem, res), WARN));
     } else if (is_zero_point_arg) {
         int local_exec_arg = exec_arg ^ DNNL_ARG_ATTR_ZERO_POINTS;
         TIME_FILL(SAFE(

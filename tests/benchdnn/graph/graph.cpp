@@ -25,6 +25,7 @@
 #include "dnnl_common.hpp"
 #include "graph.hpp"
 #include "ref_partition.hpp"
+#include "utils/execution_mode.hpp"
 #include "utils/parser.hpp"
 #include "utils/stream_kind.hpp"
 
@@ -598,6 +599,22 @@ int skip_unimplemented_memory_kind(res_t *res) {
     return OK;
 }
 
+int skip_unimplemented_execution_mode(
+        const deserialized_graph_t &dg, const engine_t &eng, res_t *res) {
+    if (use_sycl_graph_exec(eng)
+            && (dg.has_backward_op()
+                    || dg.get_recognized_pattern()
+                            == graph_recognized_pattern_t::sdpa_bwd)) {
+        BENCHDNN_PRINT(2, "%s\n",
+                "[INFO]: Skip backward ops and patterns for SYCL graph "
+                "execution mode.");
+        res->state = SKIPPED;
+        res->reason = reason_t::skip_execution_mode;
+        return OK;
+    }
+    return OK;
+}
+
 int doit(const prb_t *prb, res_t *res) {
     if (bench_mode == bench_mode_t::list) return res->state = LISTED, OK;
 
@@ -617,8 +634,10 @@ int doit(const prb_t *prb, res_t *res) {
     if (res->state == SKIPPED) return OK;
 
     const dnnl::engine &eng = get_graph_engine();
+    stream_t strm(eng);
 
-    stream_t strm {get_graph_engine()};
+    skip_unimplemented_execution_mode(dg, eng, res);
+    if (res->state == SKIPPED) return OK;
 
     // mark the output logical tensors of partition as ANY layout enabled
     std::unordered_set<size_t> id_to_set_any_layout;
@@ -766,21 +785,12 @@ int doit(const prb_t *prb, res_t *res) {
         graph_mem_mgr.start_graph_mem_check();
         BENCHDNN_PRINT(3, "[INFO]: Start execution of partition #%zd.\n", i);
 
-        // TODO: consolidate with primitives.
-        if (use_sycl_graph_exec()) {
-#if DNNL_GPU_RUNTIME == DNNL_RUNTIME_SYCL
-            ::sycl::queue queue = dnnl::sycl_interop::get_queue(strm);
-            SAFE(sycl_graph_ctx::validate_backend(queue, res), FAIL);
-
+        if (use_sycl_graph_exec(eng)) {
             std::function<void()> record_fn = std::bind(
                     compiled_partition_executor, c_partitions[i - idx_offset],
                     std::ref(strm), input_ts, output_ts,
                     scratchpad_ts_all[i - idx_offset]);
-            auto exec = sycl_graph_ctx::record_and_finalize(
-                    strm, queue, record_fn, res);
-            if (!exec) return FAIL;
-            SAFE(sycl_graph_ctx::replay(queue, *exec, res), FAIL);
-#endif
+            SAFE(execute_in_graph_mode(strm, record_fn, res), WARN);
         } else {
             stream_staller_t staller(strm);
             // Need following clean-up steps as the memories have been mappped

@@ -698,6 +698,22 @@ bool str2bool(const std::string &str) {
     return false;
 }
 
+execution_mode_t str2execution_mode(const std::string &str) {
+    auto s = utils::lowercase(str);
+    if (s == "direct") {
+        return execution_mode_t::direct;
+    } else if (s == "graph") {
+        return execution_mode_t::graph;
+    } else if (s == "native_graph") {
+        return execution_mode_t::native_graph;
+    } else {
+        BENCHDNN_PRINT(
+                0, "%s", "Error: execution mode value is not recognized.\n");
+        SAFE_V(FAIL);
+    }
+    return execution_mode_t::direct;
+}
+
 } // namespace parsers
 
 // vector types
@@ -1837,10 +1853,14 @@ static bool parse_execution_mode(
               "directly.\n"
               "    * `graph` to execute the primitive using a graph backend.\n"
               "          Currently limited to the experimental SYCL Graph on "
-              "DPC++ builds.\n";
-    bool parsed = parse_single_value_option(execution_mode,
-            execution_mode_t::direct, str2execution_mode, str, option_name,
-            help);
+              "DPC++ builds.\n"
+              "    * `native_graph` to execute the primitive using a graph "
+              "backend capturing command buffers directly.\n          "
+              "Currently limited to the experimental SYCL Graph on DPC++ "
+              "builds.\n";
+    bool parsed
+            = parse_single_value_option(execution_mode, default_execution_mode,
+                    parsers::str2execution_mode, str, option_name, help);
 
 #if !defined(DNNL_WITH_SYCL)
     if (parsed) {

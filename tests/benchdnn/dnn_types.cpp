@@ -38,6 +38,7 @@
 #include "dnnl_memory.hpp"
 #include "utils/cold_cache.hpp"
 #include "utils/dims.hpp"
+#include "utils/execution_mode.hpp"
 #include "utils/fill.hpp"
 #include "utils/parser.hpp"
 #include "utils/stream_kind.hpp"
@@ -837,6 +838,14 @@ int attr_t::post_ops_t::prelu_index() const {
     return -1;
 }
 
+dnnl_scratchpad_mode_t attr_t::get_default_scratchpad_mode() {
+    if (has_bench_mode_modifier(mode_modifier_t::par_create)
+            || execution_mode == execution_mode_t::native_graph) {
+        return dnnl_scratchpad_mode_user;
+    }
+    return dnnl_scratchpad_mode_library;
+}
+
 std::ostream &operator<<(std::ostream &s, const policy_t &policy) {
     s << attr_t::policy2str(policy);
     return s;
@@ -1146,7 +1155,8 @@ std::ostream &operator<<(std::ostream &s, memory_kind_ext_t memory_kind) {
 
 std::ostream &dump_global_params(std::ostream &s) {
     // Need to dump mode and modifiers in front of the driver name to make all
-    // updated default values take effect before parsing a state of a problem.
+    // updated default values (at least, scratchpad) take effect before parsing
+    // a state of a problem.
     if (canonical || bench_mode != default_bench_mode)
         s << "--mode=" << bench_mode << " ";
     // Don't dump modifiers if F or S mode is used to keep the repro simple.
@@ -1165,6 +1175,12 @@ std::ostream &dump_global_params(std::ostream &s) {
             || (bench_mode != bench_mode_t::perf_sim
                     && fix_times_per_prb != default_fix_times_per_prb))
         s << "--fix-times-per-prb=" << fix_times_per_prb << " ";
+
+    // Need to dump execution_mode in front of the driver name to make all
+    // updated default values (scratchpad) take effect before parsing a state of
+    // a problem.
+    if (canonical || execution_mode != default_execution_mode)
+        s << "--execution-mode=" << execution_mode << " ";
 
     s << "--" << driver_name << " ";
     if (canonical) s << "--canonical=" << bool2str(canonical) << " ";
@@ -1197,8 +1213,6 @@ std::ostream &dump_global_params(std::ostream &s) {
         s << "--cold-cache=" << cold_cache_input << " ";
     if (canonical || !buffer_prefix.empty())
         s << "--buffer-prefix=" << buffer_prefix << " ";
-    if (canonical || execution_mode != execution_mode_t::direct)
-        s << "--execution-mode=" << execution_mode2str(execution_mode) << " ";
 
     return s;
 }

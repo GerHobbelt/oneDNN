@@ -215,6 +215,9 @@ Package selectGEMM(const GEMMOptions &options, HWInformation hwInfo, SizeParams 
     matchParams.nExtraReqs = int(reqs.size());
     matchParams.extraReqs = reqs.data();
 
+    if (hw == ngen::HW::Xe3p && !hwInfo.isEfficient64Bit)
+        matchParams.selector.hw = kcatalog::HWTagXeHPC;
+
     auto tags = const_cast<char *>(matchParams.tags);
     while (*tags)
         tags++;
@@ -238,6 +241,7 @@ Package selectGEMM(const GEMMOptions &options, HWInformation hwInfo, SizeParams 
 
     /* Generate interface */
     InterfaceHandler interface = effOptions.generateInterface(hw);
+    interface.setEfficient64Bit(hwInfo.isEfficient64Bit);
 
     kcatalog::Catalog catalog = [&]() {
         if (localA)
@@ -311,6 +315,10 @@ Package selectGEMM(const GEMMOptions &options, HWInformation hwInfo, SizeParams 
                     problem.A.setAlignment(std::max<int>(problem.A.alignment, 16));
                 if (block2DB && strategy.legalBAlignment(problem, 16))
                     problem.B.setAlignment(std::max<int>(problem.B.alignment, 16));
+            }
+            if (hw == ngen::HW::Xe3p && !hwInfo.isEfficient64Bit) {
+                // Use XeHPC banking if reusing XeHPC strategies (legacy mode)
+                strategy.raHW = ngen::HW::XeHPC;
             }
         } else if (!reqs.empty() &&
                    !getStrategyByHeuristics(hw, strategy, localA, localB, problem, hwInfo, sizes, reqs))
@@ -503,13 +511,13 @@ static inline bool getStrategyByHeuristics(HW hw, GEMMStrategy &strategy, bool l
         default: break;
     }
 
-    if(block2DA) {
+    if(block2DA && !localA) {
         problem.A.alignment = std::min(problem.A.alignment,
                                         static_cast<uint8_t>(block2DMinAlignment(hw, problem.A, strategy.A)));
     } else {
         problem.A.setAlignment(std::min<uint8_t>(problem.A.alignment, s.unroll[LoopM] * problem.Ta));
     }
-    if(block2DB) {
+    if(block2DB && !localB) {
         problem.B.alignment = std::min(problem.B.alignment,
                                         static_cast<uint8_t>(block2DMinAlignment(hw, problem.B, strategy.B)));
     } else {
@@ -526,8 +534,12 @@ static inline bool getStrategyByHeuristics(HW hw, GEMMStrategy &strategy, bool l
     }
 
     s.systolic = systolic;
-    if (systolic && hw >= HW::XeHPC)
+    if (systolic && hw >= HW::XeHPC) {
         s.extendedAtomicFMA = s.atomicFMA = true;
+        if (hw >= HW::Xe3p && problem.product.family >= ngen::ProductFamily::CRI) {
+            s.kChain = 2;
+        }
+    }
     s.registerScheme = GEMMStrategy::VAvoid;
 
     // TODO: Refine GRF limits further. This should be based on the
@@ -552,6 +564,10 @@ static inline bool getStrategyByHeuristics(HW hw, GEMMStrategy &strategy, bool l
 
     if (hw == HW::Xe2 || hw == HW::Xe3)
         s.raHW = HW::XeHPC;
+    // Use XeHPC banking if reusing XeHPC strategies (legacy mode)
+    if (hw == ngen::HW::Xe3p && !hwInfo.isEfficient64Bit) {
+        s.raHW = ngen::HW::XeHPC;
+    }
 
     adjustStrategy(hw, problem, strategy);
 
