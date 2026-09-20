@@ -1,5 +1,6 @@
 /*******************************************************************************
 * Copyright 2022-2024, 2026 Arm Ltd. and affiliates
+* Copyright 2026 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -33,8 +34,10 @@ struct post_ops_fallback_t {
 
     // init the post_ops_fallback_t. Note that this function modifies the passed in
     // post ops by setting the preferred memory formats
-    status_t init(engine_t *engine, post_ops_t &post_ops,
+    status_t init(const engine_t *engine, post_ops_t &post_ops,
             const memory_desc_t &dst_md, int post_op_start_index = 0);
+
+    status_t init_primitives(engine_t *engine);
 
     bool has_sum() const { return sum_index >= 0; }
 
@@ -44,13 +47,13 @@ struct post_ops_fallback_t {
             const exec_ctx_t &ctx, void *src, void *dst = nullptr) const;
 
 private:
-    status_t create_binary_primitive(engine_t *engine,
+    status_t create_binary_pd(const engine_t *engine,
             const binary_desc_t &binary_desc,
-            std::shared_ptr<primitive_t> &primitive) const;
+            std::shared_ptr<primitive_desc_t> &primitive_desc) const;
 
-    status_t create_eltwise_primitive(engine_t *engine,
+    status_t create_eltwise_pd(const engine_t *engine,
             const eltwise_desc_t &eltwise_desc,
-            std::shared_ptr<primitive_t> &primitive) const;
+            std::shared_ptr<primitive_desc_t> &primitive_desc) const;
 
     status_t execute_binary(const exec_ctx_t &ctx, const primitive_t *post_op,
             const void *src0, const void *src1, const void *src2, void *dst,
@@ -65,6 +68,8 @@ private:
     // number of post ops which were fused.
     int post_op_start_index_ = 0;
     data_type_t dst_data_type;
+    // Vector of primitive descriptors used to create the post op primitives.
+    std::vector<std::shared_ptr<primitive_desc_t>> post_op_pds;
     // Vector of primitives used to execute the post ops.
     std::vector<std::shared_ptr<primitive_t>> post_op_primitives;
 };

@@ -1,5 +1,6 @@
 /*******************************************************************************
 * Copyright 2021-2022, 2024-2026 Arm Ltd. and affiliates
+* Copyright 2026 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -30,6 +31,9 @@ status_t acl_inner_product_fwd_t::init(engine_t *engine) {
     inner_product_op_->configure(&aip.src_tensor_info, &aip.wei_tensor_info,
             aip.with_bias ? &aip.bia_tensor_info : nullptr,
             &aip.dst_tensor_info, aip.fc_info, aip.weights_info);
+
+    post_ops_ = pd()->post_ops;
+    CHECK(post_ops_.init_primitives(engine));
 
     return status::success;
 }
@@ -86,12 +90,12 @@ status_t acl_inner_product_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
     inner_product_op_->run(run_pack);
 
     void *dst = dst_tensor.buffer();
-    CHECK(pd()->post_ops.execute(ctx, dst));
+    CHECK(post_ops_.execute(ctx, dst));
 
     return status::success;
 }
 
-status_t acl_inner_product_fwd_t::pd_t::init(engine_t *engine) {
+status_t acl_inner_product_fwd_t::pd_t::init(const engine_t *engine) {
     using namespace data_type;
     using smask_t = primitive_attr_t::skip_mask_t;
     const format_kind_t weights_format_kind_received = weights_md_.format_kind;
@@ -126,7 +130,7 @@ status_t acl_inner_product_fwd_t::pd_t::init(engine_t *engine) {
 }
 
 status_t acl_inner_product_fwd_t::pd_t::init_conf_ip(
-        engine_t *engine, format_kind_t weights_format_kind_received) {
+        const engine_t *engine, format_kind_t weights_format_kind_received) {
 
     const int ndims = src_md()->ndims;
 

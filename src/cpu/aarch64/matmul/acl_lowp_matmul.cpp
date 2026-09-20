@@ -1,5 +1,6 @@
 /*******************************************************************************
 * Copyright 2024-2026 Arm Ltd. and affiliates
+* Copyright 2026 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -40,7 +41,7 @@ const std::vector<lowp_matmul_key_t> lowp_matmul_keys = {
         memory_tracking::names::key_gemm_mm_signed_output,
 };
 } // namespace
-status_t acl_lowp_matmul_t::pd_t::init(engine_t *engine) {
+status_t acl_lowp_matmul_t::pd_t::init(const engine_t *engine) {
     VDISPATCH_MATMUL(set_default_formats(), "failed to set default formats");
     using smask_t = primitive_attr_t::skip_mask_t;
     VDISPATCH_MATMUL(attr()->has_default_values(smask_t::scales
@@ -293,6 +294,9 @@ status_t acl_lowp_matmul_t::init(engine_t *engine) {
         }
     }
 
+    fallback_post_ops_ = pd()->fallback_post_ops;
+    CHECK(fallback_post_ops_.init_primitives(engine));
+
     return status::success;
 }
 
@@ -406,7 +410,7 @@ status_t acl_lowp_matmul_t::execute(const exec_ctx_t &ctx) const {
     // these are in-place so that dst=src. However, when there is a non-fused
     // sum, we set dst to be the tensor where data to be summed is stored.
     void *dst_post_ops;
-    if (pd()->fallback_post_ops.has_sum() && !pd()->almc_.sum_is_fused) {
+    if (fallback_post_ops_.has_sum() && !pd()->almc_.sum_is_fused) {
         if (pd()->almc_.dst_is_s8) {
             dst_post_ops = dst_cast_tensor.buffer();
         } else {
@@ -416,7 +420,7 @@ status_t acl_lowp_matmul_t::execute(const exec_ctx_t &ctx) const {
         dst_post_ops = src_post_ops;
     }
     status_t post_ops_status
-            = pd()->fallback_post_ops.execute(ctx, src_post_ops, dst_post_ops);
+            = fallback_post_ops_.execute(ctx, src_post_ops, dst_post_ops);
 
     // free() here tells ACL it can no longer use it, it does not deallocate
     src_tensor.allocator()->free();

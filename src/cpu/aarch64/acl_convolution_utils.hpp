@@ -1,5 +1,6 @@
 /*******************************************************************************
 * Copyright 2020-2026 Arm Ltd. and affiliates
+* Copyright 2026 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -83,7 +84,7 @@ using conv_key_t = decltype(memory_tracking::names::key_gemm_tmp_buffer);
 
 template <typename op_t, typename post_ops_t>
 status_t init_scratchpad(op_t &conv, memory_tracking::registrar_t &scratchpad,
-        const std::map<int, conv_key_t> &conv_keys, engine_t *engine,
+        const std::map<int, conv_key_t> &conv_keys, const engine_t *engine,
         post_ops_t &post_ops, dnnl::impl::post_ops_t &attr_post_ops,
         arm_compute::ActivationLayerInfo &act_info, bool &use_dst_acc_for_sum,
         const dnnl::impl::memory_desc_t &dst_md) {
@@ -119,7 +120,8 @@ template <typename conv_obj_t, typename conv_pd_t, typename src_data_t,
         typename bia_data_t = src_data_t>
 status_t execute_forward_conv_acl(const exec_ctx_t &ctx,
         conv_obj_t *acl_conv_obj, const conv_pd_t *pd,
-        const std::map<int, conv_key_t> &conv_keys) {
+        const std::map<int, conv_key_t> &conv_keys,
+        const post_ops_fallback_t &post_ops) {
 
     auto src_base = CTX_IN_MEM(const src_data_t *, DNNL_ARG_SRC);
     auto wei_base = CTX_IN_MEM(const wei_data_t *, DNNL_ARG_WEIGHTS);
@@ -186,7 +188,7 @@ status_t execute_forward_conv_acl(const exec_ctx_t &ctx,
     acl_conv_obj->conv.run(pack);
 
     void *dst = dst_tensor.buffer();
-    CHECK(pd->post_ops.execute(ctx, dst));
+    CHECK(post_ops.execute(ctx, dst));
 
     return status::success;
 }
@@ -194,8 +196,9 @@ status_t execute_forward_conv_acl(const exec_ctx_t &ctx,
 template <typename conv_obj_t, typename conv_pd_t, typename src_data_t,
         typename wei_data_t = src_data_t, typename dst_data_t = src_data_t,
         typename bia_data_t = src_data_t>
-status_t execute_forward_conv_acl(
-        const exec_ctx_t &ctx, conv_obj_t &acl_conv_obj, const conv_pd_t *pd) {
+status_t execute_forward_conv_acl(const exec_ctx_t &ctx,
+        conv_obj_t &acl_conv_obj, const conv_pd_t *pd,
+        const post_ops_fallback_t &post_ops) {
     bool with_bias = pd->acp_.with_bias;
     bool use_dst_acc_for_sum = pd->acp_.use_dst_acc_for_sum;
 
@@ -231,7 +234,7 @@ status_t execute_forward_conv_acl(
     if (with_bias) { acl_conv_obj.bia_tensor.allocator()->free(); }
 
     void *dst = acl_conv_obj.dst_tensor.buffer();
-    status_t status = pd->post_ops.execute(ctx, dst);
+    status_t status = post_ops.execute(ctx, dst);
 
     acl_conv_obj.dst_tensor.allocator()->free();
 

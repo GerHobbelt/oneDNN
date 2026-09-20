@@ -156,14 +156,7 @@ constexpr Xbyak::Operand::Code abi_not_param_reg =
 #endif
 
 class jit_generator_t : public Xbyak::MmapAllocator,
-                        public Xbyak::CodeGenerator,
-                        public c_compatible {
-public:
-    using c_compatible::operator new;
-    using c_compatible::operator new[];
-    using c_compatible::operator delete;
-    using c_compatible::operator delete[];
-
+                        public Xbyak::CodeGenerator {
 private:
     const size_t xmm_len = 16;
 #ifdef _WIN32
@@ -2805,7 +2798,7 @@ public:
 private:
     const cpu_isa_t max_cpu_isa_;
     const Xbyak::uint8 *getCode() {
-        this->ready();
+        this->readyRE();
         if (!is_initialized()) return nullptr;
         const Xbyak::uint8 *code = CodeGenerator::getCode();
         register_jit_code(code, getSize());

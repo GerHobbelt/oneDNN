@@ -1,5 +1,6 @@
 /*******************************************************************************
 * Copyright 2021-2026 Arm Ltd. and affiliates
+* Copyright 2026 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -61,10 +62,13 @@ status_t acl_matmul_t::init(engine_t *engine) {
                 amp_.gemm_info.activation_info());
     }
 
+    post_ops_ = pd()->post_ops;
+    CHECK(post_ops_.init_primitives(engine));
+
     return status::success;
 }
 
-status_t acl_matmul_t::pd_t::init(engine_t *engine) {
+status_t acl_matmul_t::pd_t::init(const engine_t *engine) {
     using smask_t = primitive_attr_t::skip_mask_t;
     const bool is_fp32_ok
             = utils::everyone_is(data_type::f32, src_md()->data_type,
@@ -385,7 +389,7 @@ status_t acl_matmul_t::execute_forward(const exec_ctx_t &ctx) const {
     }
 
     void *dst = dst_tensor.buffer();
-    status = pd()->post_ops.execute(ctx, dst);
+    status = post_ops_.execute(ctx, dst);
 
     return status;
 }

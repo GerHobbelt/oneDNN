@@ -1880,14 +1880,18 @@ void CopyPlan::planEmulatedBF8ToBF(CopyInstruction &i)
     // shl          y:uw    x:ub    8               /* already done */
     // asr          y:w     y:w     3
     // and          y:uw    y:uw    0x8FFF
+    // cmp (ge)f0   null:bf (abs)y:bf 0x0F80:bf     /* Inf/NaN check */
     // mul          y:bf    y:bf    0x7780:bf
+    // (f0) or      y:uw    y:uw    0x7F80          /* Preserve Inf/NaNs */
 
-    auto ie = splitMultiple<3>(i);
+    auto ie = splitMultiple<5>(i);
 
     auto y = i.dst, yUW = y, yW = y;
     yUW.type = DataType::uw;
     yW.type = DataType::w;
     y.type = DataType::bf;
+
+    auto f = newFlag(i.simd);
 
     ie[0]->op = Opcode::asr;
     ie[0]->src0 = ie[0]->dst = yW;
@@ -1897,9 +1901,23 @@ void CopyPlan::planEmulatedBF8ToBF(CopyInstruction &i)
     ie[1]->src0 = ie[1]->dst = yUW;
     ie[1]->src1 = 0x8FFF;
 
-    ie[2]->op = Opcode::mul;
-    ie[2]->src0 = ie[2]->dst = y;
-    ie[2]->src1 = bfImmediate(0x7780, false);
+    ie[2]->op = Opcode::cmp;
+    ie[2]->src0 = abs(y);
+    ie[2]->src1 = bfImmediate(0x0F80, false);
+    ie[2]->dst = CopyOperand();
+    ie[2]->dst.stride = y.stride;
+    ie[2]->dst.type = DataType::bf;
+    ie[2]->cmod = ConditionModifier::ge;
+    ie[2]->flag = f;
+
+    ie[3]->op = Opcode::mul;
+    ie[3]->src0 = ie[3]->dst = y;
+    ie[3]->src1 = bfImmediate(0x7780, false);
+
+    ie[4]->op = Opcode::or_;
+    ie[4]->src0 = ie[4]->dst = yUW;
+    ie[4]->src1 = 0x7F80;
+    ie[4]->flag = f;
 }
 
 // Emulation sequence for hf8->hf conversion.
@@ -3127,7 +3145,7 @@ CopyOperand CopyPlan::zipImmediates(const CopyOperand &o1, const CopyOperand &o2
             pattern |= pattern << bits;
         if (v1 <= 0xF && v2 <= 0xF)
             return ngen::Immediate::uv(pattern);
-        else if (o1.type == DataType::w && v1 + 8 <= 0xF && v2 + 8 <= 0xF)
+        else if (o1.type == DataType::w && (uint16_t)(v1 + 8) <= 0xF && (uint16_t)(v2 + 8) <= 0xF)
             return ngen::Immediate::v(pattern);
     }
 
@@ -3765,7 +3783,7 @@ int CopyPlan::cycleCount() const
 
 void CopyPlan::dump(std::ostream &os, int n, bool sortInfo) const
 {
-    for (int i = 0; i < std::min<int>(n, insns.size()); ++i) {
+    for (int i = 0; i < std::min(n, (int)insns.size()); ++i) {
         insns[i].dump(os, *this, sortInfo);
         os << std::endl;
     }
