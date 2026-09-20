@@ -105,7 +105,7 @@ place immediately after the parsing and subsequent attempts to set the hints
 result in a runtime error.
 
 ### --ctx-init
-`--ctx-init=MAX_CONCURENCY[:CORE_TYPE[:THREADS_PER_CORE]]` specifies the
+`--ctx-init=MAX_CONCURRENCY[:CORE_TYPE[:THREADS_PER_CORE]]` specifies the
 threading context for a testing object creation.
 * `MAX_CONCURRENCY` is a
   positive integer value or `auto` (default) and specifies the maximum number of
@@ -117,7 +117,7 @@ threading context for a testing object creation.
   enable (value `2`) or disable (value `1`) hyper-threading (TBB runtime only).
 
 ### --ctx-exe
-`--ctx-exe=MAX_CONCURENCY[:CORE_TYPE[:THREADS_PER_CORE]]` specifies the
+`--ctx-exe=MAX_CONCURRENCY[:CORE_TYPE[:THREADS_PER_CORE]]` specifies the
 threading context for a testing object execution. The setting values follow ones
 from the `ctx-init` option.
 
@@ -170,7 +170,7 @@ Refer to [modes](benchdnn_general_info.md) for details.
 `MODIFIER` values can be:
   - empty for no modifiers (the default)
   - `P` or `p` for parallel backend object creation
-  - `M` or `m` for disabling usage of reference memory (GPU only)
+  - `M` or `m` for disabling usage of reference memory
 
 Refer to [mode modifiers](benchdnn_general_info.md) for details.
 
@@ -238,12 +238,14 @@ changes the implementation dispatching which is an undesired behavior. When
 `BOOL` is `false` (the default), the check is disabled.
 
 ### --check-ref-impl
-`--check-ref-impl=BOOL` instructs the driver to compare the implementation name
-string against the `ref` string pattern. When `BOOL` is set to `true`, the check
-returns an error if the name matches the reference pattern. By default, the
-check is disabled. It's useful to catch unexpected fallbacks to slow reference
-implementations from a big batch of problems. This option is always disabled on
-NVIDIA, AMD, and Generic vendors.
+`--check-ref-impl=STR` instructs the driver to compare the implementation name
+string against the `ref` string pattern. When the setting is enabled, the check
+returns an error if the name matches the reference pattern. `STR` specifies
+which runtime is affected by the setting. If `STR` is a boolean value `true/1`,
+both CPU and GPU runtimes are affected. Other possible values include `cpu`,
+`gpu` and `false/0`. By default, the check is disabled. It's useful to catch
+unexpected fallbacks to slow reference implementations from a big batch of
+problems. This option is always disabled on NVIDIA, AMD, and Generic vendors.
 
 ### --fast-ref
 `--fast-ref=BOOL` instructs the driver to use an optimized implementation

@@ -25,6 +25,7 @@
 #include "gpu/intel/compute/ukernels.hpp"
 #include "gpu/intel/compute/utils.hpp"
 #include "gpu/intel/gemm/jit/gen_kernel.hpp"
+#include "gpu/intel/jit/ir/block_2d_utils.hpp"
 
 #include <algorithm>
 #include <iomanip>
@@ -63,6 +64,9 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(
     hw_info.gmdid = dev_info->ip_version();
     hw_info.systolicAvailable = use_systolic_ukernel;
     hw_info.isEfficient64Bit = dev_info->is_efficient_64bit();
+    auto product = dev_info->product();
+    auto hw = getCore(product.family);
+    auto stepping = hw_info.gmdid & 0xFF;
 
     if (hw_info.gmdid == 0) return status::unimplemented;
 
@@ -84,6 +88,7 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(
     problem.Tb = problem.Tb_ext;
 
     dim_t lda, ldb;
+    data_type_t adt, bdt;
     SizeParams sizes;
 
     switch (grouped_axis_) {
@@ -98,6 +103,8 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(
             ldb = K();
             problem.A.layout = convert_dnnl_to_kernel_layout(wei_mdw.md_);
             problem.B.layout = MatrixLayout::N;
+            adt = wei_mdw.data_type();
+            bdt = src_mdw.data_type();
             break;
         case grouped_axis_t::k_axis: {
             // The C tile is col-major, so the operand order follows the
@@ -107,12 +114,19 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(
             // Both operands are k-major, hence A layout N and B layout T either
             // way; only the leading dimensions and extents swap.
             const bool trans_c = transc();
-            sizes.m = static_cast<uint16_t>(trans_c ? M() : N());
-            sizes.n = static_cast<uint16_t>(trans_c ? N() : M());
+            if (trans_c) {
+                lda = sizes.m = static_cast<uint16_t>(M());
+                ldb = sizes.n = static_cast<uint16_t>(N());
+                adt = src_mdw.data_type();
+                bdt = wei_mdw.data_type();
+            } else {
+                lda = sizes.m = static_cast<uint16_t>(N());
+                ldb = sizes.n = static_cast<uint16_t>(M());
+                adt = wei_mdw.data_type();
+                bdt = src_mdw.data_type();
+            }
             // use the average k size to avoid unnecessary unrolls
             sizes.k = static_cast<uint16_t>(utils::div_up(K(), ngroups_));
-            lda = sizes.m;
-            ldb = sizes.n;
             problem.A.layout = MatrixLayout::N;
             problem.B.layout = MatrixLayout::T;
         } break;
@@ -122,11 +136,16 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(
     }
 
     problem.C.layout = MatrixLayout::N;
+    problem.A.setAlignment(alignmentForLD(
+            static_cast<int>(types::elements_to_bytes(adt, lda))));
 
-    problem.A.setAlignment(
-            alignmentForLD(static_cast<int>(lda) * problem.Ta_ext));
-    problem.B.setAlignment(
-            alignmentForLD(static_cast<int>(ldb) * problem.Tb_ext));
+    auto ldb_bytes = types::elements_to_bytes(bdt, ldb);
+    if (ldb_bytes % block_2d_base_alignment(hw) == 0) {
+        problem.B.setAlignment(static_cast<int>(ldb_bytes));
+    } else {
+        problem.B.setAlignment(alignmentForLD(static_cast<int>(ldb)));
+    }
+
     problem.C.setAlignment(problem.Tc.size());
 
     GEMMOptions opts;
@@ -153,7 +172,11 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(
         problem.AO.setAlignment(
                 static_cast<int>(types::data_type_size(wei_zp_dt)));
         problem.AO.layout = MatrixLayout::N;
-        problem.aoPtrDims = 2;
+        problem.aoPtrDims = (wei_quant_.zp_mask() == 5
+                                    && attr()->zero_points_.has_default_groups(
+                                            DNNL_ARG_WEIGHTS))
+                ? 1
+                : 2;
         problem.aOffset = ABOffset::Calc;
     }
 
@@ -223,6 +246,10 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(
         } else {
             problem.Tb = ctype;
         }
+    } else if (problem.Ta.isInteger() && problem.Tb.isInteger() && !opts.scaleA
+            && !opts.scaleB) {
+        problem.Tc = problem.Ts = problem.Tc_ext = Type::s32;
+        ugemm_result_dt_ = data_type::s32;
     }
 
     auto strat_override = [&](gemmstone::GEMMStrategy &strat) {
@@ -233,9 +260,6 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(
         if (!newStrat.empty()) {
             // Example: 16 16 1 0 aT32 aM32 aB wg 2x4 sys
             printf("GRPGEMM_USTRATEGY: %s\n", newStrat.c_str());
-            auto product = ngen::npack::decodeHWIPVersion(hw_info.gmdid);
-            auto hw = getCore(product.family);
-            auto stepping = hw_info.gmdid & 0xFF;
             strat = GEMMStrategy(hw, stepping);
             std::stringstream ss(newStrat);
             ss >> strat.unroll[0];
@@ -287,17 +311,16 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(
                         : 16;
                 break;
             case compute::gpu_arch_t::xe_hpg: {
-                auto product = dev_info->product();
                 bool is_xelpg = (product.family == ngen::ProductFamily::ARL
                         || product.family == ngen::ProductFamily::MTL);
-                if (!dev_info->mayiuse_systolic()) max_wg_n = 2;
                 max_n_unroll = (problem.Ta_ext.bits() <= 8
                                        && problem.Ta_ext.isInteger())
                         ? sg_size_ * problem.Ta_ext
                         : 16;
-                if (is_xelpg && problem.Ta_ext.bits() <= 8
-                        && problem.Ta_ext.isFP())
-                    min_n_unroll = sg_size_;
+                if (is_xelpg && problem.Ta_ext.bits() <= 8) {
+                    min_n_unroll = (opts.scaleA || opts.scaleB) ? sg_size_ : 4;
+                }
+                if (!dev_info->mayiuse_systolic()) max_wg_n = 2;
                 if (problem.Ta_ext.bits() <= 8) min_wg_n = 2;
             } break;
             case compute::gpu_arch_t::xe_hpc: max_n_unroll = 32; break;
@@ -539,9 +562,16 @@ status_t grouped_micro_gemm_t::pd_t::init_m_axis(const impl::engine_t *engine) {
         VDISPATCH_MATMUL(utils::one_of(wei_zp_mask, 7, 5),
                 VERBOSE_UNSUPPORTED_ZP_CFG ": wei zero points mask(%d)",
                 wei_zp_mask);
-        VDISPATCH_MATMUL(utils::one_of(wei_quant_.zp_dt(), u8, s8, u4, s4),
-                VERBOSE_UNSUPPORTED_ZP_CFG ": wei zero points dt(%s)",
-                dnnl_dt2str(wei_quant_.zp_dt()));
+        if (wei_zp_mask == 5) {
+            VDISPATCH_MATMUL(
+                    utils::one_of(wei_quant_.zp_dt(), s32, u8, s8, u4, s4),
+                    VERBOSE_UNSUPPORTED_ZP_CFG ": wei zero points dt(%s)",
+                    dnnl_dt2str(wei_quant_.zp_dt()));
+        } else {
+            VDISPATCH_MATMUL(utils::one_of(wei_quant_.zp_dt(), u8, s8, u4, s4),
+                    VERBOSE_UNSUPPORTED_ZP_CFG ": wei zero points dt(%s)",
+                    dnnl_dt2str(wei_quant_.zp_dt()));
+        }
     }
 
     if (wei_quant_.with_scale() && wei_quant_.with_zp()) {
@@ -599,6 +629,8 @@ status_t grouped_micro_gemm_t::pd_t::init_kernel_ctx_m_axis() {
 
     def_data_type(kernel_ctx_, src_dt, "SRC");
     def_data_type(kernel_ctx_, wei_dt, "WEI");
+    def_data_type(kernel_ctx_, ugemm_result_dt_, "UGEMM_RESULT");
+
     kernel_ctx_.define_int(
             "SRC_ELEMS_PER_BYTE", types::bytes_to_elements(src_dt, 1));
     kernel_ctx_.define_int(

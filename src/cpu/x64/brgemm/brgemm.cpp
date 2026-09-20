@@ -23,7 +23,11 @@
 #include "common/utils.hpp"
 
 #include "cpu/platform.hpp"
+#include "cpu/x64/brgemm/brgemm_ir.hpp"
 #include "cpu/x64/brgemm/brgemv_ir.hpp"
+#include "cpu/x64/brgemm/jit_brdgmm_kernel.hpp"
+#include "cpu/x64/brgemm/jit_brgemm_amx_uker.hpp"
+#include "cpu/x64/brgemm/jit_brgemm_kernel.hpp"
 #include "cpu/x64/cpu_barrier.hpp"
 #include "cpu/x64/injectors/jit_uni_postops_injector.hpp"
 
@@ -676,7 +680,8 @@ status_t brgemm_desc_finalize(brgemm_desc_t *brg) {
         return status::unimplemented;
 
     // Required for EVEX encoding for offsets
-    // The kernel brgemm_amx_uker_t has support of large offsets in post-ops
+    // The kernel jit_brgemm_amx_uker_t has support of large offsets in
+    // post-ops
     if (!brg->can_dispatch_uker()) {
         const dim_t max_d_stride
                 = brg->LDD * types::data_type_size(brg->dt_d) * brg->bcast_dim;
@@ -685,6 +690,15 @@ status_t brgemm_desc_finalize(brgemm_desc_t *brg) {
     }
 
     return status::success;
+}
+
+// Picks the Xbyak kernel that handles `brg`. Every factory returns `nullptr`
+// for a descriptor it does not support, so a `nullptr` here means no Xbyak
+// kernel covers `brg`.
+static brgemm_kernel_t *create_xbyak_kernel(const brgemm_desc_t &brg) {
+    if (brg.is_dgmm) return create_brdgmm_kernel(brg);
+    if (brg.can_dispatch_uker()) return create_brgemm_amx_uker_kernel(brg);
+    return create_brgemm_kernel(brg);
 }
 
 status_t brgemm_kernel_create(
@@ -696,50 +710,28 @@ status_t brgemm_kernel_create(
                 brg.dt_bias, brg.sum_dt))
         return status::unimplemented;
 
-    // Try the IR-based GEMV kernel first. If the IR kernel is unsupported i.e.
-    // `create_brgemv_ir_kernel(brg)` returns `nullptr` then fall back to the
-    // brgemm implementation below.
-    if (brg.is_gemv) {
-        std::unique_ptr<brgemm_kernel_t> ir_ker(create_brgemv_ir_kernel(brg));
+    // Try the IR-based kernels first. `is_gemv` goes to
+    // `create_brgemv_ir_kernel()`, everything else to
+    // `create_brgemm_ir_kernel()`. Either returns `nullptr` when the IR kernel
+    // is unsupported, and then the Xbyak-based brgemm implementations below
+    // take over.
+    {
+        std::unique_ptr<brgemm_kernel_t> ir_ker(brg.is_gemv
+                        ? create_brgemv_ir_kernel(brg)
+                        : create_brgemm_ir_kernel(brg));
         if (ir_ker && ir_ker->create_kernel() == status::success) {
             *brg_kernel = ir_ker.release();
             return status::success;
         }
     }
 
-    if (brg.is_dgmm) {
-        if (brg.type == brgemm_static_offs) return status::unimplemented;
-        if (brg.is_zmm) {
-            CHECK(safe_ptr_assign<brgemm_kernel_t>(
-                    *brg_kernel, new brdgmm_kernel_t<Xbyak::Zmm>(brg)));
-        } else if (brg.is_ymm) {
-            CHECK(safe_ptr_assign<brgemm_kernel_t>(
-                    *brg_kernel, new brdgmm_kernel_t<Xbyak::Ymm>(brg)));
-        }
-    } else if (brg.can_dispatch_uker()) {
-        CHECK(safe_ptr_assign<brgemm_kernel_t>(
-                *brg_kernel, new brgemm_amx_uker_t(brg)));
-    } else {
-        if (brg.type == brgemm_static_offs) return status::unimplemented;
-        if (brg.is_tmm) {
-            CHECK(safe_ptr_assign<brgemm_kernel_t>(
-                    *brg_kernel, new brgemm_kernel_common_t<Xbyak::Tmm>(brg)));
-        } else if (brg.is_zmm) {
-            CHECK(safe_ptr_assign<brgemm_kernel_t>(
-                    *brg_kernel, new brgemm_kernel_common_t<Xbyak::Zmm>(brg)));
-        } else if (brg.is_ymm) {
-            CHECK(safe_ptr_assign<brgemm_kernel_t>(
-                    *brg_kernel, new brgemm_kernel_common_t<Xbyak::Ymm>(brg)));
-        }
-    }
-    if (!(*brg_kernel)) return status::unimplemented;
-    status_t st = (*brg_kernel)->create_kernel();
-    if (st != status::success) {
-        // `brg_kernel` points to a pointer to kernel class created by `new`.
-        // If kernel creation failed, release this resource before returning.
-        delete *brg_kernel;
-        return st;
-    }
+    std::unique_ptr<brgemm_kernel_t> ker(create_xbyak_kernel(brg));
+    if (!ker) return status::unimplemented;
+    // Unlike the IR kernels above, a failure here is final. There is no
+    // kernel to fall back to.
+    CHECK(ker->create_kernel());
+
+    *brg_kernel = ker.release();
     return status::success;
 }
 
