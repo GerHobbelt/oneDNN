@@ -127,7 +127,7 @@ private:
     constexpr static int off_reg_ker_ = 8;
     constexpr static int stack_space_needed_ = 16;
 
-    std::unique_ptr<injector::jit_uni_postops_injector_t<avx512_core, Vmm>>
+    std::unique_ptr<injector::jit_uni_postops_injector_t<Vmm>>
             postops_injector_;
     std::unique_ptr<bf16_emulation_t> bf16_emu_;
 
@@ -263,9 +263,7 @@ template <typename Vmm>
 struct jit_avx512_core_bf16_bwd_data_kernel_vmm_t : public jit_generator_t {
 
     jit_avx512_core_bf16_bwd_data_kernel_vmm_t(const jit_conv_conf_t &ajcp)
-        : jit_generator_t(jit_name(), avx512_core_bf16)
-        , jcp(ajcp)
-        , bf16_emu_(nullptr) {
+        : jit_generator_t(jit_name(), ajcp.isa), jcp(ajcp), bf16_emu_(nullptr) {
         if (!isa_has_bf16(jcp.isa))
             bf16_emu_ = utils::make_unique<bf16_emulation_t>(this,
                     bf16_emu_reserv_1, bf16_emu_reserv_2, bf16_emu_reserv_3,
@@ -477,9 +475,7 @@ struct jit_avx512_core_bf16_conv_bwd_weights_kernel_f32_t
 
     jit_avx512_core_bf16_conv_bwd_weights_kernel_f32_t(
             const jit_conv_conf_t &ajcp)
-        : jit_generator_t(jit_name(), avx512_core_bf16)
-        , jcp(ajcp)
-        , bf16_emu_(nullptr) {
+        : jit_generator_t(jit_name(), ajcp.isa), jcp(ajcp), bf16_emu_(nullptr) {
         if (!isa_has_bf16(jcp.isa)) {
             bf16_emu_ = utils::make_unique<bf16_emulation_t>(
                     this, one, even, selector, scratch, tmp0, tmp1);

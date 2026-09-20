@@ -71,7 +71,9 @@ void cvt_acc_to_dst(const conv_gemm_conf_t &jcp, size_t g_start, size_t g_end,
 
 template <data_type_t dst_data_type>
 gemm_bf16_convolution_fwd_t<dst_data_type>::pp_ker_t::pp_ker_t(const pd_t *pd)
-    : jit_generator_t(jit_name())
+    : jit_generator_t(jit_name(),
+              mayiuse(avx512_core_bf16) ? avx512_core_bf16
+                                        : bf16_emulation_t::get_isa())
     , jcp_(pd->jcp_)
     , do_sum_(dst_data_type != data_type::f32 && jcp_.with_sum)
     , max_data_reg_idx_(31)
@@ -105,7 +107,7 @@ gemm_bf16_convolution_fwd_t<dst_data_type>::pp_ker_t::pp_ker_t(const pd_t *pd)
                 save_state, reserved_eltwise_gpr, reserved_eltwise_maskr};
 
         postops_injector_ = utils::make_unique<
-                injector::jit_uni_postops_injector_t<avx512_core>>(
+                injector::jit_uni_postops_injector_t<Xbyak::Zmm>>(
                 this, post_ops, binary_static_params, eltwise_static_params);
 #undef PARAM_OFF
     }
@@ -119,8 +121,7 @@ gemm_bf16_convolution_fwd_t<dst_data_type>::pp_ker_t::pp_ker_t(const pd_t *pd)
 
     vlen_ = cpu_isa_traits_t<avx512_core>::vlen / sizeof(float);
 
-    isa_ = mayiuse(avx512_core_bf16) ? avx512_core_bf16
-                                     : bf16_emulation_t::get_isa();
+    isa_ = max_cpu_isa();
 
     if (isa_ != avx512_core_bf16) {
         max_data_reg_idx_ = 26;

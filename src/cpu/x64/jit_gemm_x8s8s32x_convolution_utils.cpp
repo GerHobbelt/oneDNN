@@ -92,7 +92,7 @@ private:
         bool should_apply_zp_src_pad_comp_d;
     };
 
-    std::unique_ptr<injector::jit_uni_postops_injector_t<avx512_core>>
+    std::unique_ptr<injector::jit_uni_postops_injector_t<Xbyak::Zmm>>
             postops_injector_;
 
     size_t number_of_reserved_zmm_regs_;
@@ -142,7 +142,7 @@ private:
 jit_pp_ker_t::jit_pp_ker_t(
         const convolution_pd_t *pd, const conv_gemm_conf_t &jcp)
     : pp_ker_t(pd, jcp)
-    , jit_generator_t(jit_name())
+    , jit_generator_t(jit_name(), avx512_core)
     , number_of_reserved_zmm_regs_(0)
     , bias_data_type_size_(jcp.bias_data_type != data_type::undef
                       ? types::data_type_size(jcp.bias_data_type)
@@ -197,7 +197,7 @@ jit_pp_ker_t::jit_pp_ker_t(
         const static_params_t static_params {reg_param_, rhs_arg_static_params};
 
         postops_injector_ = utils::make_unique<
-                injector::jit_uni_postops_injector_t<avx512_core>>(
+                injector::jit_uni_postops_injector_t<Xbyak::Zmm>>(
                 this, jcp_.post_ops, static_params);
     }
 }

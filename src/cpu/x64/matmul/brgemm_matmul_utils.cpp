@@ -247,8 +247,7 @@ status_t check_isa_with_datatype(
         const cpu_isa_t isa, const brgemm_matmul_conf_utils_t &bm_conf_utils) {
     const bool ok
             = IMPLICATION(bm_conf_utils.is_f32(),
-                      one_of(isa, avx512_core, avx2) || bm_conf_utils.is_bf32()
-                              || bm_conf_utils.is_tf32())
+                      one_of(isa, avx512_core, avx2) || bm_conf_utils.is_bf32())
             && IMPLICATION(bm_conf_utils.is_int8()
                             || bm_conf_utils.with_int8_grouped_quantization(),
                     is_superset(isa, avx512_core)
@@ -318,7 +317,6 @@ status_t check_datatype_cfg(const brgemm_matmul_conf_utils_t &bm_conf_utils) {
                       bm_conf_utils.is_f32_bf16(), bm_conf_utils.is_bf32(),
                       bm_conf_utils.is_f8(), bm_conf_utils.is_int8(),
                       bm_conf_utils.is_f4_via_convert(),
-                      bm_conf_utils.is_tf32(),
                       bm_conf_utils.is_bf16_with_int_wei(),
                       bm_conf_utils.is_bf16_fp8(), bm_conf_utils.is_f16_fp8(),
                       bm_conf_utils.is_f16_with_int_wei(),
@@ -340,9 +338,7 @@ brgemm_matmul_conf_utils_t::brgemm_matmul_conf_utils_t(
               && one_of(bgmmc.dst_dt, bf16, f32))
     , f16_dt(utils::everyone_is(f16, bgmmc.src_dt, bgmmc.wei_dt)
               && one_of(bgmmc.dst_dt, f16, f32))
-    , f4_via_convert_dt(utils::one_of(bgmmc.wei_dt, data_type::f4_e2m1,
-                                data_type::f4_e3m0)
-              && isa == avx10_1_512)
+    , f4_via_convert_dt(bgmmc.wei_dt == f4_e2m1 && isa == avx10_1_512)
     , f8_dt(one_of(bgmmc.src_dt, f8_e5m2, f8_e4m3)
               && one_of(bgmmc.wei_dt, f8_e5m2, f8_e4m3)
               && one_of(bgmmc.dst_dt, f16, f32, bf16, f8_e5m2, f8_e4m3))
@@ -353,9 +349,6 @@ brgemm_matmul_conf_utils_t::brgemm_matmul_conf_utils_t(
     , bf32_dt(f32_dt
               && one_of(attr.fpmath_.mode_, fpmath_mode::bf16, fpmath_mode::any)
               && isa == avx512_core_amx)
-    , tf32_dt(f32_dt
-              && one_of(attr.fpmath_.mode_, fpmath_mode::tf32, fpmath_mode::any)
-              && isa == avx10_2_amx_2)
     , weights_decompression_support(one_of(bgmmc.wei_dt, u8, s8, u4, s4)
               && one_of(attr.fpmath_.mode_, fpmath_mode::bf16, fpmath_mode::f16,
                       fpmath_mode::strict, fpmath_mode::any)
@@ -742,7 +735,7 @@ status_t brgemm_matmul_conf_utils_t::set_or_check_tags(memory_desc_t &A_md,
                     || this->is_bf16() || this->is_f32() || this->is_bf32()
                     || this->is_f16() || this->is_f32_f16()
                     || this->is_f32_bf16() || this->is_bf16_with_int_wei()
-                    || this->is_f16_with_int_wei() || this->is_tf32()
+                    || this->is_f16_with_int_wei()
                     || this->is_f32_with_int_wei() || this->is_bf16_fp8()
                     || this->is_f16_fp8();
             bgmmc.src_tag = is_adbc_allowed
@@ -877,7 +870,7 @@ format_tag_t brgemm_matmul_conf_utils_t::pick_blocked_B_layout(
 
     // Note: bf32 assumes f32 blocking
     if (is_f32() || is_bf32() || is_f16() || is_f32_f16() || is_f32_bf16()
-            || is_f16_with_int_wei() || is_tf32() || is_f32_with_int_wei()) {
+            || is_f16_with_int_wei() || is_f32_with_int_wei()) {
         switch (n_blk) {
             case 64: return bgmmc.ndims == 3 ? aCB16b64c : BA16a64b;
             case 48: return bgmmc.ndims == 3 ? aCB16b48c : BA16a48b;
@@ -1887,7 +1880,6 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
         VCONDCHECK_BG(bgmmc.wei_dt == s8, VERBOSE_UNSUPPORTED_DT);
     }
     bgmmc.is_bf32 = bm_conf_utils.is_bf32();
-    bgmmc.is_tf32 = bm_conf_utils.is_tf32();
     bgmmc.is_bf16_with_int_wei = bm_conf_utils.is_bf16_with_int_wei();
     bgmmc.is_f16_with_int_wei = bm_conf_utils.is_f16_with_int_wei();
     bgmmc.is_f32_with_int_wei = bm_conf_utils.is_f32_with_int_wei();
@@ -2402,8 +2394,7 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
     }
 
     const bool is_copy_a_required = !bgmmc.is_gemv
-            && ((bgmmc.is_amx
-                        && (bm_conf_utils.is_bf32() || bm_conf_utils.is_tf32()))
+            && ((bgmmc.is_amx && bm_conf_utils.is_bf32())
                     || ((bm_conf_utils.is_f16()
                                 || bm_conf_utils.is_f16_with_int_wei())
                             && isa == avx512_core_fp16)

@@ -100,7 +100,7 @@ template <typename Vmm>
 jit_avx512_core_bf16_fwd_kernel_vmm_t<
         Vmm>::jit_avx512_core_bf16_fwd_kernel_vmm_t(const jit_conv_conf_t &ajcp,
         const primitive_attr_t &attr, const memory_desc_t &dst_md)
-    : jit_generator_t(jit_name(), avx512_core_bf16), jcp(ajcp), attr_(attr) {
+    : jit_generator_t(jit_name(), ajcp.isa), jcp(ajcp), attr_(attr) {
     if (jcp.with_eltwise || jcp.with_binary) {
         using namespace binary_injector;
         static constexpr bool preserve_gpr = true;
@@ -120,9 +120,9 @@ jit_avx512_core_bf16_fwd_kernel_vmm_t<
         const static_params_t static_params {
                 this->param1, rhs_arg_static_params};
 
-        postops_injector_ = utils::make_unique<
-                injector::jit_uni_postops_injector_t<avx512_core, Vmm>>(
-                this, jcp.post_ops, static_params);
+        postops_injector_
+                = utils::make_unique<injector::jit_uni_postops_injector_t<Vmm>>(
+                        this, jcp.post_ops, static_params);
     }
     if (!isa_has_bf16(jcp.isa))
         bf16_emu_ = utils::make_unique<bf16_emulation_t>(this,

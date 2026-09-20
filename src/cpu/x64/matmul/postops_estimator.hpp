@@ -51,13 +51,14 @@ public:
     }
 
 private:
-    using po_injector_t = injector::jit_uni_postops_injector_base_t<Xbyak::Zmm>;
+    using po_injector_t = injector::jit_uni_postops_injector_t<Xbyak::Zmm>;
     std::unique_ptr<po_injector_t> postops_injector_;
     static constexpr size_t mean_none_vec_code_bytes = 8;
     static constexpr size_t mean_vec_inst_bytes = 7;
 
     postops_estimator_t(memory_desc_t &dst_md, primitive_attr_t &attr)
-        : jit_generator_t("dummy_generator") {
+        : jit_generator_t("dummy_generator",
+                  impl::cpu::x64::cpu_isa_t::avx512_core_amx) {
         auto dsc = memory_desc_wrapper(dst_md);
         const dnnl::impl::cpu::x64::binary_injector::rhs_arg_static_params_t
                 rhs_sp(static_cast<size_t>(Xbyak::Zmm(1).getIdx()), this->r14,
@@ -75,13 +76,8 @@ private:
         esp.preserve_vmm = false;
         esp.preserve_p_table = false;
 
-        auto st = safe_ptr_assign(postops_injector_,
-                po_injector_t::create(this,
-                        impl::cpu::x64::cpu_isa_t::avx512_core_amx,
-                        attr.post_ops_, bsp, esp));
-        if (st != status::success) {
-            assert(!"postops_injector creation failed");
-        }
+        postops_injector_ = utils::make_unique<po_injector_t>(
+                this, attr.post_ops_, bsp, esp);
     }
 
     const char *name() const final {

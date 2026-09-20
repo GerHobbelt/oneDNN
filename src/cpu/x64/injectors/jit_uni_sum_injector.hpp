@@ -36,7 +36,11 @@ namespace x64 {
 // The typed, tail-aware read is delegated to the binary injector
 // (`load_acc_as_f32`), so this injector only owns the sum arithmetic, the
 // scale/zero-point constants and the single scratch vector register.
-template <cpu_isa_t isa, typename Vmm = typename cpu_isa_traits_t<isa>::Vmm>
+//
+// The ISA to generate for is taken from the host generator, which already
+// carries it as its `max_cpu_isa()` ceiling. `Vmm` stays a template parameter
+// to keep the vector width statically typed.
+template <typename Vmm>
 class jit_uni_sum_injector_t {
 public:
     // `sum` supplies the scale, zero-point and read data type. When
@@ -47,8 +51,7 @@ public:
     // preserved when `preserve_scratch_vmm` is set.
     jit_uni_sum_injector_t(jit_generator_t *host,
             const post_ops_t::entry_t::sum_t &sum, data_type_t dst_dt,
-            binary_injector::jit_uni_binary_injector_t<isa, Vmm>
-                    *binary_injector,
+            binary_injector::jit_uni_binary_injector_t<Vmm> *binary_injector,
             size_t scratch_vmm_idx, bool preserve_scratch_vmm);
 
     // Computes `acc += scale * (prev - zp)` for each accumulator in `vmm_idxs`.
@@ -64,7 +67,9 @@ public:
 
 private:
     jit_generator_t *host_;
-    binary_injector::jit_uni_binary_injector_t<isa, Vmm> *binary_injector_;
+    binary_injector::jit_uni_binary_injector_t<Vmm> *binary_injector_;
+
+    const cpu_isa_t isa_ = host_->max_cpu_isa();
 
     // Read type for the previous value (`sum.dt` or `dst_dt` when undefined).
     const data_type_t sum_dt_;

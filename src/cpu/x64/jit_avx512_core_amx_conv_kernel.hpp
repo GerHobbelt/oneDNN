@@ -274,7 +274,7 @@ struct jit_avx512_core_amx_fwd_kernel_t : public jit_generator_t {
 private:
     constexpr static int isa_simd_width_
             = cpu_isa_traits_t<avx512_core>::vlen / sizeof(float);
-    std::unique_ptr<injector::jit_uni_postops_injector_t<avx512_core>>
+    std::unique_ptr<injector::jit_uni_postops_injector_t<Xbyak::Zmm>>
             postops_injector_;
     std::unique_ptr<jit_avx512_core_amx_copy_to_pbuffer_t> copy_to_pbuffer_;
     std::unique_ptr<jit_avx512_core_amx_copy_to_wbuffer_t> copy_to_wbuffer_;
@@ -481,7 +481,7 @@ struct jit_avx512_core_amx_bwd_data_kernel_t : public jit_generator_t {
         , bwd_data_copy_kernel_(nullptr) {
         if (jcp.with_eltwise)
             eltwise_injector_ = utils::make_unique<
-                    jit_uni_eltwise_injector_t<avx512_core>>(this, jcp.eltwise);
+                    jit_uni_eltwise_injector_t<Xbyak::Zmm>>(this, jcp.eltwise);
         bwd_data_copy_kernel_ = utils::make_unique<
                 jit_avx512_core_amx_bwd_data_copy_kernel_t>(jcp);
     }
@@ -513,7 +513,7 @@ struct jit_avx512_core_amx_bwd_data_kernel_t : public jit_generator_t {
     }
 
 private:
-    std::unique_ptr<jit_uni_eltwise_injector_t<avx512_core>> eltwise_injector_;
+    std::unique_ptr<jit_uni_eltwise_injector_t<Xbyak::Zmm>> eltwise_injector_;
     std::unique_ptr<jit_avx512_core_amx_bwd_data_copy_kernel_t>
             bwd_data_copy_kernel_;
 

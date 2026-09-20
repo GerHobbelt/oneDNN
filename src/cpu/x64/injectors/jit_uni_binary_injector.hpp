@@ -266,8 +266,12 @@ bool is_supported(cpu_isa_t isa, const dnnl::impl::memory_desc_t &src1_desc,
  * Main mechanism responsible for injecting binary postops supporting various
  * isa: sse41, avx, avx2, avx512 with core, bf16 extensions as well as data
  * types: f32, bf16, s32, u8, s8.
+ *
+ * The ISA to generate for is taken from the host generator, which already
+ * carries it as its `max_cpu_isa()` ceiling. `Vmm` stays a template parameter
+ * to keep the vector width statically typed.
  */
-template <cpu_isa_t isa, typename Vmm = typename cpu_isa_traits_t<isa>::Vmm>
+template <typename Vmm>
 class jit_uni_binary_injector_t {
 public:
     jit_uni_binary_injector_t(
@@ -478,24 +482,12 @@ private:
             bool is_first) const;
     void calculate_w_ncsp_base(
             const dim_t *strides, const Xbyak::Reg64 &tmp_reg) const;
-    void calculate_w_ncsp_partial(const dim_t *strides,
-            const std::size_t offset, const Xbyak::Reg64 &tmp_reg,
-            std::size_t elem_size_bytes) const;
     void calculate_w_blocked_base(
             const dim_t *strides, const Xbyak::Reg64 &tmp_reg) const;
-    void calculate_w_blocked_partial(const dim_t *strides,
-            const std::size_t offset, const Xbyak::Reg64 &tmp_reg,
-            std::size_t elem_size_bytes) const;
     void calculate_w_nspc_base(
             const dim_t *strides, const Xbyak::Reg64 &tmp_reg) const;
-    void calculate_w_nspc_partial(const dim_t *strides,
-            const std::size_t offset, const Xbyak::Reg64 &tmp_reg,
-            std::size_t elem_size_bytes) const;
     void calculate_w_cspn_base(
             const dim_t *strides, const Xbyak::Reg64 &tmp_reg) const;
-    void calculate_w_cspn_partial(const dim_t *strides,
-            const std::size_t offset, const Xbyak::Reg64 &tmp_reg,
-            std::size_t elem_size_bytes) const;
 
     void append_mb_offset(
             const std::map<int, Xbyak::Address> &vmm_idx_to_out_addr,
@@ -580,14 +572,7 @@ private:
             std::size_t elem_size_bytes) const;
 
     template <typename T>
-    typename std::enable_if<std::is_same<T, Xbyak::Zmm>::value
-            || std::is_same<T, Xbyak::Address>::value>::type
-    execute_cmp_binary(const Vmm &dst, const Vmm &lhs, const T &rhs,
-            const unsigned int cmp_predicate) const;
-    template <typename T>
-    typename std::enable_if<!(std::is_same<T, Xbyak::Zmm>::value
-            || std::is_same<T, Xbyak::Address>::value)>::type
-    execute_cmp_binary(const Vmm &dst, const Vmm &lhs, const T &rhs,
+    void execute_cmp_binary(const Vmm &dst, const Vmm &lhs, const T &rhs,
             const unsigned int cmp_predicate) const;
     template <typename T>
     void execute_binary(alg_kind_t binary_alg, const Vmm &dst, const Vmm &lhs,
@@ -655,8 +640,12 @@ private:
     const rhs_arg_static_params_t rhs_arg_static_params_;
     const Xbyak::Reg64 param1_;
     const bcast_set_t supported_strategy_set_;
-    const bool is_avx512_ = is_superset(isa, avx512_core);
-    const bool is_avx512_core_fp16_ = is_superset(isa, avx512_core_fp16);
+    const cpu_isa_t isa_ = host_->max_cpu_isa();
+    const bool has_avx512_core_ = is_superset(isa_, avx512_core);
+    const bool has_avx512_core_fp16_ = is_superset(isa_, avx512_core_fp16);
+    const bool has_avx2_ = is_superset(isa_, avx2);
+    const bool is_avx_ = is_superset(isa_, avx) && !has_avx2_;
+    const bool is_sse41_ = !is_superset(isa_, avx);
 
     static constexpr int sizeof_reg64 = 8;
     /*
@@ -667,8 +656,8 @@ private:
      * When using benchdnn zmalloc_protect doesn't guarantee that tensor memory
      * address is 64 byte aligned, which can cause segmentation fault.
      */
-    static constexpr bool binary_op_with_unaligned_mem_operand_allowed_
-            = !utils::one_of(isa, avx, sse41);
+    const bool binary_op_with_unaligned_mem_operand_allowed_
+            = is_superset(isa_, avx2);
 };
 
 } // namespace binary_injector

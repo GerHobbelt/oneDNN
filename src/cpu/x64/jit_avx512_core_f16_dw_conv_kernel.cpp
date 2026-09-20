@@ -37,7 +37,7 @@ using namespace Xbyak;
 
 jit_avx512_dw_conv_fwd_kernel_f16_t::jit_avx512_dw_conv_fwd_kernel_f16_t(
         const jit_conv_conf_t &ajcp, const memory_desc_t &dst_md)
-    : jit_generator_t(jit_name()), jcp(ajcp) {
+    : jit_generator_t(jit_name(), ajcp.isa), jcp(ajcp) {
     const auto simd_w = cpu_isa_traits_t<avx512_core>::vlen / sizeof(float);
     const auto tail_size = jcp.oc_without_padding % simd_w;
     if (jcp.with_eltwise || jcp.with_binary) {
@@ -54,7 +54,7 @@ jit_avx512_dw_conv_fwd_kernel_f16_t::jit_avx512_dw_conv_fwd_kernel_f16_t(
         static_params_t static_params {this->param1, rhs_arg_static_params};
 
         postops_injector_ = utils::make_unique<
-                injector::jit_uni_postops_injector_t<avx512_core>>(
+                injector::jit_uni_postops_injector_t<Xbyak::Zmm>>(
                 this, jcp.post_ops, static_params);
     }
 

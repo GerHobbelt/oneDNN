@@ -148,9 +148,9 @@ void jit_uni_binary_kernel_t<isa, Vmm>::init_post_ops_injector() {
     const binary_injector::static_params_t bsp(this->param1,
             get_supported_postops_bcast_strategies(), rhs_arg_bsp);
 
-    postops_injector_ = utils::make_unique<
-            injector::jit_uni_postops_injector_t<inject_isa, Vmm>>(
-            this, po, bsp, esp);
+    postops_injector_
+            = utils::make_unique<injector::jit_uni_postops_injector_t<Vmm>>(
+                    this, po, bsp, esp);
 }
 
 template <cpu_isa_t isa, typename Vmm>
@@ -225,18 +225,12 @@ void jit_uni_binary_kernel_t<isa, Vmm>::apply_postops(int unroll, bool tail) {
         if (!conf_.is_i8) shl(reg_tmp_, is_xf16(conf_.dst_type) ? 1 : 2);
         add(reg_tmp1_, reg_tmp_);
 
-        const auto postops_per_w_broadcast_exists
-                = conf_.postops_per_w_broadcast_exists;
         for (int vmm_idx = 1; vmm_idx < unroll + vmm_start_idx_; vmm_idx++) {
             const auto vmm_l_off = (vmm_idx - vmm_start_idx_) * simd_w_;
             const auto dst_dt_size = types::data_type_size(conf_.dst_type);
             rhs_arg_params.vmm_idx_to_out_reg.emplace(vmm_idx, reg_tmp1_);
-            if (postops_per_w_broadcast_exists)
-                rhs_arg_params.vmm_idx_to_out_addr.emplace(
-                        vmm_idx, dst_ptr(vmm_l_off * dst_dt_size));
-            else
-                rhs_arg_params.vmm_idx_to_out_elem_off_val.emplace(
-                        vmm_idx, vmm_l_off * dst_dt_size);
+            rhs_arg_params.vmm_idx_to_out_elem_off_val.emplace(
+                    vmm_idx, vmm_l_off * dst_dt_size);
             if (tail) rhs_arg_params.vmm_tail_idx_.emplace(vmm_idx);
         }
         postops_injector_->compute_vector_range(

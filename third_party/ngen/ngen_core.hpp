@@ -1421,7 +1421,7 @@ public:
         return 2;
     }
     static constexpr14 int count(HW hw, int grfCount, DataType dt = DataType::invalid) {
-        return count(hw, dt) * (grfCount == 256 ? 2 : 1);
+        return count(hw, dt) * (grfCount >= 256 ? 2 : 1);
     }
 };
 
@@ -2063,6 +2063,19 @@ static inline bool isSend(Opcode op)
         case Opcode::sendc:
         case Opcode::sends:
         case Opcode::sendsc:
+        case Opcode::sendgx:
+        case Opcode::sendgxc:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static inline bool isSendg(Opcode op)
+{
+    switch (op) {
+        case Opcode::sendg:
+        case Opcode::sendgc:
         case Opcode::sendgx:
         case Opcode::sendgxc:
             return true;
