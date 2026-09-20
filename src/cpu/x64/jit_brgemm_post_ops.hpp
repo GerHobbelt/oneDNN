@@ -24,99 +24,16 @@
 
 #include "cpu/cpu_engine.hpp"
 
+#include "cpu/x64/brgemm/brgemm.hpp"
 #include "cpu/x64/injectors/jit_uni_postops_injector.hpp"
 #include "cpu/x64/jit_avx512_core_bf16cvt.hpp"
 #include "cpu/x64/jit_avx512_core_fp8cvt.hpp"
-#include "cpu/x64/jit_brgemm_primitive_conf.hpp"
 #include "cpu/x64/jit_generator.hpp"
-#include "cpu/x64/matmul/brgemm_matmul_utils.hpp"
-#include "cpu/x64/utils/jit_regops.hpp"
 
 namespace dnnl {
 namespace impl {
 namespace cpu {
 namespace x64 {
-
-struct brgemm_kernel_diff_bias_t {
-    brgemm_kernel_diff_bias_t()
-        : ptr_diff_dst(nullptr)
-        , ptr_diff_bias_acc(nullptr)
-        , ptr_diff_bias(nullptr)
-        , flags(0) {};
-
-    void *ptr_diff_dst;
-    void *ptr_diff_bias_acc;
-    void *ptr_diff_bias;
-    int flags;
-};
-
-template <typename Vmm>
-struct jit_brgemm_kernel_diff_bias_t : public jit_generator_t {
-    jit_brgemm_kernel_diff_bias_t(const jit_brgemm_primitive_conf_t &ajbgp,
-            const brgemm_desc_t &abrg);
-
-    jit_brgemm_kernel_diff_bias_t(const matmul::brgemm_matmul_conf_t &bgmmc,
-            const brgemm_desc_t &abrg);
-
-    DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_brgemm_kernel_diff_bias_t)
-
-private:
-    brgemm_desc_t brg_;
-    matmul_reduce_kind_t reduce_kind_;
-    data_type_t ddst_dt_;
-    data_type_t bia_dt_;
-    data_type_t acc_dt_;
-
-    int ddst_typesize_;
-    int bia_typesize_;
-    int acc_typesize_;
-    int mult_;
-
-    using Vmm_lower_t = typename vreg_traits_t<Vmm>::Vmm_lower_t;
-    using reg64_t = const Xbyak::Reg64;
-    // Register decomposition
-    const reg64_t param1 = abi_param1;
-    const reg64_t reg_ddst = r15;
-    const reg64_t reg_bias = r14;
-    const reg64_t reg_bias_acc = r13;
-    const reg64_t aux_reg_ddst = r12;
-    const reg64_t reg_k_iter = r11;
-    const reg64_t reg_flag = r10;
-    const reg64_t reg_mask = rax;
-
-    Xbyak::Label f16_perm_table_;
-    Xbyak::Label mask_label_;
-    Xbyak::Opmask k_full_mask = Xbyak::Opmask(2);
-    Xbyak::Opmask k_tail_mask = Xbyak::Opmask(3);
-    Xbyak::Opmask k_f16_perm_mask = Xbyak::Opmask(4);
-    Xbyak::Opmask k_store_mask = Xbyak::Opmask(5);
-    Vmm vreg_unit = Vmm(31);
-    Vmm vreg_perm = Vmm(30);
-    Vmm vmm_tail_mask = Vmm(15); // use for avx tail loads
-
-    const int n_max_regs_ = 4;
-
-    Vmm vmm_mask(const Vmm vmm_in, bool mask_flag, bool store,
-            Xbyak::Opmask ktail_mask);
-    Vmm get_bias_reg(int n) const { return Vmm(n); }
-    Vmm_lower_t get_bias_reg_lower(int n) const { return Vmm_lower_t(n); }
-    Vmm get_ddst_reg(int n) const { return Vmm(n + n_max_regs_); }
-    Vmm get_workspace_reg() const {
-        assert(reduce_kind_ == matmul_reduce_kind::src);
-        return Vmm(1);
-    }
-
-    void accumulate_bias(int idx, bool mask_flag);
-    void accumulate_bias(bool mask_flag);
-    void store(int idx, bool mask_flag);
-    void loop_by_N(int n_loop, int nb_tail);
-    void loop_by_K();
-    void init_masks(int tail_length);
-    void generate() override;
-
-    void generate_for_a();
-    void generate_for_b();
-};
 
 struct brgemm_kernel_post_ops_args_t {
     void *ptr_in;

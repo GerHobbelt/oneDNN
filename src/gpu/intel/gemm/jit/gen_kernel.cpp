@@ -128,18 +128,20 @@ status_t gen_desc_t::finalize(const char *tags) {
     std::string ovr_strategy;
     ovr_strategy = gpu_utils::dev_getenv("GEMM_KERNEL", ovr_strategy);
     if (!ovr_strategy.empty()) {
-        // Warning: will override problem data types (including up/down
-        // conversions) - this will cause inaccuracies if precisions/layouts
-        // are chosen that are incompatible with the given problem
         std::stringstream ss(ovr_strategy);
         std::string val;
         ss >> val;
         gpu_assert(val == "gemm");
         ss >> val;
         const char *pstr = val.c_str();
-        pstr = parsePrecisions(pstr, problem_.Ta_ext, problem_.Ta);
-        pstr = parsePrecisions(pstr, problem_.Tb_ext, problem_.Tb);
-        pstr = parsePrecisions(pstr, problem_.Tc, problem_.Tc_ext);
+        // Cannot modify external data types
+        Type ext_dt;
+        pstr = parsePrecisions(pstr, ext_dt, problem_.Ta);
+        gpu_assert(ext_dt == problem_.Ta_ext) << "Invalid external A data type";
+        pstr = parsePrecisions(pstr, ext_dt, problem_.Tb);
+        gpu_assert(ext_dt == problem_.Tb_ext) << "Invalid external B data type";
+        pstr = parsePrecisions(pstr, problem_.Tc, ext_dt);
+        gpu_assert(ext_dt == problem_.Tc_ext) << "Invalid external C data type";
         ss >> val;
         pstr = val.c_str();
         pstr = parseLayout(pstr, problem_.A);
@@ -208,7 +210,7 @@ status_t gen_desc_t::finalize(const char *tags) {
     if (hw_ == ngen::HW::Xe2 || hw_ == ngen::HW::Xe3) {
         // Use XeHPC register banking on Xe2/Xe3, in order
         // to successfully reuse XeHPC strategies.
-        strategy_.raHW = ngen::HW::XeHPC;
+        if (strategy_.raHW == hw_) strategy_.raHW = ngen::HW::XeHPC;
 
         // Bump up alignments to 16 bytes for block 2D if available.
         bool block_2d_a = false, block_2d_b = false;
@@ -224,7 +226,8 @@ status_t gen_desc_t::finalize(const char *tags) {
 
     if (hw_ == ngen::HW::Xe3p) {
         // Use XeHPC banking if reusing XeHPC strategies (legacy mode)
-        if (!efficient_64b_) strategy_.raHW = ngen::HW::XeHPC;
+        if (!efficient_64b_ && strategy_.raHW == hw_)
+            strategy_.raHW = ngen::HW::XeHPC;
 
         // Disable named barriers to avoid simulator errors, allow fallback to pvc strategies.
         strategy_.namedBarriers[0] = 0;
@@ -548,6 +551,7 @@ gen_nocopy_desc_t::select_kernel(const compute::device_info_t &dev_info,
     eval_params_.sizes = base.sizes;
     eval_params_.alpha = alpha;
     eval_params_.beta = beta;
+    eval_params_.product = product_;
     eval_params_.postOps = !problem.postOps.empty();
     eval_params_.cConvert = (problem.Tc != problem.Tc_ext);
     eval_params_.euCount = dev_info.eu_count();
@@ -721,6 +725,7 @@ status_t gen_xe_systolic_kernel_desc_t::select_kernel(
     eval_params.sizes = match_params.sizes;
     eval_params.alpha = alpha;
     eval_params.beta = beta;
+    eval_params.product = product_;
     eval_params.euCount = dev_info.eu_count();
     eval_params.postOps = !problem_.postOps.empty();
     eval_params.cConvert = (acc_type != c_type);

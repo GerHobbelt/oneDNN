@@ -222,6 +222,7 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(impl::engine_t *engine) {
         dim_t m_unroll = sg_size_;
         float avg_m = float(M()) / ngroups_;
         dim_t n_unroll = std::max<dim_t>(2, utils::rnd_up_pow2(dim_t(avg_m)));
+        dim_t min_n_unroll = 1;
         dim_t max_n_unroll = 0;
         dim_t max_wg_n = 4;
         dim_t min_wg_n = 1;
@@ -238,13 +239,20 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(impl::engine_t *engine) {
                         ? 8
                         : 16;
                 break;
-            case compute::gpu_arch_t::xe_hpg:
+            case compute::gpu_arch_t::xe_hpg: {
+                auto product = dev_info->product();
+                bool is_xelpg = (product.family == ngen::ProductFamily::ARL
+                        || product.family == ngen::ProductFamily::MTL);
                 if (!dev_info->mayiuse_systolic()) max_wg_n = 2;
-                max_n_unroll = (problem.Ta_ext.bits() < 8)
+                max_n_unroll = (problem.Ta_ext.bits() < 8
+                                       && problem.Ta_ext.isInteger())
                         ? sg_size_ * problem.Ta_ext
                         : 16;
+                if (is_xelpg && problem.Ta_ext.bits() <= 8
+                        && problem.Ta_ext.isFP())
+                    min_n_unroll = sg_size_;
                 if (problem.Ta_ext.bits() <= 8) min_wg_n = 2;
-                break;
+            } break;
             case compute::gpu_arch_t::xe_hpc: max_n_unroll = 32; break;
             default:
                 m_unroll = sg_size_ / problem.Ta_ext;
@@ -254,7 +262,7 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(impl::engine_t *engine) {
 
         reqs.push_back(StrategyRequirement::UnrollM == m_unroll);
         reqs.push_back(StrategyRequirement::UnrollN
-                == std::min(n_unroll, max_n_unroll));
+                == std::max(min_n_unroll, std::min(n_unroll, max_n_unroll)));
         reqs.push_back(StrategyRequirement::WGM == 2);
         reqs.push_back(StrategyRequirement::WGN
                 == utils::rnd_up_pow2(std::max(min_wg_n,
@@ -342,20 +350,23 @@ status_t grouped_micro_gemm_t::pd_t::init(impl::engine_t *engine) {
                 *attr(), dst_d, ngroups_, po_chain_, binary_scale_dts_));
     }
 
-    // only supported dt for now
-    VDISPATCH_MATMUL(utils::one_of(src_dt, f32, f16, bf16, u8, s8, s4, u4,
-                             f8_e5m2, f8_e4m3, e8m0, f4_e2m1, f4_e3m0),
+    VDISPATCH_MATMUL(utils::one_of(src_dt, f32, f16, bf16, u8, s8, f8_e5m2,
+                             f8_e4m3, f4_e2m1),
             VERBOSE_UNSUPPORTED_DT_CFG);
     VDISPATCH_MATMUL(utils::one_of(wei_dt, f32, f16, bf16, u8, s8, s4, u4,
-                             f8_e5m2, f8_e4m3, e8m0, f4_e2m1, f4_e3m0),
+                             f8_e5m2, f8_e4m3, f4_e2m1),
             VERBOSE_UNSUPPORTED_DT_CFG);
     VDISPATCH_MATMUL(
             utils::one_of(dst_dt, f32, f16, bf16), VERBOSE_UNSUPPORTED_DT_CFG);
 
-    const bool src_subbyte = utils::one_of(src_dt, s4, u4);
+    // WOQ (fp src + int wei) requires weight scales and fpmath apply_to_int
+    VDISPATCH_MATMUL(
+            IMPLICATION(!types::is_integral_dt(src_dt)
+                            && types::is_integral_dt(wei_dt),
+                    wei_quant_.with_scale() && attr()->fpmath_.apply_to_int_),
+            VERBOSE_UNSUPPORTED_DT_CFG);
+
     const bool wei_subbyte = utils::one_of(wei_dt, s4, u4);
-    VDISPATCH_MATMUL(IMPLICATION(src_subbyte, (K() % 2) == 0), VERBOSE_BAD_DIM,
-            "src", 1);
     VDISPATCH_MATMUL(IMPLICATION(wei_subbyte, (K() % 2) == 0), VERBOSE_BAD_DIM,
             "weights", 1);
     VDISPATCH_MATMUL(IMPLICATION(wei_subbyte, (N() % 2) == 0), VERBOSE_BAD_DIM,
@@ -389,7 +400,7 @@ status_t grouped_micro_gemm_t::pd_t::init(impl::engine_t *engine) {
     // Check for supported quantization schemes
     if (src_quant_.with_scale()) {
         VDISPATCH_MATMUL(utils::one_of(src_quant_.scale_dt(), f32, f16, bf16,
-                                 f8_e5m2, f8_e4m3, e8m0, f4_e2m1, f4_e3m0),
+                                 f8_e5m2, f8_e4m3, e8m0, f4_e2m1),
                 VERBOSE_UNSUPPORTED_SCALES_CFG ": src scales dt(%s)",
                 dnnl_dt2str(src_quant_.scale_dt()));
     }
@@ -420,7 +431,7 @@ status_t grouped_micro_gemm_t::pd_t::init(impl::engine_t *engine) {
         VDISPATCH_MATMUL(
                 utils::one_of(wei_mask, 7, 5), VERBOSE_UNSUPPORTED_SCALES_CFG);
         VDISPATCH_MATMUL(utils::one_of(wei_quant_.scale_dt(), f32, f16, bf16,
-                                 f8_e5m2, f8_e4m3, e8m0, f4_e2m1, f4_e3m0),
+                                 f8_e5m2, f8_e4m3, e8m0, f4_e2m1),
                 VERBOSE_UNSUPPORTED_SCALES_CFG ": wei scales dt(%s)",
                 dnnl_dt2str(wei_quant_.scale_dt()));
     }

@@ -211,6 +211,11 @@ void GEMMStrategy::preflight(HW hw, const GEMMProblem &problem)
     checkBeta1 |= C.atomic && !problem.beta1();
 
     GRFs = std::min(GRFs, GRF::maxRegs(hw));
+    // CRI has unique GRF mode behaviour - automatically update to optimal options
+    if (problem.product.family == ngen::ProductFamily::CRI) {
+        if (GRFs == 128) GRFs = 192;
+        if (GRFs == 256) GRFs = 512;
+    }
 
     // Fixed systolic kernel handling.
     if (fixedSystolic) {
@@ -470,7 +475,7 @@ void GEMMStrategy::preflight(HW hw, const GEMMProblem &problem)
     if (wg[loopOrder[1]] <= 0) wg[loopOrder[1]] = defaultWGY;
     if (wg[LoopK] <= 0) {
         if (kParallelLocal)
-            wg[LoopK] = (threadsPerEU(hw, *this) * eusPerSubslice(hw)) / (wg[LoopM] * wg[LoopN]);
+            wg[LoopK] = (threadsPerEU(problem.product, *this) * eusPerSubslice(hw)) / (wg[LoopM] * wg[LoopN]);
         else
             wg[LoopK] = 1;
     }

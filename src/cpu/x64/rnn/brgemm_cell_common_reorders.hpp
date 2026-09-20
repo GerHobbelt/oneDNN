@@ -17,8 +17,8 @@
 #ifndef CPU_X64_RNN_BRGEMM_CELL_COMMON_REORDERS_HPP
 #define CPU_X64_RNN_BRGEMM_CELL_COMMON_REORDERS_HPP
 
-#include "cpu/x64/jit_brgemm_transpose_utils.hpp"
 #include "cpu/x64/rnn/jit_brgemm_transpose_single_row.hpp"
+#include "cpu/x64/rnn/jit_brgemm_transpose_src.hpp"
 
 namespace dnnl {
 namespace impl {
