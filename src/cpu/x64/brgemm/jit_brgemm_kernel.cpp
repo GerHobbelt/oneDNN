@@ -1526,7 +1526,10 @@ void jit_brgemm_kernel_t<Wmm>::store_accumulators_apply_post_ops(dim_t bd_block,
 
     if (brg.is_fp8_via_convert()) reg64_fp8_aux.save();
 
-    if (is_superset(brg.isa_impl, avx10_2_512)) prefetchrst2(ptr[reg_aux_D]);
+    if (is_superset(brg.isa_impl, avx10_2))
+        prefetchrst2(ptr[reg_aux_D]);
+    else if (brg.brgattr.hint_prefetchw == brgemm_prfw_store)
+        prefetchw(ptr[reg_aux_D]);
 
     for_(dim_t bd = 0; bd < bd_block; bd++)
     for (dim_t ld = 0; ld < ld_block2; ld++) {
@@ -1534,7 +1537,9 @@ void jit_brgemm_kernel_t<Wmm>::store_accumulators_apply_post_ops(dim_t bd_block,
         auto vmm = accm(ld_block2, bd, ld);
         auto vmm_lower = Vmm_lower_t(vmm.getIdx());
         const bool is_tail = is_ld_tail && ld + 1 == ld_block2;
-        prefetchw(addr);
+        if (brg.brgattr.hint_prefetchw == brgemm_prfw_loop_store
+                && !is_superset(brg.isa_impl, avx10_2))
+            prefetchw(addr);
         if (is_superset(brg.isa_impl, avx512_core)) {
             const Vmm r_vmm = vmm_mask(vmm, is_tail, true, k_mask);
             const Vmm_lower_t r_ymm
@@ -1705,14 +1710,18 @@ void jit_brgemm_kernel_t<Wmm>::store_accumulators_without_post_ops(
     reg64_savable_guard_t reg_aux_C_guard(
             {&reg_aux_C}, brg.is_runtime_ldc && bd_block > 1);
 
-    if (is_superset(brg.isa_impl, avx10_2_512)) prefetchrst2(ptr[reg_aux_C]);
-    if (!brg.brgattr.hint_loop_store_prefetch) prefetchw(ptr[reg_aux_C]);
+    if (is_superset(brg.isa_impl, avx10_2))
+        prefetchrst2(ptr[reg_aux_C]);
+    else if (brg.brgattr.hint_prefetchw == brgemm_prfw_store)
+        prefetchw(ptr[reg_aux_C]);
 
     if (brg.is_gemv) {
         for_(dim_t bd = 0; bd < bd_block; bd++)
         for (dim_t ld = 0; ld < ld_block2; ld++) {
             const auto addr_c = ptr[reg_aux_C + C_offset(bd, ld)];
-            if (brg.brgattr.hint_loop_store_prefetch) prefetchw(addr_c);
+            if (brg.brgattr.hint_prefetchw == brgemm_prfw_loop_store
+                    && !is_superset(brg.isa_impl, avx10_2))
+                prefetchw(addr_c);
             auto vmm = accm(ld_block2, bd, ld);
             uni_vmovss(addr_c, Xmm(vmm.getIdx()));
         }
@@ -1722,7 +1731,9 @@ void jit_brgemm_kernel_t<Wmm>::store_accumulators_without_post_ops(
             auto vmm = accm(ld_block2, bd, ld);
             const auto addr_c = ptr[reg_aux_C + C_offset(bd, ld)];
             const bool is_tail = is_ld_tail && ld + 1 == ld_block2;
-            if (brg.brgattr.hint_loop_store_prefetch) prefetchw(addr_c);
+            if (brg.brgattr.hint_prefetchw == brgemm_prfw_loop_store
+                    && !is_superset(brg.isa_impl, avx10_2))
+                prefetchw(addr_c);
             if (!is_tail)
                 uni_vmovups(addr_c, vmm);
             else if (isa_has_masks(brg.isa_impl)) { // is_tail
@@ -2261,7 +2272,7 @@ void jit_brgemm_kernel_t<Wmm>::gemm_microkernel_amx(dim_t bd_block2,
 
 template <typename Wmm>
 void jit_brgemm_kernel_t<Wmm>::dot_product(Vmm v1, Vmm v2, Vmm v3) {
-    if (brg.is_f16 && brg.isa_impl == avx10_2_512)
+    if (brg.is_f16 && brg.isa_impl == avx10_2)
         vdpphps(v1, v2, v3);
     else if (brg.is_fp8 && brg.is_fp8_via_convert_non_amx())
         vdpphps(v1, v2, v3);
@@ -2464,7 +2475,7 @@ void jit_brgemm_kernel_t<Wmm>::gemm_microkernel(dim_t bd_block2,
                                data_type::f8_e5m2, data_type::f8_e4m3)) {
                 uni_vpbroadcastd(vmm_bcast, ptr[reg_aux_A + offset]);
             } else if (dt == data_type::f16) {
-                if (brg.isa_impl == avx10_2_512) {
+                if (brg.isa_impl == avx10_2) {
                     uni_vpbroadcastd(vmm_bcast, ptr[reg_aux_A + offset]);
                 } else if (brg.isa_impl == avx2_vnni_2) {
                     vbcstnesh2ps(vmm_bcast, ptr[reg_aux_A + offset]);
@@ -2484,7 +2495,7 @@ void jit_brgemm_kernel_t<Wmm>::gemm_microkernel(dim_t bd_block2,
                 = utils::one_of(brg.brgattr.mem_advice,
                           brgemm_hint_mem_advice_B, brgemm_hint_mem_advice_A_B)
                 && IMPLICATION(
-                        brg.dt_b == data_type::f16, brg.isa_impl == avx10_2_512)
+                        brg.dt_b == data_type::f16, brg.isa_impl == avx10_2)
                 && IMPLICATION(brg.dt_b == data_type::bf16,
                         brg.isa_impl != avx2_vnni_2);
         const Vmm vmm_load
@@ -2496,7 +2507,7 @@ void jit_brgemm_kernel_t<Wmm>::gemm_microkernel(dim_t bd_block2,
         if (mem_advice_B) {
             vmovrsd(vmm_load, addr);
         } else if (brg.dt_b == data_type::f16) {
-            if (brg.isa_impl == avx10_2_512) {
+            if (brg.isa_impl == avx10_2) {
                 uni_vmovups(vmm_load, addr);
             } else if (brg.isa_impl == avx2_vnni_2) {
                 if (rd % 2 == 0)

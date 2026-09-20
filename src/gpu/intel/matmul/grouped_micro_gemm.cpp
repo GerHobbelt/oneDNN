@@ -275,9 +275,11 @@ status_t grouped_micro_gemm_t::pd_t::init(impl::engine_t *engine) {
     is_gemv_ = M() < ngroups_;
 
     // only supported dt for now
-    VDISPATCH_MATMUL(utils::one_of(src_dt, f32, f16, bf16, u8, s8, s4, u4),
+    VDISPATCH_MATMUL(utils::one_of(src_dt, f32, f16, bf16, u8, s8, s4, u4,
+                             f8_e5m2, f8_e4m3, e8m0, f4_e2m1, f4_e3m0),
             VERBOSE_UNSUPPORTED_DT_CFG);
-    VDISPATCH_MATMUL(utils::one_of(wei_dt, f32, f16, bf16, u8, s8, s4, u4),
+    VDISPATCH_MATMUL(utils::one_of(wei_dt, f32, f16, bf16, u8, s8, s4, u4,
+                             f8_e5m2, f8_e4m3, e8m0, f4_e2m1, f4_e3m0),
             VERBOSE_UNSUPPORTED_DT_CFG);
     VDISPATCH_MATMUL(
             utils::one_of(dst_dt, f32, f16, bf16), VERBOSE_UNSUPPORTED_DT_CFG);
@@ -322,15 +324,8 @@ status_t grouped_micro_gemm_t::pd_t::init(impl::engine_t *engine) {
     // Check for supported quantization schemes
     const scales_t &attr_scales = attr()->scales_;
     if (src_quant_.with_scale()) {
-        const int src_mask = src_quant_.scale_mask();
-        const int rowwise_mask = src_qmask_M();
-        // Only row-wise f32 scales supported for src
-        VDISPATCH_MATMUL(
-                src_mask == rowwise_mask, VERBOSE_UNSUPPORTED_SCALES_CFG);
-        // No groups for src scales
-        VDISPATCH_MATMUL(attr_scales.get(DNNL_ARG_SRC).has_default_groups(),
-                VERBOSE_UNSUPPORTED_SCALES_CFG);
-        VDISPATCH_MATMUL(utils::one_of(src_quant_.scale_dt(), f32, f16, bf16),
+        VDISPATCH_MATMUL(utils::one_of(src_quant_.scale_dt(), f32, f16, bf16,
+                                 f8_e5m2, f8_e4m3, e8m0, f4_e2m1, f4_e3m0),
                 VERBOSE_UNSUPPORTED_SCALES_CFG ": %s(%s)", "src scales",
                 dnnl_dt2str(src_quant_.scale_dt()));
     }
@@ -348,10 +343,10 @@ status_t grouped_micro_gemm_t::pd_t::init(impl::engine_t *engine) {
 
     if (wei_quant_.with_scale()) {
         const int wei_mask = wei_quant_.scale_mask();
-        // Only column-wise f32 scales supported for weights
         VDISPATCH_MATMUL(
                 utils::one_of(wei_mask, 7, 5), VERBOSE_UNSUPPORTED_SCALES_CFG);
-        VDISPATCH_MATMUL(utils::one_of(wei_quant_.scale_dt(), f32, f16, bf16),
+        VDISPATCH_MATMUL(utils::one_of(wei_quant_.scale_dt(), f32, f16, bf16,
+                                 f8_e5m2, f8_e4m3, e8m0, f4_e2m1, f4_e3m0),
                 VERBOSE_UNSUPPORTED_SCALES_CFG ": %s(%s)", "wei scales",
                 dnnl_dt2str(wei_quant_.scale_dt()));
     }
@@ -476,15 +471,18 @@ status_t grouped_micro_gemm_t::execute(const exec_ctx_t &ctx) const {
     int ldweiq = 0;
 
     if (with_src_scales || with_src_zero_points) {
-        // Only row-wise scales are supported for src
-        ldsrcq = 1;
+        const memory_desc_t *src_quant_md = with_src_scales
+                ? ctx.input(DNNL_ARG_SRC | DNNL_ARG_ATTR_SCALES)->md()
+                : ctx.input(DNNL_ARG_SRC | DNNL_ARG_ATTR_ZERO_POINTS)->md();
+        ldsrcq = static_cast<int>(
+                src_quant_md->format_desc.blocking.strides[0]);
     }
     if (with_wei_scales || with_wei_zero_points) {
         const memory_desc_t *wei_quant_md = with_wei_scales
                 ? ctx.input(DNNL_ARG_WEIGHTS | DNNL_ARG_ATTR_SCALES)->md()
                 : ctx.input(DNNL_ARG_WEIGHTS | DNNL_ARG_ATTR_ZERO_POINTS)->md();
-        ldweiq = static_cast<int>(wei_quant_md->format_desc.blocking
-                                          .strides[wei_quant_md->ndims - 2]);
+        ldweiq = static_cast<int>(
+                wei_quant_md->format_desc.blocking.strides[1]);
     }
     int m_all = static_cast<int>(dst_md->dims[dst_md->ndims - 2]);
     int n = static_cast<int>(dst_md->dims[dst_md->ndims - 1]);

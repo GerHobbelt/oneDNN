@@ -60,7 +60,7 @@
 
 #include <stdio.h> // for debug print
 #include <assert.h>
-#include <list>
+#include <vector>
 #include <string>
 #include <algorithm>
 #ifndef NDEBUG
@@ -219,7 +219,7 @@ namespace Xbyak {
 
 enum {
 	DEFAULT_MAX_CODE_SIZE = 4096,
-	VERSION = 0x7353 /* 0xABCD = A.BC(.D) */
+	VERSION = 0x7354 /* 0xABCD = A.BC(.D) */
 };
 
 #ifndef MIE_INTEGER_TYPE_DEFINED
@@ -1221,7 +1221,7 @@ class CodeArray {
 			return disp;
 		}
 	};
-	typedef std::list<AddrInfo> AddrInfoList;
+	typedef std::vector<AddrInfo> AddrInfoList;
 	AddrInfoList addrInfoList_;
 	const Type type_;
 #ifdef XBYAK_USE_MMAP_ALLOCATOR
@@ -1598,7 +1598,8 @@ class LabelManager {
 		SlabelDefList defList;
 		SlabelUndefList undefList;
 	};
-	typedef std::list<SlabelState> StateList;
+	// SlabelState is cheap to move, so std::vector is preferred over std::list.
+	typedef std::vector<SlabelState> StateList;
 	// for Label class
 	struct ClabelVal {
 		ClabelVal(size_t offset = 0) : offset(offset), refCount(1) {}
@@ -2016,6 +2017,7 @@ private:
 	static const uint64_t T_SENTRY = (1ull << 38)-1; // attribute(>=T_SENTRY) is for error check
 	static const uint64_t T_ALLOW_DIFF_SIZE = 1ull << 38; // allow difference reg size
 	static const uint64_t T_ALLOW_ABCDH = 1ull << 39; // allow [abcd]h reg
+	static const uint64_t T_FP8 = 1ull << 40; // amx bf8 and hf8
 	// T_66 = 1, T_F3 = 2, T_F2 = 3
 	static inline uint32_t getPP(uint64_t type) { return (type & T_66) ? 1 : (type & T_F3) ? 2 : (type & T_F2) ? 3 : 0; }
 	// @@@end of avx_type_def.h
