@@ -37,7 +37,7 @@
 #endif
 
 #if DNNL_CPU_THREADING_RUNTIME == DNNL_RUNTIME_THREADPOOL
-#include "oneapi/dnnl/dnnl_threadpool.h"
+#include "oneapi/dnnl/dnnl_threadpool.hpp"
 #endif
 
 // Uses only publicly available types.
@@ -57,76 +57,6 @@
 
 extern "C" dnnl_status_t dnnl_impl_notify_profiling_complete(
         dnnl_stream_t stream);
-
-bool is_cpu(const dnnl_engine_t &engine) {
-    return query_engine_kind(engine) == dnnl_cpu;
-}
-
-bool is_gpu(const dnnl_engine_t &engine) {
-    return query_engine_kind(engine) == dnnl_gpu;
-}
-
-bool is_async(const dnnl_engine_t &engine) {
-#if DNNL_CPU_RUNTIME == DNNL_RUNTIME_THREADPOOL
-    if (is_cpu(engine))
-        return dnnl::testing::get_threadpool()->get_flags()
-                & dnnl::threadpool_interop::threadpool_iface::ASYNCHRONOUS;
-#else
-    if (is_cpu(engine)) return DNNL_CPU_RUNTIME == DNNL_RUNTIME_DPCPP;
-#endif
-    // all supported GPU runtimes are async
-    return is_gpu(engine);
-}
-
-bool is_sycl_engine(const dnnl_engine_t &engine) {
-    if (is_cpu(engine)) return DNNL_CPU_RUNTIME == DNNL_RUNTIME_DPCPP;
-    if (is_gpu(engine)) return DNNL_GPU_RUNTIME == DNNL_RUNTIME_DPCPP;
-    return false;
-}
-
-bool is_opencl_engine(const dnnl_engine_t &engine) {
-    if (is_gpu(engine)) return DNNL_GPU_RUNTIME == DNNL_RUNTIME_OCL;
-    return false;
-}
-
-bool is_ze_engine(const dnnl_engine_t &engine) {
-    if (is_gpu(engine)) return DNNL_GPU_RUNTIME == DNNL_RUNTIME_ZE;
-    return false;
-}
-
-bool is_nvidia_gpu(const dnnl_engine_t &engine) {
-#if defined(DNNL_WITH_SYCL) && DNNL_GPU_VENDOR == DNNL_VENDOR_NVIDIA
-    if (!is_gpu(engine)) return false;
-    constexpr int nvidia_vendor_id = 0x10DE;
-    auto eng = dnnl::engine(engine, true);
-    auto device = dnnl::sycl_interop::get_device(eng);
-    const auto eng_vendor_id
-            = device.get_info<::sycl::info::device::vendor_id>();
-    return eng_vendor_id == nvidia_vendor_id;
-#endif
-    return false;
-}
-
-bool is_amd_gpu(const dnnl_engine_t &engine) {
-#if defined(DNNL_WITH_SYCL) && DNNL_GPU_VENDOR == DNNL_VENDOR_AMD
-    if (!is_gpu(engine)) return false;
-    constexpr int amd_vendor_id = 0x1002;
-    auto eng = dnnl::engine(engine, true);
-    auto device = dnnl::sycl_interop::get_device(eng);
-    const auto eng_vendor_id
-            = device.get_info<::sycl::info::device::vendor_id>();
-    return eng_vendor_id == amd_vendor_id;
-#endif
-    return false;
-}
-
-bool is_generic_gpu(const dnnl_engine_t &engine) {
-#if defined(DNNL_WITH_SYCL) && DNNL_GPU_VENDOR == DNNL_VENDOR_GENERIC
-    return is_gpu(engine);
-#endif
-
-    return false;
-}
 
 int check_pd_cache(const_dnnl_primitive_desc_t pd, res_t *res) {
     // Disable this check for threadpool. A threadpool is always defined in
@@ -344,10 +274,6 @@ int test_persistent_cache_api(
     return OK;
 }
 
-// Engine kind used to run oneDNN primitives for testing
-dnnl_engine_kind_t engine_tgt_kind = dnnl_cpu;
-// Engine index used to run oneDNN primitives for testing
-size_t engine_index = 0;
 // CPU ISA specific hints : none by default
 isa_hints_t hints {isa_hints_t::none};
 
@@ -428,49 +354,6 @@ void args_t::replace(int arg, const dnn_mem_t *mem) {
             break;
         }
     }
-}
-
-stream_staller_t::stream_staller_t(stream_t &stream) {
-#if DNNL_CPU_THREADING_RUNTIME == DNNL_RUNTIME_THREADPOOL
-    auto eng = query_engine(stream);
-    auto eng_kind = query_engine_kind(eng);
-    if (eng_kind != dnnl_cpu) return;
-
-    void *tp_ptr;
-    dnnl_threadpool_interop_stream_get_threadpool(stream, &tp_ptr);
-    auto tp = static_cast<dnnl::threadpool_interop::threadpool_iface *>(tp_ptr);
-
-    // `tp` is not expected to be empty for CPU streams with threadpol runtime.
-    if (!tp) SAFE_V(FAIL);
-
-    // Only relevant for asynchronous threadpool, synchronous will
-    // deadlock.
-    if (tp->get_flags()
-            != dnnl::threadpool_interop::threadpool_iface::ASYNCHRONOUS)
-        return;
-
-    // Each thread from the threadpool should get the task to be stalled.
-    const int num_tasks = tp->get_num_threads();
-
-    // The main thread must be let through, otherwise it deadlocks as
-    // task submission won't happen.
-    std::thread::id main_thr_id = std::this_thread::get_id();
-
-    // Shared future allows to pass all waiting threads at once inside the
-    // palallel call.
-    std::shared_future<void> fut(prom_.get_future());
-
-    tp->parallel_for(num_tasks, [=](int, int) {
-        std::thread::id id_thr = std::this_thread::get_id();
-        if (id_thr != main_thr_id) fut.wait();
-    });
-#endif
-}
-
-void stream_staller_t::release() {
-#if DNNL_CPU_THREADING_RUNTIME == DNNL_RUNTIME_THREADPOOL
-    prom_.set_value();
-#endif
 }
 
 // Unmap before passing the memory to execute
@@ -857,13 +740,19 @@ int measure_perf(
 
 std::vector<float> prepare_po_vals(const dnn_mem_t &dst_m, const args_t &args,
         const std::vector<std::pair<int, int>> &v_po_masks,
-        const size_t dst_off) {
+        const size_t dst_off, int64_t group_id) {
     if (v_po_masks.empty()) return std::vector<float>();
 
     std::vector<float> v_vals(v_po_masks.size());
 
     for (size_t d = 0; d < v_po_masks.size(); ++d) {
-        const auto po_offset = dst_m.get_idx(dst_off, v_po_masks[d].second);
+        // For grouped memory, mask == 0 is overloaded to mean per-group:
+        // a single value per concatenated group, indexed by group_id
+        //
+        // Note, that group_id is 0 for non-grouped use
+        const auto po_offset = v_po_masks[d].second == 0
+                ? group_id
+                : dst_m.get_idx(dst_off, v_po_masks[d].second);
         const float val
                 = args.find(v_po_masks[d].first).get_f32_elem(po_offset);
         v_vals[d] = val;
@@ -1094,7 +983,7 @@ int check_ref_impl_hit(res_t *res) {
     return OK;
 }
 
-bool is_f64_supported(const dnnl_engine_t &engine) {
+bool is_f64_supported(const engine_t &engine) {
     if (!is_gpu(engine)) return false;
     if (is_nvidia_gpu(engine) || is_amd_gpu(engine)) return false;
 #if DNNL_GPU_RUNTIME == DNNL_RUNTIME_DPCPP
@@ -1833,132 +1722,6 @@ execution_mode_t str2execution_mode(const char *str) {
     BENCHDNN_PRINT(0, "%s", "Error: execution mode value is not recognized.\n");
     SAFE_V(FAIL);
     return execution_mode_t::direct;
-}
-
-static void maybe_print_cpu_engine_error_message() {
-#if DNNL_CPU_RUNTIME == DNNL_RUNTIME_SYCL
-    fprintf(stderr,
-            "ERROR: can't create CPU engine. Possible reasons for this error:\n"
-            "- Incorrect SYCL_DEVICE_FILTER. The filter must be either unset "
-            "or include 'opencl:cpu' devices.\n"
-            "- Missing TBB library which is required for OpenCL CPU runtime. "
-            "Check that TBB library is available in the system.\n"
-            "- Missing OpenCL CPU runtime or other issues with OpenCL CPU "
-            "runtime. Check that output from `sycl-ls` or `clinfo -l` commands "
-            "include any CPU devices.\n");
-#endif
-}
-
-engine_t::engine_t(dnnl_engine_kind_t engine_kind) : is_owner_(true) {
-    size_t idx = engine_kind == dnnl_cpu ? 0 : engine_index;
-    dnnl_status_t status = dnnl_engine_create(&engine_, engine_kind, idx);
-    if (engine_kind == dnnl_cpu && status != dnnl_success)
-        maybe_print_cpu_engine_error_message();
-    if (has_bench_mode_modifier(mode_modifier_t::no_ref_memory)) {
-        if (has_bench_mode_bit(mode_bit_t::corr)) {
-            BENCHDNN_PRINT(0, "%s\n",
-                    "Error: the modifier to disable host memory usage "
-                    "cannot be used for correctness testing.");
-            status = dnnl_invalid_arguments;
-        }
-    }
-    // Temporary workaround.
-    // TODO: make mode-modifier=M by default for perf on GPU.
-    // TODO-TODO: make mode-modifier=M by default (including CPU).
-    if (has_bench_mode_bit(mode_bit_t::perf) && engine_kind == dnnl_gpu) {
-        bench_mode_modifier |= mode_modifier_t::no_ref_memory;
-    }
-    DNN_SAFE_V(status);
-}
-
-engine_t::engine_t(dnnl_engine_t engine) : engine_(engine), is_owner_(false) {}
-
-engine_t::engine_t(const engine_t &other) : is_owner_(other.is_owner_) {
-    if (!is_owner_) {
-        engine_ = other.engine_;
-        return;
-    }
-
-    dnnl_engine_kind_t engine_kind;
-    DNN_SAFE_V(dnnl_engine_get_kind(other.engine_, &engine_kind));
-
-    if (engine_kind == dnnl_cpu) {
-#if DNNL_CPU_RUNTIME == DNNL_RUNTIME_SYCL
-        void *dev;
-        void *ctx;
-        DNN_SAFE_V(dnnl_sycl_interop_engine_get_device(other.engine_, &dev));
-        DNN_SAFE_V(dnnl_sycl_interop_engine_get_context(other.engine_, &ctx));
-        DNN_SAFE_V(dnnl_sycl_interop_engine_create(&engine_, dev, ctx));
-#else
-        DNN_SAFE_V(dnnl_engine_create(&engine_, dnnl_cpu, 0));
-#endif
-    } else if (engine_kind == dnnl_gpu) {
-#if DNNL_GPU_RUNTIME == DNNL_RUNTIME_OCL
-        cl_device_id dev;
-        cl_context ctx;
-        DNN_SAFE_V(dnnl_ocl_interop_get_device(other.engine_, &dev));
-        DNN_SAFE_V(dnnl_ocl_interop_engine_get_context(other.engine_, &ctx));
-        DNN_SAFE_V(dnnl_ocl_interop_engine_create(&engine_, dev, ctx));
-#elif DNNL_GPU_RUNTIME == DNNL_RUNTIME_SYCL
-        void *dev;
-        void *ctx;
-        DNN_SAFE_V(dnnl_sycl_interop_engine_get_device(other.engine_, &dev));
-        DNN_SAFE_V(dnnl_sycl_interop_engine_get_context(other.engine_, &ctx));
-        DNN_SAFE_V(dnnl_sycl_interop_engine_create(&engine_, dev, ctx));
-#elif DNNL_GPU_RUNTIME == DNNL_RUNTIME_ZE
-        ze_driver_handle_t drv;
-        ze_device_handle_t dev;
-        ze_context_handle_t ctx;
-        DNN_SAFE_V(dnnl_ze_interop_engine_get_driver(other.engine_, &drv));
-        DNN_SAFE_V(dnnl_ze_interop_engine_get_device(other.engine_, &dev));
-        DNN_SAFE_V(dnnl_ze_interop_engine_get_context(other.engine_, &ctx));
-        DNN_SAFE_V(dnnl_ze_interop_engine_create(&engine_, drv, dev, ctx));
-#else
-        assert(!"unsupported GPU runtime");
-#endif
-    } else {
-        assert(!"unsupported engine kind");
-    }
-}
-
-engine_t::~engine_t() {
-    if (is_owner_) DNN_SAFE_V(dnnl_engine_destroy(engine_));
-}
-
-dnnl_engine_kind_t engine_t::get_kind() const {
-    return query_engine_kind(engine_);
-}
-
-stream_t::stream_t(dnnl_engine_t engine, void *interop_obj) : is_owner_(true) {
-#if DNNL_CPU_THREADING_RUNTIME == DNNL_RUNTIME_THREADPOOL
-    if (is_cpu(engine)) {
-        auto tp = static_cast<dnnl::threadpool_interop::threadpool_iface *>(
-                interop_obj);
-        if (tp == nullptr) tp = dnnl::testing::get_threadpool();
-        SAFE_V(dnnl_threadpool_interop_stream_create(&stream_, engine, tp));
-        return;
-    }
-#endif
-
-    const bool use_profiling = has_bench_mode_bit(mode_bit_t::perf)
-            && is_gpu(engine) && !is_nvidia_gpu(engine) && !is_amd_gpu(engine);
-    dnnl_stream_flags_t flags
-            = stream_kind2stream_flags(stream_kind, use_profiling);
-    DNN_SAFE_V(dnnl_stream_create(&stream_, engine, flags));
-}
-
-stream_t::~stream_t() {
-    if (is_owner_) DNN_SAFE_V(dnnl_stream_destroy(stream_));
-}
-
-stream_t &stream_t::operator=(stream_t &&rhs) {
-    if (&rhs == this) return *this;
-
-    stream_ = rhs.stream_;
-    is_owner_ = rhs.is_owner_;
-
-    rhs.is_owner_ = false;
-    return *this;
 }
 
 float reorder_rescale_factor() {

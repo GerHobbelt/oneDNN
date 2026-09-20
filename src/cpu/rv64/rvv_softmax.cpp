@@ -1,5 +1,6 @@
 /******************************************************************************
 * Copyright 2025 ZTE Corporation
+* Copyright 2026 SpacemiT Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -89,6 +90,27 @@ void compute_softmax_f32_rvv(const float *src, float *dst, dim_t len,
 }
 
 #if defined(XBYAK_RISCV_V) && XBYAK_RISCV_V == 1
+void compute_softmax_f16_scalar(const dnnl::impl::float16_t *src,
+        dnnl::impl::float16_t *dst, dim_t len, bool is_logsoftmax,
+        float max_val) {
+    float sum_exp = 0.f;
+
+    for (dim_t i = 0; i < len; ++i) {
+        const float D = (float)src[i] - max_val;
+        sum_exp += expf(D);
+    }
+
+    if (is_logsoftmax) {
+        const float log_sum = logf(sum_exp);
+        for (dim_t i = 0; i < len; ++i)
+            dst[i] = (float)src[i] - max_val - log_sum;
+    } else {
+        const float inv_sum = sum_exp ? (1.0f / sum_exp) : 1.0f;
+        for (dim_t i = 0; i < len; ++i)
+            dst[i] = expf((float)src[i] - max_val) * inv_sum;
+    }
+}
+
 // f16 compute kernel
 void compute_softmax_f16_rvv(const dnnl::impl::float16_t *src,
         dnnl::impl::float16_t *dst, dim_t len, bool is_logsoftmax,
@@ -96,29 +118,47 @@ void compute_softmax_f16_rvv(const dnnl::impl::float16_t *src,
 
     float max_val
             = (float)nstl::numeric_limits<dnnl::impl::float16_t>::lowest();
+    bool has_nan = false;
     for (dim_t i = 0; i < len; ++i) {
+        has_nan = has_nan || ((src[i].raw & 0x7fffu) > 0x7c00u);
         float val = (float)src[i];
         if (val > max_val) max_val = val;
     }
+    const bool max_is_pos_inf = max_val == INFINITY;
+
+    if (len == 1 && isfinite((float)src[0])) {
+        dst[0] = is_logsoftmax ? 0.f : 1.f;
+        return;
+    }
+
+    if (has_nan || max_is_pos_inf) {
+        compute_softmax_f16_scalar(src, dst, len, is_logsoftmax, max_val);
+        return;
+    }
 
     if (is_logsoftmax) {
+        float *scratchpad = new float[len];
         float sum_exp = 0.f;
-        for (dim_t i = 0; i < len; ++i) {
-            sum_exp += expf((float)src[i] - max_val);
-        }
+
+        jit_rvv_softmax_f16_exp_sub_sum(
+                src, scratchpad, len, max_val, &sum_exp);
         const float log_sum = logf(sum_exp);
 
         const float sub = max_val + log_sum;
         jit_rvv_softmax_f16_affine_from_f16(src, dst, len, sub, 1.0f);
+        delete[] scratchpad;
     } else {
         float *tmp_dst = new float[len];
         float sum_exp = 0.f;
         const bool all_minus_inf
                 = is_softmax_inf_as_zero && (max_val == -INFINITY);
-        for (dim_t i = 0; i < len; ++i) {
-            float e = all_minus_inf ? 0.f : expf((float)src[i] - max_val);
-            tmp_dst[i] = e;
-            sum_exp += e;
+
+        if (all_minus_inf) {
+            for (dim_t i = 0; i < len; ++i)
+                tmp_dst[i] = 0.f;
+        } else {
+            jit_rvv_softmax_f16_exp_sub_sum(
+                    src, tmp_dst, len, max_val, &sum_exp);
         }
         const float inv_sum = sum_exp ? (1.0f / sum_exp) : 1.0f;
 

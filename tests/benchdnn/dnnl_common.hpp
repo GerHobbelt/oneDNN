@@ -18,13 +18,12 @@
 #define DNNL_COMMON_HPP
 
 #include <functional>
-#include <future> // for std::promise and std::future
 #include <stddef.h>
 #include <stdint.h>
 #include <vector>
 #include <unordered_map>
 
-#include "oneapi/dnnl/dnnl.h"
+#include "oneapi/dnnl/dnnl.hpp"
 
 #include "common.hpp"
 #include "dnn_types.hpp"
@@ -33,49 +32,16 @@
 #include "utils/compare.hpp"
 #include "utils/dims.hpp"
 #include "utils/dnnl_query.hpp"
+#include "utils/engine.hpp"
 #include "utils/fill.hpp"
 #include "utils/impl_filter.hpp"
 #include "utils/numeric.hpp"
 #include "utils/parallel.hpp"
+#include "utils/stream_kind.hpp"
 
 #include "tests/test_thread.hpp"
 
 #define for_ for
-
-#define DNN_SAFE(f, s) \
-    do { \
-        dnnl_status_t status__ = f; \
-        if (status__ != dnnl_success) { \
-            if ((s) == CRIT || (s) == WARN) { \
-                BENCHDNN_PRINT(0, \
-                        "Error: Function '%s' at (%s:%d) returned '%s'\n", \
-                        __FUNCTION__, __FILE__, __LINE__, \
-                        status2str(status__)); \
-                fflush(0); \
-                if ((s) == CRIT) exit(2); \
-            } \
-            return FAIL; \
-        } \
-    } while (0)
-
-#define DNN_SAFE_V(f) \
-    do { \
-        dnnl_status_t status__ = (f); \
-        if (status__ != dnnl_success) { \
-            BENCHDNN_PRINT(0, \
-                    "Error: Function '%s' at (%s:%d) returned '%s'\n", \
-                    __FUNCTION__, __FILE__, __LINE__, status2str(status__)); \
-            fflush(0); \
-            exit(2); \
-        } \
-    } while (0)
-
-// Unlike `DNN_SAFE` this one returns `dnnl_status_t`, not `OK/FAIL`.
-#define DNN_SAFE_STATUS(f) \
-    do { \
-        dnnl_status_t status__ = (f); \
-        if (status__ != dnnl_success) { return status__; } \
-    } while (0)
 
 #ifndef DNNL_EXPERIMENTAL_PROFILING
 #if DNNL_GPU_RUNTIME == DNNL_RUNTIME_OCL \
@@ -91,68 +57,11 @@ extern "C" dnnl_status_t dnnl_query_profiling_data(dnnl_stream_t stream,
 int check_pd_cache(const_dnnl_primitive_desc_t pd, res_t *res);
 int check_primitive_cache(dnnl_primitive_t p, res_t *res);
 
-extern dnnl_engine_kind_t engine_tgt_kind;
-extern size_t engine_index;
 extern isa_hints_t hints;
 extern int default_num_streams;
 extern int num_streams;
 
-struct engine_t {
-    engine_t(dnnl_engine_kind_t engine_kind);
-    engine_t(dnnl_engine_t engine);
-    engine_t(const engine_t &other);
-    ~engine_t();
-    operator dnnl_engine_t() const { return engine_; }
-    dnnl_engine_kind_t get_kind() const;
-
-private:
-    engine_t &operator=(engine_t &other) = delete;
-    dnnl_engine_t engine_;
-    bool is_owner_;
-};
-
-struct stream_t {
-    stream_t() : stream_(nullptr), is_owner_(false) {}
-    stream_t(dnnl_engine_t engine, void *interop_obj = nullptr);
-    ~stream_t();
-    operator dnnl_stream_t() const { return stream_; }
-    stream_t &operator=(stream_t &&rhs);
-
-private:
-    BENCHDNN_DISALLOW_COPY_AND_ASSIGN(stream_t);
-    dnnl_stream_t stream_;
-    bool is_owner_;
-};
-
-// Engine used to run oneDNN primitives for testing.
-inline const engine_t &get_test_engine() {
-    static const engine_t instance(engine_tgt_kind);
-    assert(instance.get_kind() == engine_tgt_kind);
-    return instance;
-}
-
-// Engine used to run all reference native implementations and CPU
-// implementations used by `--fast-ref` option.
-inline const engine_t &get_cpu_engine() {
-#if DNNL_CPU_RUNTIME == DNNL_RUNTIME_NONE
-    // In case of lacking CPU engine, just re-use testing one.
-    return get_test_engine();
-#else
-    static const engine_t instance(dnnl_cpu);
-    return instance;
-#endif
-}
-
-bool is_cpu(const dnnl_engine_t &engine = get_test_engine());
-bool is_gpu(const dnnl_engine_t &engine = get_test_engine());
-bool is_async(const dnnl_engine_t &engine = get_test_engine());
-bool is_sycl_engine(const dnnl_engine_t &engine = get_test_engine());
-bool is_opencl_engine(const dnnl_engine_t &engine = get_test_engine());
-bool is_ze_engine(const dnnl_engine_t &engine = get_test_engine());
-bool is_nvidia_gpu(const dnnl_engine_t &engine = get_test_engine());
-bool is_f64_supported(const dnnl_engine_t &engine = get_test_engine());
-bool is_amd_gpu(const dnnl_engine_t &engine = get_test_engine());
-bool is_generic_gpu(const dnnl_engine_t &engine = get_test_engine());
+bool is_f64_supported(const engine_t &engine = get_test_engine());
 
 // Extended version of dnnl_sycl_interop_memory_kind_t enumeration.
 enum class memory_kind_ext_t {
@@ -187,18 +96,6 @@ struct args_t {
 
 private:
     std::vector<std::pair<int, const dnn_mem_t *>> args_;
-};
-
-struct stream_staller_t {
-    // Enqueue tasks to stall a primitive execution tasks for asynchronous
-    // threadpool runtime. For rest runtimes does nothing.
-    stream_staller_t(stream_t &stream);
-
-    // A signal the submission has completed and ready for execution.
-    void release();
-
-private:
-    std::promise<void> prom_;
 };
 
 template <typename prb_t>
@@ -534,7 +431,7 @@ int init_prim(benchdnn_dnnl_wrapper_t<dnnl_primitive_t> &user_prim,
         // where CPU and GPU engines are re-created because this is a commonly
         // used scenario in the frameworks.
         // NOLINTNEXTLINE(performance-unnecessary-copy-initialization)
-        engine_t engine(get_test_engine());
+        engine_t engine(get_test_engine(), /* recreate_on_copy = */ true);
 
         // The first primitive creation using a temporary engine.
         SAFE(create_primitive(primw, engine, init_pd_func, prb, res, dir, hint,
@@ -715,7 +612,7 @@ int measure_perf(
 
 std::vector<float> prepare_po_vals(const dnn_mem_t &dst_m, const args_t &args,
         const std::vector<std::pair<int, int>> &v_po_masks,
-        const size_t dst_off);
+        const size_t dst_off, int64_t group_id = 0);
 
 bool check_md_consistency_with_tag(
         const_dnnl_memory_desc_t md, const std::string &tag);

@@ -279,6 +279,27 @@ status_t check_isa_with_datatype(
     return ok ? status::success : status::unimplemented;
 }
 
+// The GEMV code path has requirements for (isa, dt) combinations that may
+// differ from what the general `check_isa_with_datatype` table allows.
+//
+// Whether the GEMV code path is applicable is not known when
+// `check_isa_with_datatype` is called. Therefore, both
+// `check_isa_with_datatype` and `gemv_check_isa_with_datatype` are called and
+// the final decision is made later, once GEMV applicability is known.
+status_t gemv_check_isa_with_datatype(
+        const cpu_isa_t isa, const brgemm_matmul_conf_utils_t &bm_conf_utils) {
+    // Valid GEMV (dt, isa) combinations:
+    // - f32  -> avx2
+    // - bf16 -> avx512_core_bf16
+    // - f16  -> avx512_core
+    // Any other data type or isa is unsupported.
+    const bool ok = (bm_conf_utils.is_f32() && isa == avx2)
+            || (bm_conf_utils.is_bf16() && isa == avx512_core_bf16)
+            || (bm_conf_utils.is_f16() && isa == avx512_core);
+
+    return ok ? status::success : status::unimplemented;
+}
+
 status_t check_datatype_cfg(const brgemm_matmul_conf_utils_t &bm_conf_utils) {
     const bool ok
             = one_of(true, bm_conf_utils.is_f32(), bm_conf_utils.is_bf16(),
@@ -510,8 +531,7 @@ format_tag_t brgemm_matmul_conf_utils_t::get_gemv_B_tag(
  * GEMV is applicable only when:
  *   - M == 1 or N == 1
  *   - reduction is not used
- *   - data type is f32
- *   - fpmath mode is strict
+ *   - data type is f32, bf16, or f16
  *   - A and B formats can be resolved to supported GEMV layouts
  *   - output layout satisfies GEMV requirements
  */
@@ -525,8 +545,16 @@ bool is_gemv_applicable(const brgemm_matmul_conf_t &bgmmc,
     // Reduction is not supported for GEMV code path.
     if (bgmmc.with_reduce) return false;
 
-    // BRGEMV currently supports only f32.
-    if (!bm_conf_utils.is_f32()) return false;
+    // GEMV applicability must ensure that at least one `brgemm_matmul_t<isa>`
+    // instantiation can execute the case because GEMM/GEMV dispatching logic
+    // relies on it. Here we require the platform to support the exact isa that
+    // `gemv_check_isa_with_datatype` mandates for the data type:
+    // f32 -> avx2, bf16 -> avx512_core_bf16, f16 -> avx512_core.
+    // This also rejects any data type not supported by the GEMV path.
+    const bool gemv_isa_dt_supported = (bm_conf_utils.is_f32() && mayiuse(avx2))
+            || (bm_conf_utils.is_bf16() && mayiuse(avx512_core_bf16))
+            || (bm_conf_utils.is_f16() && mayiuse(avx512_core));
+    if (!gemv_isa_dt_supported) return false;
 
     const format_tag_t gemv_A_tag = bm_conf_utils.get_gemv_A_tag(A_md);
     const format_tag_t gemv_B_tag = bm_conf_utils.get_gemv_B_tag(B_md);
@@ -536,20 +564,22 @@ bool is_gemv_applicable(const brgemm_matmul_conf_t &bgmmc,
     const auto gemv_strategy
             = bm_conf_utils.get_gemv_strategy(gemv_A_tag, gemv_B_tag);
 
-    const bool is_transA_strategy = utils::one_of(gemv_strategy,
-            gemv_strategy_t::n1_A_trans, gemv_strategy_t::m1_B_plain);
-    const bool is_swap_strategy = utils::one_of(gemv_strategy,
-            gemv_strategy_t::m1_B_plain, gemv_strategy_t::m1_B_trans);
-
-    // transA GEMV requires contiguous output (INCY == 1) for tensors with
-    // batch dimensions. Some batched layouts, e.g. `bac`, place the batch
-    // dimension between consecutive GEMV output elements and make INCY > 1.
-    const dim_t ndims = bgmmc.ndims;
-    if (is_transA_strategy && ndims > 2) {
-        const dim_t gemv_incy = is_swap_strategy
-                ? 1
-                : C_md.format_desc.blocking.strides[ndims - 2];
-        if (gemv_incy != 1) return false;
+    // The `n1_A_trans` strategy dispatches the transA BRGEMV kernel, which
+    // vector-stores `y` and therefore requires unit output stride (INCY == 1).
+    // The `m1_B_plain` strategy dispatches the same kernel but swaps A/B, which
+    // automatically forces INCY == 1, so it needs no check here.
+    if (gemv_strategy == gemv_strategy_t::n1_A_trans) {
+        // When the C format is `any` it's not yet initialized at this point, so
+        // we shouldn't read the strides. It will later be initialized with
+        // `plain_tensor_layout_tag`, where N == 1 makes the M axis unit-strided
+        // (INCY == 1), so the `any` case resolves to a contiguous layout by
+        // design and is therefore skipped.
+        //
+        // `dims_adjacent()` validates unit INCY for an explicit C, ignoring
+        // batch-dim permutations and handling unit dimensions safely.
+        if (C_md.format_kind != format_kind::any
+                && !dims_adjacent(C_md, bgmmc.ndims - 2, bgmmc.ndims - 1))
+            return false;
     }
 
     return true;
@@ -716,6 +746,11 @@ status_t brgemm_matmul_conf_utils_t::set_or_check_tags(memory_desc_t &A_md,
         VCHECK_BG(memory_desc_init_by_tag(C_md, desired_C_tag),
                 VERBOSE_UNSUPPORTED_TAG);
         bgmmc.dst_tag = desired_C_tag;
+
+        // `is_gemv_applicable()` assumes that the `any` format tag resolves to
+        // `plain_tensor_layout_tag`.
+        assert(IMPLICATION(
+                bgmmc.is_gemv, bgmmc.dst_tag == plain_tensor_layout_tag));
     } else {
         const memory_desc_wrapper C_mdw(C_md);
         // If one of dims is `1` then `ba` is identical to `ab`.
@@ -1042,10 +1077,69 @@ void maybe_unswap_mn_blocking(const brgemm_matmul_conf_t &bgmmc,
     std::swap(best_blocking.m_tail, best_blocking.n_tail);
 }
 
+// GEMV is memory-bound so we want the largest possible K_blk because a small
+// K_blk splits K into many K_chunks that accumulate through the C buffer and
+// break A/B streaming. Using one large K_blk keeps the whole reduction in
+// registers.
+//
+// - K_blk is capped as a conservative bound on in-kernel (int32) offsets.
+// - batch_size is set so K_blk * batch_size covers K (K_chunks == 1) so the
+//   brgemm batch loop reduces all K-blocks in registers.
+void compute_gemv_k_blocking(dim_t K, int &k_blk, int &batch_size) {
+    constexpr dim_t max_gemv_k_blk = 16384;
+    k_blk = static_cast<int>(std::min<dim_t>(K, max_gemv_k_blk));
+    batch_size = static_cast<int>(std::max<dim_t>(1, div_up(K, k_blk)));
+}
+
+// GEMV usually keeps nthr_k == 1 so the K-reduction stays in registers.
+//
+// For n1_A_trans/m1_B_plain, A is column-major (LDA == M). Each K-step accesses
+// A with a stride of M * dt bytes. If that stride is a power of two, accesses
+// repeatedly hit the same cache sets. Once the A footprint exceeds L2, this
+// causes conflict misses and the thread becomes latency-bound. Non-power-of-two
+// strides distribute accesses across cache sets and avoid this issue.
+//
+// Splitting K across threads increases memory-level parallelism and hides the
+// miss latency. The reduction overhead is negligible. However, this only helps
+// when M-parallelism is low. If there are already enough M-blocks to keep cores
+// busy, M-parallelism hides the stalls and K-splitting only adds overhead.
+//
+// Therefore, enable K-splitting only when:
+//  - the A stride (M * dt) is a power of two,
+//  - the A footprint exceeds L2, and
+//  - M-parallelism is too low to fully utilize the cores.
+//
+// div_up(M, min_m_blk) is an upper bound on M-parallelism because the tuner can
+// only select m_blk >= min_m_blk.
+bool is_gemv_k_split_needed(const brgemm_matmul_conf_t &bgmmc,
+        const matmul_avx512_blocking_params_t::matmul_params_t &matmul,
+        int min_m_blk, int nthr) {
+    if (!bgmmc.is_gemv
+            || !utils::one_of(bgmmc.gemv_strategy, gemv_strategy_t::n1_A_trans,
+                    gemv_strategy_t::m1_B_plain))
+        return false;
+
+    const dim_t src_dt_sz = bgmmc.gemv_swap_a_b ? bgmmc.b_dt_sz : bgmmc.a_dt_sz;
+    const size_t src_sz = matmul.M * matmul.K * src_dt_sz;
+    const size_t l2_size = platform::get_per_core_cache_size(2);
+    const dim_t max_m_blocks = div_up(matmul.M, min_m_blk);
+
+    // (a) A's column stride is a power of two.
+    const bool aliasing_stride = math::is_pow2(matmul.M * src_dt_sz);
+    // (b) The A footprint exceeds L2.
+    const bool src_exceeds_l2 = src_sz > l2_size;
+    // (c) There are too few M-blocks to keep cores busy.
+    const bool low_m_parallelism = max_m_blocks <= 2 * nthr;
+
+    return aliasing_stride && src_exceeds_l2 && low_m_parallelism;
+}
+
 float compute_blocking_heuristic_avx512(brgemm_matmul_conf_t &bgmmc,
         const brgemm_matmul_conf_utils_t &bm_conf_utils,
-        const matmul_avx512_blocking_params_t::matmul_params_t &matmul,
+        const matmul_avx512_blocking_params_t::matmul_params_t &matmul_,
         matmul_avx512_blocking_params_t &best_blocking) {
+
+    const auto matmul = maybe_swap_mn_params(bgmmc, matmul_);
     const int nthr = bgmmc.nthr;
 
     const bool need_large_m_blk = bgmmc.ndims == 2 && bm_conf_utils.is_f32()
@@ -1068,7 +1162,9 @@ float compute_blocking_heuristic_avx512(brgemm_matmul_conf_t &bgmmc,
     const bool use_extended_k_blk = matmul.K > 1024
             && (!bm_conf_utils.check_is_transposed(bgmmc.src_tag));
     const dim_t default_k_blk = use_extended_k_blk ? 1024 : 512;
-    const int k_blk = static_cast<int>(nstl::min(matmul.K, default_k_blk));
+    int k_blk = static_cast<int>(nstl::min(matmul.K, default_k_blk));
+    int brgemm_bs = 1;
+    if (bgmmc.is_gemv) compute_gemv_k_blocking(matmul.K, k_blk, brgemm_bs);
     int start_nthr_k = 1;
     int last_nthr_k = 1;
 
@@ -1102,8 +1198,10 @@ float compute_blocking_heuristic_avx512(brgemm_matmul_conf_t &bgmmc,
             }
         }
 
-        // Parallelize across K for shapes with big 'K' dimension
-        bool bwd_w_par_k_blk = bgmmc.batch == 1
+        // Parallelize across K for shapes with big 'K' dimension.
+        // Disabled for GEMV: it needs nthr_k == 1 to keep one continuous,
+        // in-register K-stream.
+        bool bwd_w_par_k_blk = !bgmmc.is_gemv && bgmmc.batch == 1
                 && bm_conf_utils.check_is_transposed(bgmmc.src_tag)
                 && !bm_conf_utils.is_int8()
                 && IMPLICATION(bm_conf_utils.is_bf16(), math::is_pow2(matmul.K))
@@ -1114,9 +1212,10 @@ float compute_blocking_heuristic_avx512(brgemm_matmul_conf_t &bgmmc,
         }
 
         // Enable k-partitioning for huge k and small m/n dimensions.
+        // Disabled for GEMV (same reason: keep nthr_k == 1).
         bool is_huge_k = matmul.K >= 20000;
         bool is_small_mn = matmul.M <= 512 && matmul.N <= 512;
-        bool use_k_partitioning = is_huge_k && is_small_mn;
+        bool use_k_partitioning = !bgmmc.is_gemv && is_huge_k && is_small_mn;
 
         // TODO: expand to other data types.
         use_k_partitioning = use_k_partitioning && bm_conf_utils.is_f32();
@@ -1153,6 +1252,17 @@ float compute_blocking_heuristic_avx512(brgemm_matmul_conf_t &bgmmc,
         }
     }
 
+    // Enable K-split only for the GEMV cache-aliasing case where M-parallelism
+    // is insufficient. (see `is_gemv_k_split_needed` for the rationale).
+    if (is_gemv_k_split_needed(bgmmc, matmul, min_m_blk, nthr)) {
+        const int max_gemv_nthr_k = 4;
+        const int gemv_nthr_k = std::min(nthr, max_gemv_nthr_k);
+        // Re-calculate k blocking.
+        compute_gemv_k_blocking(
+                div_up(matmul.K, gemv_nthr_k), k_blk, brgemm_bs);
+        start_nthr_k = last_nthr_k = gemv_nthr_k;
+    }
+
     // Use large m-blocking if possible.
     const bool is_huge_n = matmul.N >= 20000;
     const bool large_bmn_parallelism = max_bmn_parallel > 10 * nthr;
@@ -1174,7 +1284,7 @@ float compute_blocking_heuristic_avx512(brgemm_matmul_conf_t &bgmmc,
                 --n_chunk_size)
         for (int m_blk = max_m_blk; m_blk >= min_m_blk; --m_blk) {
             cur_params.update_params(
-                    1, m_blk, n_chunk_size, n_blk, 1, k_blk, nthr_k);
+                    1, m_blk, n_chunk_size, n_blk, brgemm_bs, k_blk, nthr_k);
 
             float cur_imbalance = cur_params.get_imbalance();
 
@@ -1196,7 +1306,8 @@ float compute_blocking_heuristic_avx512(brgemm_matmul_conf_t &bgmmc,
         }
 
         if (!found_best_blocking) {
-            cur_params.update_params(1, min_m_blk, 1, n_blk, 1, k_blk, nthr_k);
+            cur_params.update_params(
+                    1, min_m_blk, 1, n_blk, brgemm_bs, k_blk, nthr_k);
 
             float cur_imbalance = cur_params.get_imbalance();
             if (cur_imbalance < best_imbalance) {
@@ -1205,6 +1316,9 @@ float compute_blocking_heuristic_avx512(brgemm_matmul_conf_t &bgmmc,
             }
         }
     }
+
+    maybe_unswap_mn_blocking(bgmmc, best_blocking);
+
     return best_imbalance;
 }
 
@@ -1212,8 +1326,9 @@ float compute_blocking_heuristic_avx2(brgemm_matmul_conf_t &bgmmc,
         const brgemm_matmul_conf_utils_t &bm_conf_utils,
         const matmul_avx512_blocking_params_t::matmul_params_t &matmul,
         matmul_avx512_blocking_params_t &best_blocking) {
-    const int nthr = bgmmc.nthr;
+    assert(!bgmmc.is_gemv);
 
+    const int nthr = bgmmc.nthr;
     const int max_m_blk
             = static_cast<int>(nstl::min(/*64*/ (dim_t)256, matmul.M));
     int min_m_blk
@@ -1283,7 +1398,9 @@ float compute_blocking_heuristic_avx2_f32(brgemm_matmul_conf_t &bgmmc,
             = static_cast<int>(nstl::min(max_n_chunks, n_chunks));
 
     constexpr dim_t default_k_blk = 1024;
-    const int k_blk = static_cast<int>(nstl::min(matmul.K, default_k_blk));
+    int k_blk = static_cast<int>(nstl::min(matmul.K, default_k_blk));
+    int brgemm_bs = 1;
+    if (bgmmc.is_gemv) compute_gemv_k_blocking(matmul.K, k_blk, brgemm_bs);
     const int start_nthr_k = 1;
 
     // for cases with low parallel work, reduce 'min_m_blk' to
@@ -1291,12 +1408,12 @@ float compute_blocking_heuristic_avx2_f32(brgemm_matmul_conf_t &bgmmc,
     size_t max_parallel = matmul.batch * n_chunks;
     const float req_additional_parallel = nthr / max_parallel;
     if (req_additional_parallel > 1) {
-        min_m_blk = saturate<dim_t>(
-                16, max_m_blk, matmul.M / req_additional_parallel);
+        min_m_blk = saturate<dim_t>(nstl::min((dim_t)16, max_m_blk), max_m_blk,
+                matmul.M / req_additional_parallel);
         max_parallel *= div_up(matmul.M, min_m_blk);
     } else if (bm_conf_utils.check_is_transposed(bgmmc.src_tag)
             && matmul.K >= 4096) {
-        min_m_blk = nstl::max((dim_t)16, matmul.M / 4);
+        min_m_blk = nstl::min(max_m_blk, nstl::max((dim_t)16, matmul.M / 4));
     }
 
     bool low_parallel_work = max_parallel % nthr != 0
@@ -1317,7 +1434,7 @@ float compute_blocking_heuristic_avx2_f32(brgemm_matmul_conf_t &bgmmc,
     for (int m_blk = max_m_blk; m_blk >= min_m_blk; --m_blk) {
         matmul_avx512_blocking_params_t cur_params(matmul, nthr);
         cur_params.update_params(
-                1, m_blk, n_chunk_size, n_blk, 1, k_blk, nthr_k);
+                1, m_blk, n_chunk_size, n_blk, brgemm_bs, k_blk, nthr_k);
 
         float cur_imbalance = cur_params.get_imbalance();
         if (cur_imbalance < best_imbalance) {
@@ -1531,7 +1648,27 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
             bias_md.format_kind == format_kind::any);
 
     VCHECK_BG(check_datatype_cfg(bm_conf_utils), VERBOSE_UNSUPPORTED_DT_CFG);
-    VCHECK_BG(check_isa_with_datatype(isa, bm_conf_utils),
+
+    // The GEMM and GEMV code paths have different (isa, dt) requirements.
+    // At this stage, we do not yet know whether the GEMV path applies to the
+    // current problem. Reorganizing this initialization to determine that here
+    // would introduce an undesirable dependency on the position of the
+    // `is_gemv_applicable()` call.
+    //
+    // To avoid this, we perform the checks independently using two functions:
+    //
+    // * check_isa_with_datatype()      — validates (isa, dt) for the GEMM path
+    // * gemv_check_isa_with_datatype() — validates (isa, dt) for the GEMV path
+    //
+    // We call both functions here and defer selecting the relevant result until
+    // after `is_gemv_applicable()` is evaluated.
+    const status_t check_isa_dt_st
+            = check_isa_with_datatype(isa, bm_conf_utils);
+    const status_t gemv_check_isa_dt_st
+            = gemv_check_isa_with_datatype(isa, bm_conf_utils);
+
+    VCONDCHECK_BG(
+            one_of(status::success, check_isa_dt_st, gemv_check_isa_dt_st),
             VERBOSE_ISA_DT_MISMATCH);
 
     bgmmc.is_amx = is_superset(isa, avx512_core_amx);
@@ -1696,8 +1833,26 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
 
     bgmmc.is_gemv = is_gemv_applicable(
             bgmmc, bm_conf_utils, src_md, weights_md, dst_md, attr);
-    VCONDCHECK_BG(IMPLICATION(bgmmc.is_gemv, isa == avx2),
-            "Fall back to the AVX2 implementation for the GEMV code path");
+
+    // At this point, GEMV applicability is known so we decide how to interpret
+    // the (isa, dt) check statuses:
+    // - `check_isa_dt_st`         (GEMM path)
+    // - `gemv_check_isa_dt_st`    (GEMV path)
+    //
+    // If GEMV is applicable we use `gemv_check_isa_dt_st` to drive the
+    // instantiation search:
+    // - `status::success`:        this instantiation is valid
+    // - `status::unimplemented`:  this instantiation is not applicable
+    //
+    // This relies on the invariant that the GEMV path is applicable guarantees
+    // the existence of at least one valid instantiation for GEMV
+    // (`is_gemv_applicable` checks data type support independently of ida).
+    // Therefore, a failure here only means that the *current* instantiation is
+    // not the right one.
+    //
+    // If GEMV is not applicable we use `check_isa_dt_st`.
+    VCHECK_BG(bgmmc.is_gemv ? gemv_check_isa_dt_st : check_isa_dt_st,
+            VERBOSE_ISA_DT_MISMATCH);
 
     if (bgmmc.is_gemv) {
         bgmmc.gemv_strategy = bm_conf_utils.get_gemv_strategy(

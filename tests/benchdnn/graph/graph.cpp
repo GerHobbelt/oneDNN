@@ -435,8 +435,7 @@ int skip_unimplemented_ops(const dnnl::graph::partition &partition,
     static const std::vector<std::string> unimplemented_ops {"Pow"};
     // A list of ops that don't have DNNL backend support so far on GPU.
     static const std::vector<std::string> unimplemented_ops_gpu {};
-    const auto &eng = get_graph_engine();
-    bool is_gpu = eng.get_kind() == dnnl::engine::kind::gpu;
+    const bool is_gpu = get_graph_engine().is_gpu();
     // For an unsupported partition, retrieve all operation IDs, find a
     // correspondent operation kind in a deserialized_graph_t and match it against
     // a list of known unsupported ops.
@@ -479,8 +478,7 @@ int skip_unimplemented_ops(const dnnl::graph::partition &partition,
 int skip_unimplemented_accumulation_mode(
         const dnnl::graph::partition &partition, const deserialized_graph_t &dg,
         res_t *res) {
-    const auto &eng = get_graph_engine();
-    bool is_cpu = eng.get_kind() == dnnl::engine::kind::cpu;
+    const bool is_cpu = get_graph_engine().is_cpu();
     if (!is_cpu) return OK;
     const std::vector<size_t> &partition_op_ids = partition.get_ops();
     for (const size_t op_id : partition_op_ids) {
@@ -618,15 +616,9 @@ int doit(const prb_t *prb, res_t *res) {
     SAFE(skip_unimplemented_partitions(partitions, dg, prb, res), WARN);
     if (res->state == SKIPPED) return OK;
 
-    const auto &eng = get_graph_engine();
-    const dnnl::engine &dnnl_eng = static_cast<const dnnl::engine>(eng);
+    const dnnl::engine &eng = get_graph_engine();
 
-    const bool use_profiling = has_bench_mode_bit(mode_bit_t::perf)
-            && is_gpu(dnnl_eng.get()) && !is_nvidia_gpu(dnnl_eng.get())
-            && !is_amd_gpu(dnnl_eng.get());
-    dnnl_stream_flags_t flags
-            = stream_kind2stream_flags(stream_kind, use_profiling);
-    cpp_stream_t strm {eng, static_cast<dnnl::stream::flags>(flags)};
+    stream_t strm {get_graph_engine()};
 
     // mark the output logical tensors of partition as ANY layout enabled
     std::unordered_set<size_t> id_to_set_any_layout;

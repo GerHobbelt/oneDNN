@@ -198,46 +198,27 @@ void change_format_to_ncx(First &first, Rest &...rest) {
     change_format_to_ncx(rest...);
 }
 
-struct cpp_stream_t {
-    cpp_stream_t(const dnnl::engine &eng,
-            dnnl::stream::flags flags = dnnl::stream::flags::default_flags,
-            void *interop_obj = nullptr);
-    void wait() { stream_.wait(); }
-    operator dnnl::stream &() { return stream_; }
-    dnnl::engine get_engine() const { return stream_.get_engine(); }
+// Creates the graph engine wrapped into the common `engine_t` abstraction. The
+// graph library requires an allocator attached to the engine to allocate memory
+// for constant cache and scratchpad, hence the engine is built via
+// `make_engine_with_allocator` and adopted by `engine_t`.
+engine_t make_graph_engine(bool use_host);
 
-private:
-    BENCHDNN_DISALLOW_COPY_AND_ASSIGN(cpp_stream_t);
-    dnnl::stream stream_;
-};
-
-// engine used for graph lib, graph lib engine needs allocator to allocate
-// memory for constant cache, scratchpad.
-struct cpp_engine_t {
-    cpp_engine_t(bool use_host);
-    dnnl::engine::kind get_kind() const { return engine_.get_kind(); }
-    operator dnnl::engine &() { return engine_; }
-    operator const dnnl::engine &() const { return engine_; }
-
-private:
-    BENCHDNN_DISALLOW_COPY_AND_ASSIGN(cpp_engine_t);
-    dnnl::engine engine_;
-};
-
-// engine used for graph lib, graph lib engine needs allocator to allocate
-// memory for constant cache, scratchpad.
-inline const cpp_engine_t &get_graph_engine() {
-    static const cpp_engine_t instance(/*use_host*/ false);
+// Engine used for the graph library. It wraps a `dnnl::engine` created with an
+// allocator (see `make_graph_engine`) into the common `engine_t` abstraction so
+// that the graph driver shares the same engine type as the rest of benchdnn
+// while still exposing the C++ engine interface required by the graph API.
+inline const engine_t &get_graph_engine() {
+    static const engine_t instance(make_graph_engine(/*use_host*/ false));
     return instance;
 }
 
-inline const cpp_engine_t &get_graph_host_engine() {
+inline const engine_t &get_graph_host_engine() {
     // return `get_graph_engine` for `is_cpu` to avoid different engine instances.
-    const dnnl::engine &g_eng
-            = get_graph_engine().operator const dnnl::engine &();
+    const dnnl::engine &g_eng = get_graph_engine();
     if (is_cpu(g_eng.get())) { return get_graph_engine(); }
 
-    static const cpp_engine_t instance(/*use_host*/ true);
+    static const engine_t instance(make_graph_engine(/*use_host*/ true));
     return instance;
 }
 
@@ -265,18 +246,6 @@ struct graph_fpmath_mode_t {
     // Since fpmath_mode doesn't provide an "undef" value that would indicate
     // it was not set externally to the json case, need to maintain this flag.
     bool override_json_value_ = false;
-};
-
-struct stream_staller_t {
-    // Enqueue tasks to stall a primitive execution tasks for asynchronous
-    // threadpool runtime. For rest runtimes does nothing.
-    stream_staller_t(graph::cpp_stream_t &stream);
-
-    // A signal the submission has completed and ready for execution.
-    void release();
-
-private:
-    std::promise<void> prom_;
 };
 
 // RAII guard that temporarily overrides `execution_mode` and restores the
@@ -328,9 +297,8 @@ inline int validate_backend(const ::sycl::queue &queue, res_t *res) {
 // Record operations into a SYCL command graph and return the finalized
 // executable. `record_func` is called while the queue is in recording state.
 // Returns nullptr on failure (with res->state set to FAILED).
-inline std::unique_ptr<sycl_exec_graph_t> record_and_finalize(
-        cpp_stream_t &stream, ::sycl::queue &queue,
-        std::function<void()> &record_func, res_t *res) {
+inline std::unique_ptr<sycl_exec_graph_t> record_and_finalize(stream_t &stream,
+        ::sycl::queue &queue, std::function<void()> &record_func, res_t *res) {
     BENCHDNN_PRINT(
             2, "%s\n", "[INFO] Using experimental SYCL graph execution.");
 
