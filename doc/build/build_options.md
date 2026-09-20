@@ -139,24 +139,22 @@ Graph API (enabled via `ONEDNN_BUILD_GRAPH`) is not compatible with
 
 | CMake Option             | Default | Supported values | Description                                                                                                        |
 |:-------------------------|:--------|:-----------------|:-------------------------------------------------------------------------------------------------------------------|
-| ONEDNN_BUILD_DOC         | **ON**  | OFF              | Controls building the documentation                                                                                |
+| ONEDNN_BUILD_DOC         | **OFF** | ON               | Controls building the documentation                                                                                |
 | ONEDNN_DOC_VERSIONS_JSON | \       | \<url\>          | Location of JSON file for [PyData Sphinx Theme version switcher]. Enables documentation version switcher when set. |
 
 [PyData Sphinx Theme version switcher]: https://pydata-sphinx-theme.readthedocs.io/en/stable/user_guide/version-dropdown.html
 
-@note `ONEDNN_BUILD_DOC` is disabled by default when oneDNN is built as a sub-project.
-
 ### Validation
 
-| CMake Option                 | Default  | Supported values                                           | Description                                                                  |
-|:-----------------------------|:---------|:-----------------------------------------------------------|:-----------------------------------------------------------------------------|
-| ONEDNN_BUILD_EXAMPLES        | **ON**   | OFF                                                        | Controls building the examples                                               |
-| ONEDNN_BUILD_TESTS           | **ON**   | OFF                                                        | Controls building the tests                                                  |
-| [ONEDNN_TEST_SET]            | **CI**   | SMOKE, NIGHTLY, \<list\>                                   | Specifies the testing coverage enabled through the generated testing targets |
-| ONEDNN_CODE_COVERAGE         | **OFF**  | gcov                                                       | Enables code coverage instrumentation                                        |
-| [ONEDNN_USE_CLANG_SANITIZER] | \        | Address, Leak, Memory, MemoryWithOrigin, Thread, Undefined | Instructs build system to use a Clang sanitizer                              |
-| [ONEDNN_USE_CLANG_TIDY]      | **NONE** | CHECK, FIX                                                 | Instructs build system to use clang-tidy                                     |
-| ONEDNN_WERROR                | **OFF**  | ON                                                         | Enables treating warnings as errors                                          |
+| CMake Option                 | Default   | Supported values                                           | Description                                                                  |
+|:-----------------------------|:----------|:-----------------------------------------------------------|:-----------------------------------------------------------------------------|
+| ONEDNN_BUILD_EXAMPLES        | **ON**    | OFF                                                        | Controls building the examples                                               |
+| ONEDNN_BUILD_TESTS           | **ON**    | OFF                                                        | Controls building the tests                                                  |
+| [ONEDNN_TEST_SET]            | **CI**    | SMOKE, NIGHTLY, \<list\>                                   | Specifies the testing coverage enabled through the generated testing targets |
+| ONEDNN_CODE_COVERAGE         | **NONE**  | GCOV                                                       | Enables code coverage instrumentation                                        |
+| [ONEDNN_USE_CLANG_SANITIZER] | \         | Address, Leak, Memory, MemoryWithOrigin, Thread, Undefined | Instructs build system to use a Clang sanitizer                              |
+| [ONEDNN_USE_CLANG_TIDY]      | **NONE**  | CHECK, FIX                                                 | Instructs build system to use clang-tidy                                     |
+| ONEDNN_WERROR                | **OFF**   | ON                                                         | Enables treating warnings as errors                                          |
 
 [ONEDNN_TEST_SET]: @ref opt_test_set
 [ONEDNN_USE_CLANG_SANITIZER]: @ref opt_use_clang_sanitizer
@@ -413,10 +411,10 @@ oneDNN only supports builds with Compute Library v23.11 or later.
 
 ### Common GPU options
 
-| CMake Option         | Default   | Supported values     | Description                                         |
-|:---------------------|:----------|:---------------------|:----------------------------------------------------|
-| [ONEDNN_GPU_RUNTIME] | **NONE**  | SYCL, OCL, ZE        | Defines the offload runtime for GPU engines         |
-| ONEDNN_GPU_VENDOR    | **INTEL** | NVIDIA, AMD, GENERIC | Specifies GPU vendor to enable code specialization. |
+| CMake Option         | Default   | Supported values     | Description                                                                   |
+|:---------------------|:----------|:---------------------|:------------------------------------------------------------------------------|
+| [ONEDNN_GPU_RUNTIME] | **NONE**  | SYCL, OCL, ZE        | Defines the offload runtime for GPU engines                                   |
+| ONEDNN_GPU_VENDOR    | **INTEL** | NVIDIA, AMD, GENERIC | Specifies target GPU vendor for GPU engines when DNNL_GPU_RUNTIME is not NONE |
 
 [ONEDNN_GPU_RUNTIME]: @ref opt_gpu_runtime
 

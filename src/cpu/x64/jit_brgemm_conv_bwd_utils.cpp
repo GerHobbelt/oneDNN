@@ -1454,13 +1454,8 @@ status_t init_jcp(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
             VERBOSE_UNSUPPORTED_FEATURE, "unit strides are not supported");
 
     jcp.has_uneven_iw = jcp.iw % jcp.stride_w != 0;
-    const bool has_uneven_spatial = jcp.id % jcp.stride_d != 0
-            || jcp.ih % jcp.stride_h != 0 || jcp.has_uneven_iw;
 
-    bool is_deconv_with_uneven_spatial = cd.use_inversion && has_uneven_spatial;
-    VDISPATCH_CONV_IC(!is_deconv_with_uneven_spatial,
-            VERBOSE_UNSUPPORTED_FEATURE,
-            "deconvolution with uneven spatial dimensions is not supported");
+    jcp.is_deconv = cd.use_inversion;
 
     jcp.dilate_d = (ndims == 5) ? cd.dilates[0] : 0;
     jcp.dilate_h = (ndims == 3) ? 0 : cd.dilates[ndims - 4];
@@ -1681,8 +1676,8 @@ status_t init_jcp(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
     jcp.use_M_mask = 0;
     jcp.is_is_blocking = false;
     jcp.oskip = 0;
-    jcp.use_uker = false;
-    jcp.use_interleave_stores = false;
+    jcp.use_uker = is_amx(isa) && !jcp.is_1x1;
+    jcp.use_interleave_stores = jcp.use_uker;
     jcp.hint_prefetching = brgemm_kernel_prefetching_t::brgemm_prf_default;
     jcp.brgemm_bd_loop_innermost = false;
 

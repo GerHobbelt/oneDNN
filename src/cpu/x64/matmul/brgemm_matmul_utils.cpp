@@ -390,14 +390,21 @@ int brgemm_matmul_conf_utils_t::get_default_n_block(
 */
 gemv_strategy_t brgemm_matmul_conf_utils_t::get_gemv_strategy(
         format_tag_t A_tag, format_tag_t B_tag) const {
-    if (bgmmc.M == 1 && B_tag == plain_tensor_layout_tag)
-        return gemv_strategy_t::m1_B_plain;
-    if (bgmmc.M == 1 && B_tag == transposed_tensor_layout_tag)
-        return gemv_strategy_t::m1_B_trans;
+    // Note: keep n1_A_plain ahead of the m1_B_* checks. It avoids swapping
+    // A and B (which would disable merging batch dims into M), so it is less
+    // restrictive and preferred for the M == 1 && N == 1 case.
+    //
+    // Note: A_tag and B_tag are inferred from the strides. When the layout is
+    // ambiguous, we prefer the interpretation that dispatches the faster GEMV
+    // kernel (non-transA).
     if (bgmmc.N == 1 && A_tag == plain_tensor_layout_tag)
         return gemv_strategy_t::n1_A_plain;
     if (bgmmc.N == 1 && A_tag == transposed_tensor_layout_tag)
         return gemv_strategy_t::n1_A_trans;
+    if (bgmmc.M == 1 && B_tag == plain_tensor_layout_tag)
+        return gemv_strategy_t::m1_B_plain;
+    if (bgmmc.M == 1 && B_tag == transposed_tensor_layout_tag)
+        return gemv_strategy_t::m1_B_trans;
 
     return gemv_strategy_t::none;
 }
@@ -978,26 +985,62 @@ struct matmul_avx512_blocking_params_t {
             //   - m1_B_plain:  col-major view B   -> LDA = B_strides[1]
             //   - m1_B_trans:  row-major B        -> LDA = B_strides[0]
             //
+            // When the dimension whose stride is read is a unit dim, that
+            // stride is unreliable, so LDA falls back to the contiguous size
+            // of the other dim.
+            //
             // Strides are in bytes.
             assert(bgmmc.gemv_strategy != gemv_strategy_t::none);
+            const dim_t M = bgmmc.M;
+            const dim_t N = bgmmc.N;
+            const dim_t K = bgmmc.K;
+
             switch (bgmmc.gemv_strategy) {
                 case gemv_strategy_t::m1_B_plain:
-                    bgmmc.LDA = bgmmc.B_strides[1] / bgmmc.b_dt_sz;
+                    // K==1: stride of unit dim K is unreliable; use contiguous N.
+                    bgmmc.LDA = K == 1 ? N : bgmmc.B_strides[1] / bgmmc.b_dt_sz;
                     break;
                 case gemv_strategy_t::m1_B_trans:
-                    bgmmc.LDA = bgmmc.B_strides[0] / bgmmc.b_dt_sz;
+                    // N==1: stride of unit dim N is unreliable; use contiguous K.
+                    bgmmc.LDA = N == 1 ? K : bgmmc.B_strides[0] / bgmmc.b_dt_sz;
                     break;
                 case gemv_strategy_t::n1_A_plain:
-                    bgmmc.LDA = bgmmc.A_strides[1] / bgmmc.a_dt_sz;
+                    // M==1: stride of unit dim M is unreliable; use contiguous K.
+                    bgmmc.LDA = M == 1 ? K : bgmmc.A_strides[1] / bgmmc.a_dt_sz;
                     break;
                 case gemv_strategy_t::n1_A_trans:
-                    bgmmc.LDA = bgmmc.A_strides[0] / bgmmc.a_dt_sz;
+                    // K==1: stride of unit dim K is unreliable; use contiguous M.
+                    bgmmc.LDA = K == 1 ? M : bgmmc.A_strides[0] / bgmmc.a_dt_sz;
                     break;
                 default: assert(!"unknown gemv strategy");
             }
         }
     }
 };
+
+// When it's the GEMV case and swapping A and B is required, we re-create
+// `matmul_params_t` with swapped M and N parameters. Otherwise, we use the
+// original object. We need this to ensure consistent blocking parameters for
+// the same GEMV code path across different scenarios (M=1 and N=1).
+matmul_avx512_blocking_params_t::matmul_params_t maybe_swap_mn_params(
+        const brgemm_matmul_conf_t &bgmmc,
+        const matmul_avx512_blocking_params_t::matmul_params_t &matmul) {
+    if (bgmmc.is_gemv && bgmmc.gemv_swap_a_b)
+        return matmul_avx512_blocking_params_t::matmul_params_t(
+                matmul.N, matmul.M, matmul.K, matmul.batch);
+    return matmul;
+}
+
+// The matmul driver expects blocking parameters that are consistent with
+// the original problem, therefore, we need to swap the M and N blocking
+// parameters to reverse the effect of `maybe_swap_mn_params`.
+void maybe_unswap_mn_blocking(const brgemm_matmul_conf_t &bgmmc,
+        matmul_avx512_blocking_params_t &best_blocking) {
+    if (!(bgmmc.is_gemv && bgmmc.gemv_swap_a_b)) return;
+    std::swap(best_blocking.m_chunks, best_blocking.n_chunks);
+    std::swap(best_blocking.m_blk, best_blocking.n_blk);
+    std::swap(best_blocking.m_tail, best_blocking.n_tail);
+}
 
 float compute_blocking_heuristic_avx512(brgemm_matmul_conf_t &bgmmc,
         const brgemm_matmul_conf_utils_t &bm_conf_utils,
@@ -1136,8 +1179,8 @@ float compute_blocking_heuristic_avx512(brgemm_matmul_conf_t &bgmmc,
             float cur_imbalance = cur_params.get_imbalance();
 
             const int m_chunk_size = 1;
-            const auto m_chunks = div_up(bgmmc.M, m_blk * m_chunk_size);
-            const auto n_chunks = div_up(bgmmc.N, n_blk * n_chunk_size);
+            const auto m_chunks = div_up(matmul.M, m_blk * m_chunk_size);
+            const auto n_chunks = div_up(matmul.N, n_blk * n_chunk_size);
             const auto work_amount = bgmmc.batch * m_chunks * n_chunks;
 
             int nthr_bmn = nthr / nthr_k;
@@ -1227,17 +1270,7 @@ float compute_blocking_heuristic_avx2_f32(brgemm_matmul_conf_t &bgmmc,
         matmul_avx512_blocking_params_t &best_blocking) {
     float best_imbalance = 1.f; // reduce
 
-    // When it's the GEMV case and swapping A and B is required, we
-    // re-create `matmul_params_t` with swapped M and N parameters. Otherwise,
-    // we use the original object.
-    // We need this to ensure consistent blocking parameters for the same
-    // GEMV code path across different scenarios (M=1 and N=1).
-    const bool swap_m_n_blks = bgmmc.is_gemv && bgmmc.gemv_swap_a_b;
-    const auto &matmul = swap_m_n_blks
-            ? matmul_avx512_blocking_params_t::matmul_params_t(
-                      matmul_.N, matmul_.M, matmul_.K, matmul_.batch)
-            : matmul_;
-
+    const auto matmul = maybe_swap_mn_params(bgmmc, matmul_);
     const int nthr = bgmmc.nthr;
 
     dim_t max_m_blk = nstl::min((dim_t)256, matmul.M);
@@ -1293,14 +1326,8 @@ float compute_blocking_heuristic_avx2_f32(brgemm_matmul_conf_t &bgmmc,
         }
     }
 
-    // The matmul driver expects blocking parameters that are consistent with
-    // the original problem, therefore, we need to swap the M and N blocking
-    // parameters.
-    if (swap_m_n_blks) {
-        std::swap(best_blocking.m_chunks, best_blocking.n_chunks);
-        std::swap(best_blocking.m_blk, best_blocking.n_blk);
-        std::swap(best_blocking.m_tail, best_blocking.n_tail);
-    }
+    maybe_unswap_mn_blocking(bgmmc, best_blocking);
+
     return best_imbalance;
 }
 
