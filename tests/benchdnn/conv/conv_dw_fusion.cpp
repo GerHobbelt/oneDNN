@@ -300,7 +300,8 @@ int init_ref_memory_args(dnn_mem_map_t &mem_map0, dnn_mem_map_t &mem_map1,
 }
 
 int createit(std::vector<benchdnn_dnnl_wrapper_t<dnnl_primitive_t>> &v_prim,
-        const prb_t *prb, res_t *res) {
+        const base_prb_t *base_prb, res_t *res) {
+    const prb_t *prb = prb_t::from(base_prb);
     v_prim.resize(3); // fused + 2 unfused
 
     SAFE(init_prim(prb->ctx_init, v_prim[0], conv::init_pd, prb, res), WARN);
@@ -327,41 +328,40 @@ int createit(std::vector<benchdnn_dnnl_wrapper_t<dnnl_primitive_t>> &v_prim,
 }
 
 int checkit(std::vector<benchdnn_dnnl_wrapper_t<dnnl_primitive_t>> &v_prim,
-        const prb_t *prb, res_t *res) {
-    SAFE(check_caches(v_prim[0], prb, res), WARN);
+        const base_prb_t *base_prb, res_t *res) {
+    const prb_t *prb = prb_t::from(base_prb);
+    SAFE(check_caches(v_prim[0], prb->ctx_init, res), WARN);
 
-    SAFE(check_caches(v_prim[1], prb, res), WARN);
+    SAFE(check_caches(v_prim[1], prb->ctx_init, res), WARN);
 
-    SAFE(check_caches(v_prim[2], prb, res), WARN);
+    SAFE(check_caches(v_prim[2], prb->ctx_init, res), WARN);
 
     return OK;
 }
 
 int doit(const std::vector<benchdnn_dnnl_wrapper_t<dnnl_primitive_t>> &v_prim,
-        const prb_t *prb, res_t *res) {
+        const base_prb_t *base_prb, res_t *res) {
+    const prb_t *prb = prb_t::from(base_prb);
     const auto &prim = v_prim[0];
     const auto &prim0 = v_prim[1];
     const auto &prim1 = v_prim[2];
 
     dnn_mem_map_t mem_map;
-    init_memory_args<prb_t>(
-            mem_map, prb, prim, conv::supported_exec_args(prb->dir));
+    init_memory_args(mem_map, prb, prim);
 
     // Fill first convolution
     std::unique_ptr<prb_t> prb0 = get_first_conv_prb(prb);
     if (!prb0) SAFE(FAIL, WARN);
 
     dnn_mem_map_t mem_map0;
-    init_memory_args<prb_t>(
-            mem_map0, prb0.get(), prim0, conv::supported_exec_args(prb->dir));
+    init_memory_args(mem_map0, prb0.get(), prim0);
 
     // Fill next convolution
     std::unique_ptr<prb_t> prb1 = get_fused_conv_prb(prb);
     if (!prb1) SAFE(FAIL, WARN);
 
     dnn_mem_map_t mem_map1;
-    init_memory_args<prb_t>(
-            mem_map1, prb1.get(), prim1, conv::supported_exec_args(prb->dir));
+    init_memory_args(mem_map1, prb1.get(), prim1);
 
     TIME_FILL(SAFE(init_ref_memory_args(mem_map0, mem_map1, mem_map, prim0,
                            prb0.get(), prb1.get(), prb, res, prb->dir),

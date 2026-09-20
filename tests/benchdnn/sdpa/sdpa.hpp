@@ -25,6 +25,7 @@
 #include "dnnl_common.hpp"
 #include "utils/cfg.hpp"
 #include "utils/perf_report.hpp"
+#include "utils/prb.hpp"
 #include "utils/settings.hpp"
 
 // C API for SDPA primitive creation (forward and backward overloads).
@@ -94,7 +95,7 @@ struct settings_t : public base_settings_t {
     }
 };
 
-struct prb_t : public prb_vdims_t {
+struct prb_t : public prb_vdims_t, public base_prb_t {
     // A ctor with common interface across all drivers.
     prb_t(const settings_t &s)
         : prb_t(s.prb_vdims, s.dir[0], s.dt[0], s.qtag[0], s.ktag[0], s.vtag[0],
@@ -112,7 +113,7 @@ struct prb_t : public prb_vdims_t {
             const thr_ctx_t &ctx_init, const thr_ctx_t &ctx_exe,
             const impl_filter_t &impl_filter)
         : prb_vdims_t(prb_vdims)
-        , dir(dir)
+        , base_prb_t(dir, false, attr, impl_filter)
         , dt(dt)
         , qtag(qtag)
         , ktag(ktag)
@@ -121,10 +122,8 @@ struct prb_t : public prb_vdims_t {
         , mdt(mdt)
         , mask_type(mask_type)
         , scale_type(scale_type)
-        , attr(attr)
         , ctx_init(ctx_init)
-        , ctx_exe(ctx_exe)
-        , impl_filter(impl_filter) {
+        , ctx_exe(ctx_exe) {
 
         // Broadcast data types if needed: Q,K,V,DST
         if (this->dt.size() == 1) {
@@ -183,17 +182,13 @@ struct prb_t : public prb_vdims_t {
     }
 
     int64_t n_queries, head_size, n_keys, n_values, mb;
-    dir_t dir;
     std::vector<dnnl_data_type_t> dt;
     std::string qtag, ktag, vtag, dtag;
     dnnl_data_type_t mdt;
     mask_type_t mask_type;
     scale_type_t scale_type;
 
-    bool inplace = false;
-    attr_t attr;
     thr_ctx_t ctx_init, ctx_exe;
-    impl_filter_t impl_filter;
 
     double ops;
     dims_t dst_dims;
@@ -222,19 +217,25 @@ struct prb_t : public prb_vdims_t {
     dnnl_data_type_t get_dt(data_kind_t data_kind) const;
 
     // Required by init_memory_args template (for runtime dims support).
-    benchdnn_dnnl_wrapper_t<dnnl_memory_desc_t> get_md(int arg) const;
+    benchdnn_dnnl_wrapper_t<dnnl_memory_desc_t> get_md(int arg) const override;
 
-    const char *str() const { return repro.c_str(); }
+    static const prb_t *from(const base_prb_t *base_prb) {
+        return downcast<const prb_t *>(base_prb);
+    }
+
+    void skip_unimplemented(res_t *res) const override;
+    void skip_invalid(res_t *res) const override;
+    std::vector<int> supported_exec_args(
+            bool override_dir_with_fwd) const override;
 
 private:
-    std::string repro;
-    std::string set_repro_line();
+    std::string set_repro_line() override;
 };
 
 struct perf_report_t : public base_perf_report_t {
-    perf_report_t(const prb_t *prb, const char *perf_template)
+    perf_report_t(const base_prb_t *base_prb, const char *perf_template)
         : base_perf_report_t(perf_template)
-        , p_(prb)
+        , p_(prb_t::from(base_prb))
         , stag_({normalize_tag(p_->qtag, p_->ndims),
                   normalize_tag(p_->ktag, p_->ndims),
                   normalize_tag(p_->vtag, p_->ndims)})
@@ -269,25 +270,22 @@ struct cfg_t : public base_cfg_t {
     float get_density(const density_args_t &density_args) const override;
 };
 
-dnnl_status_t init_pd(init_pd_args_t<prb_t> &init_pd_args);
-void setup_cmp(compare::compare_t &cmp, const prb_t *prb, data_kind_t kind,
-        const args_t &ref_args);
-std::vector<int> supported_exec_args(dir_t dir);
+dnnl_status_t init_pd(init_pd_args_t &init_pd_args);
+void setup_cmp(compare::compare_t &cmp, const base_prb_t *base_prb,
+        data_kind_t kind, const args_t &ref_args);
 int init_ref_memory_args(dnn_mem_map_t &ref_mem_map, dnn_mem_map_t &mem_map,
-        dnnl_primitive_t prim, const prb_t *prb, res_t *res,
+        dnnl_primitive_t prim, const base_prb_t *base_prb, res_t *res,
         dnnl_primitive_t prim_ref = nullptr);
 
-void skip_unimplemented_prb(const prb_t *prb, res_t *res);
-void skip_invalid_prb(const prb_t *prb, res_t *res);
-void compute_ref(const prb_t *prb, dir_t dir, const args_t &args,
+void compute_ref(const base_prb_t *base_prb, dir_t dir, const args_t &args,
         dnnl_primitive_t prim_ref = nullptr);
 
 int createit(std::vector<benchdnn_dnnl_wrapper_t<dnnl_primitive_t>> &v_prim,
-        const prb_t *prb, res_t *res);
+        const base_prb_t *base_prb, res_t *res);
 int checkit(std::vector<benchdnn_dnnl_wrapper_t<dnnl_primitive_t>> &v_prim,
-        const prb_t *prb, res_t *res);
+        const base_prb_t *base_prb, res_t *res);
 int doit(const std::vector<benchdnn_dnnl_wrapper_t<dnnl_primitive_t>> &v_prim,
-        const prb_t *prb, res_t *res);
+        const base_prb_t *base_prb, res_t *res);
 
 int bench(int argc, char **argv);
 

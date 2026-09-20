@@ -161,8 +161,8 @@ benchdnn_dnnl_wrapper_t<dnnl_memory_desc_t> create_md(const prb_t *prb,
     return md;
 }
 
-dnnl_status_t init_pd(init_pd_args_t<prb_t> &init_pd_args) {
-    const prb_t *prb = init_pd_args.prb;
+dnnl_status_t init_pd(init_pd_args_t &init_pd_args) {
+    const prb_t *prb = prb_t::from(init_pd_args.base_prb);
     res_t *res = init_pd_args.res;
     bool force_f32_dt = init_pd_args.force_f32_dt;
 
@@ -267,7 +267,7 @@ int init_prim_ref(benchdnn_dnnl_wrapper_t<dnnl_primitive_t> &prim_ref,
                 {0, 0, 0}, sparse_options_t(), cpu_attr, prb->ctx_init,
                 prb->ctx_exe, prb->impl_filter};
 
-        auto st = init_prim_ref_common(prim_ref, &prb_cpu, res);
+        auto st = init_prim_ref_common(prim_ref, &prb_cpu, res, init_pd);
         if (st == OK) return OK;
     }
 
@@ -625,207 +625,28 @@ int fill_data(data_kind_t kind, int exec_arg, const prb_t *prb,
     return OK;
 }
 
-void skip_unimplemented_prb(const prb_t *prb, res_t *res) {
+void prb_t::skip_unimplemented(res_t *res) const {
+    const prb_t *prb = this; // Kept to avoid mass update
     skip_unimplemented_data_type(
             {prb->src_dt(), prb->wei_dt(), prb->bia_dt, prb->dst_dt()},
             prb->dir, res);
-    skip_unimplemented_sum_po(
-            prb->attr, res, dnnl_matmul, prb->src_dt(), prb->dst_dt());
     skip_unimplemented_binary_po(prb->attr, res);
-    skip_unimplemented_prelu_po(prb->attr, res, dnnl_matmul);
 
     const auto wei_encoding
             = prb->sparse_options.get_encoding(DNNL_ARG_WEIGHTS);
-    bool is_wei_dense = (wei_encoding == dnnl_sparse_encoding_undef);
-    bool is_src_coo_sparse
-            = (prb->sparse_options.get_encoding(DNNL_ARG_SRC) == dnnl_coo);
-    // Guard grouped configs so they get UNIMPLEMENTED (not a SKIPPED)
-    const bool is_any_grouped = prb->sparse_options.is_grouped(DNNL_ARG_SRC)
-            || prb->sparse_options.is_grouped(DNNL_ARG_WEIGHTS)
-            || prb->sparse_options.is_grouped(DNNL_ARG_DST);
-    if (!prb->sparse_options.is_def() && is_gpu() && !is_any_grouped
-            && (!is_wei_dense || !is_src_coo_sparse)) {
-        BENCHDNN_PRINT(2,
-                "[SKIP][%s:%d]: GPU sparse matmul only supports COO encoding "
-                "for source.\n",
-                __FILE__, __LINE__);
-        res->state = SKIPPED;
-        res->reason = reason_t::skip_not_supported;
-        return;
-    }
-
-    if (!prb->sparse_options.is_def() && is_cpu() && is_wei_dense
-            && prb->wtag != "any" && prb->wtag != "ab") {
-        // Check if this is grouped encoding which requires 3D weight tags
-        bool is_grouped = prb->sparse_options.is_grouped(DNNL_ARG_SRC)
-                && prb->sparse_options.is_grouped(DNNL_ARG_DST);
-
-        if (is_grouped && (prb->wtag == "abc" || prb->wtag == "acb")) {
-            // Allow 3D tags for grouped encoding
-        } else {
-            BENCHDNN_PRINT(2,
-                    "[SKIP][%s:%d]: Only `any` and `ab` tags are supported for "
-                    "dense weights on CPU.\n",
-                    __FILE__, __LINE__);
-            res->state = SKIPPED;
-            res->reason = reason_t::skip_not_supported;
-            return;
-        }
-    }
-
     if (wei_encoding == dnnl_packed) {
-        BENCHDNN_PRINT(2,
-                "[SKIP][%s:%d]: Weights argument doesn't support packed "
-                "encoding.\n",
-                __FILE__, __LINE__);
+        // This support is defined on a single CPU platform, skip it
+        // unconditionally.
+        BENCHDNN_PRINTF(2, "%s",
+                "[SKIP]: Weights argument doesn't support packed encoding");
         res->state = SKIPPED;
         res->reason = reason_t::skip_not_supported;
         return;
-    }
-
-    if (is_cpu()) {
-        const bool is_x8s8f16
-                = prb->wei_dt() == dnnl_s8 && prb->dst_dt() == dnnl_f16;
-        if (is_x8s8f16) {
-            BENCHDNN_PRINT(2, "[SKIP][%s:%d]: CPU doesn't support x8s8f16.\n",
-                    __FILE__, __LINE__);
-            res->state = SKIPPED;
-            res->reason = reason_t::skip_not_supported;
-            return;
-        }
-
-        auto is_int = [](dnnl_data_type_t t) {
-            return dnnl::impl::utils::one_of(
-                    t, dnnl_s4, dnnl_u4, dnnl_s8, dnnl_u8, dnnl_s32);
-        };
-
-        // Grouped matmul supports weight-only quantization (fp src + int wei)
-        // when fpmath apply_to_int is set. For regular matmul, and for grouped
-        // without apply_to_int, mixed int/fp src+wei is not supported on CPU.
-        const bool is_grouped_woq = prb->sparse_options.is_grouped(DNNL_ARG_SRC)
-                && !is_int(prb->src_dt()) && is_int(prb->wei_dt())
-                && prb->attr.fpmath_mode.apply_to_int;
-        if (!is_grouped_woq && is_int(prb->src_dt()) != is_int(prb->wei_dt())) {
-            BENCHDNN_PRINT(2,
-                    "[SKIP][%s:%d]: CPU doesn't support mixed integer and "
-                    "floating point source and weights.\n",
-                    __FILE__, __LINE__);
-            res->state = SKIPPED;
-            res->reason = reason_t::skip_not_supported;
-        }
-
-        if (!is_int(prb->src_dt()) && !is_int(prb->wei_dt())
-                && is_int(prb->dst_dt())) {
-            BENCHDNN_PRINT(2,
-                    "[SKIP][%s:%d]: CPU doesn't support integer destination "
-                    "with  floating point source and weights.\n",
-                    __FILE__, __LINE__);
-            res->state = SKIPPED;
-            res->reason = reason_t::skip_not_supported;
-        }
-
-        if (!prb->attr.scales.is_def(DNNL_ARG_DST)
-                && prb->attr.scales.get(DNNL_ARG_DST).policy != attr_t::COMMON
-                && !prb->attr.scales.get(DNNL_ARG_DST).is_dynamic()) {
-            BENCHDNN_PRINT(2,
-                    "[SKIP][%s:%d]: Only Common, MX and DYNAMIC_FP dst scales "
-                    "are supported on CPU.\n",
-                    __FILE__, __LINE__);
-            res->state = SKIPPED;
-            res->reason = reason_t::skip_not_supported;
-            return;
-        }
-    }
-
-    if (is_gpu()) {
-        const auto &po = prb->attr.post_ops;
-        if (prb->dst_dt() == dnnl_f64 && !po.is_def()) {
-            BENCHDNN_PRINT(2,
-                    "[SKIP][%s:%d]: Post-ops for f64 data type is not "
-                    "supported.\n",
-                    __FILE__, __LINE__);
-            res->state = SKIPPED;
-            res->reason = reason_t::skip_not_supported;
-            return;
-        }
-
-        const int sum_idx = po.find(attr_t::post_ops_t::kind_t::SUM);
-        if (sum_idx != -1 && po.entry[sum_idx].sum.dt != dnnl_data_type_undef) {
-            BENCHDNN_PRINT(2,
-                    "[SKIP][%s:%d]: GPU doesn't support non-default sum_dt "
-                    "argument.\n",
-                    __FILE__, __LINE__);
-            res->state = SKIPPED;
-            res->reason = reason_t::skip_not_supported;
-            return;
-        }
-
-        // GPU for x8s8bf16 doesn't support:
-        // * Destination zero-point.
-        // * Any run-time dimensions.
-        // * Any batch dimensions.
-        const bool is_x8s8bf16
-                = prb->wei_dt() == dnnl_s8 && prb->dst_dt() == dnnl_bf16;
-        const bool rt_dims_are_none = prb->src_runtime_dim_mask().none()
-                && prb->weights_runtime_dim_mask().none()
-                && prb->dst_runtime_dim_mask().none();
-        const bool x8s8bf16_ok = IMPLICATION(is_x8s8bf16,
-                prb->attr.zero_points.get(DNNL_ARG_DST).is_def()
-                        && rt_dims_are_none && prb->ndims <= 2);
-        if (!x8s8bf16_ok) {
-            BENCHDNN_PRINT(2,
-                    "[SKIP][%s:%d]: x8s8bf16 configuration on GPU doesn't "
-                    "support certain features.\n",
-                    __FILE__, __LINE__);
-            res->state = SKIPPED;
-            res->reason = reason_t::skip_not_supported;
-            return;
-        }
-
-        const bool is_bf16 = prb->src_dt() == dnnl_bf16
-                && prb->wei_dt() == dnnl_bf16
-                && (prb->dst_dt() == dnnl_bf16 || prb->dst_dt() == dnnl_f32);
-        const bool bf16_bias_ok = IMPLICATION(
-                prb->bia_dt == dnnl_bf16, prb->ndims <= 2 + is_bf16);
-        if (!bf16_bias_ok) {
-            BENCHDNN_PRINT(2,
-                    "[SKIP][%s:%d]: bf16 bias support is limited to bf16 "
-                    "configuration and 2D-matmul.\n",
-                    __FILE__, __LINE__);
-            res->state = SKIPPED;
-            res->reason = reason_t::skip_not_supported;
-            return;
-        }
-
-        if ((dnnl::impl::utils::one_of(
-                     dnnl_f8_e4m3, prb->src_dt(), prb->wei_dt(), prb->dst_dt())
-                    || dnnl::impl::utils::one_of(dnnl_f8_e5m2, prb->src_dt(),
-                            prb->wei_dt(), prb->dst_dt()))
-                && (!po.is_def() || !prb->attr.scales.is_def())) {
-            BENCHDNN_PRINT(2,
-                    "[SKIP][%s:%d]: GPU supports fp8 through ref only on "
-                    "pre-XeHPC platforms with limited post-op support.\n",
-                    __FILE__, __LINE__);
-            res->state = SKIPPED;
-            res->reason = reason_t::skip_not_supported;
-            return;
-        }
-
-        if (dnnl::impl::utils::one_of(
-                    dnnl_f4_e2m1, prb->src_dt(), prb->wei_dt(), prb->dst_dt())
-                && (!po.is_def() || !prb->attr.scales.is_def())) {
-            BENCHDNN_PRINT(2,
-                    "[SKIP][%s:%d]: GPU supports fp4 through ref only on "
-                    "pre-XeHPC platforms with limited post-op support.\n",
-                    __FILE__, __LINE__);
-            res->state = SKIPPED;
-            res->reason = reason_t::skip_not_supported;
-            return;
-        }
     }
 }
 
-void skip_invalid_prb(const prb_t *prb, res_t *res) {
+void prb_t::skip_invalid(res_t *res) const {
+    const prb_t *prb = this; // Kept to avoid mass update
     auto src_rt_mask = prb->src_runtime_dim_mask();
     auto wei_rt_mask = prb->weights_runtime_dim_mask();
     auto dst_rt_mask = prb->dst_runtime_dim_mask();
@@ -888,12 +709,12 @@ void skip_invalid_prb(const prb_t *prb, res_t *res) {
     }
 }
 
-void setup_cmp(compare::compare_t &cmp, const prb_t *prb, data_kind_t kind,
-        const args_t &ref_args) {
+void setup_cmp(compare::compare_t &cmp, const base_prb_t *base_prb,
+        data_kind_t kind, const args_t &ref_args) {
     cmp.set_zero_trust_percent(90.f); // TODO: why so bad filling?
 }
 
-std::vector<int> supported_exec_args(dir_t dir) {
+std::vector<int> prb_t::supported_exec_args(bool) const {
     static const std::vector<int> exec_args = {
             DNNL_ARG_SRC,
             DNNL_ARG_WEIGHTS,
@@ -904,8 +725,9 @@ std::vector<int> supported_exec_args(dir_t dir) {
 }
 
 int init_ref_memory_args(dnn_mem_map_t &ref_mem_map, dnn_mem_map_t &mem_map,
-        dnnl_primitive_t prim, const prb_t *prb, res_t *res,
+        dnnl_primitive_t prim, const base_prb_t *base_prb, res_t *res,
         dnnl_primitive_t prim_ref) {
+    const auto *prb = prb_t::from(base_prb);
     // Both sparse and grouped functionality relies on indirect mnemory access.
     // While the data itself can be anything for `no_ref_memory` modifier,
     // metadata (indices/pointers for sparse; offsets for grouped) must be
@@ -1137,7 +959,8 @@ int init_ref_memory_args(dnn_mem_map_t &ref_mem_map, dnn_mem_map_t &mem_map,
 }
 
 int createit(std::vector<benchdnn_dnnl_wrapper_t<dnnl_primitive_t>> &v_prim,
-        const prb_t *prb, res_t *res) {
+        const base_prb_t *base_prb, res_t *res) {
+    const prb_t *prb = prb_t::from(base_prb);
     v_prim.resize(2); // regular + cpu_ref
     SAFE(init_prim(prb->ctx_init, v_prim[0], init_pd, prb, res), WARN);
     // Use CPU prim as the reference in GPU testing to reduce testing time.
@@ -1146,7 +969,8 @@ int createit(std::vector<benchdnn_dnnl_wrapper_t<dnnl_primitive_t>> &v_prim,
 }
 
 int checkit(std::vector<benchdnn_dnnl_wrapper_t<dnnl_primitive_t>> &v_prim,
-        const prb_t *prb, res_t *res) {
+        const base_prb_t *base_prb, res_t *res) {
+    const prb_t *prb = prb_t::from(base_prb);
     if (has_bench_mode_bit(mode_bit_t::exec)) {
         const auto &prim_ref = v_prim[1];
         if (prim_ref) {
@@ -1165,7 +989,7 @@ int checkit(std::vector<benchdnn_dnnl_wrapper_t<dnnl_primitive_t>> &v_prim,
         }
     }
     if (has_bench_mode_bit(mode_bit_t::corr)) {
-        SAFE(check_caches(v_prim[0], prb, res), WARN);
+        SAFE(check_caches(v_prim[0], prb->ctx_init, res), WARN);
         // Don't check caches for CPU prim as the reference.
     }
     return OK;
@@ -1178,14 +1002,15 @@ std::vector<data_kind_t> get_kinds_to_check(const prb_t *prb) {
 }
 
 int doit(const std::vector<benchdnn_dnnl_wrapper_t<dnnl_primitive_t>> &v_prim,
-        const prb_t *prb, res_t *res) {
+        const base_prb_t *base_prb, res_t *res) {
+    const prb_t *prb = prb_t::from(base_prb);
     set_zmalloc_max_expected_size(res->mem_size_args.zmalloc_expected_size);
 
     const auto &prim = v_prim[0];
     const auto &prim_ref = v_prim[1];
 
     dnn_mem_map_t mem_map, ref_mem_map;
-    init_memory_args<prb_t>(mem_map, prb, prim, supported_exec_args(prb->dir));
+    init_memory_args(mem_map, prb, prim);
     TIME_FILL(SAFE(init_ref_memory_args(
                            ref_mem_map, mem_map, prim, prb, res, prim_ref),
             WARN));
@@ -1194,8 +1019,8 @@ int doit(const std::vector<benchdnn_dnnl_wrapper_t<dnnl_primitive_t>> &v_prim,
 
     SAFE(run_execution(prim, args, res), WARN);
 
-    check_correctness(prb, get_kinds_to_check(prb), args, ref_args, setup_cmp,
-            res, prb->dir, prim_ref);
+    check_correctness(prb, get_kinds_to_check(prb), args, ref_args, compute_ref,
+            setup_cmp, res, prb->dir, prim_ref);
     SAFE(check_bitwise(prim, get_kinds_to_check(prb), args, prb->attr,
                  prb->inplace, res),
             WARN);

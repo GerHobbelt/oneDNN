@@ -37,6 +37,7 @@
 #include "utils/impl_filter.hpp"
 #include "utils/numeric.hpp"
 #include "utils/parallel.hpp"
+#include "utils/prb.hpp"
 #include "utils/stream_kind.hpp"
 
 #include "tests/test_thread.hpp"
@@ -98,25 +99,24 @@ private:
     std::vector<std::pair<int, const dnn_mem_t *>> args_;
 };
 
-template <typename prb_t>
 struct init_pd_args_t {
-    init_pd_args_t(res_t *res, dnnl_engine_t engine, const prb_t *prb,
+    init_pd_args_t(res_t *res, dnnl_engine_t engine, const base_prb_t *base_prb,
             dir_t dir, const_dnnl_primitive_desc_t hint,
             const_dnnl_memory_desc_t src_md, bool force_f32_dt)
         : pd(nullptr)
         , is_iterator_supported(true)
         , res(res)
         , engine(engine)
-        , prb(prb)
+        , base_prb(base_prb)
         , dir(dir)
         , hint(hint)
         , src_md(src_md)
         , force_f32_dt(force_f32_dt) {}
 
-    init_pd_args_t(res_t *res, dnnl_engine_t engine, const prb_t *prb,
+    init_pd_args_t(res_t *res, dnnl_engine_t engine, const base_prb_t *base_prb,
             dir_t dir, const_dnnl_primitive_desc_t hint,
             const_dnnl_memory_desc_t src_md)
-        : init_pd_args_t(res, engine, prb, dir, hint, src_md, false) {}
+        : init_pd_args_t(res, engine, base_prb, dir, hint, src_md, false) {}
 
     // Output members
     dnnl_primitive_desc_t pd;
@@ -126,7 +126,7 @@ struct init_pd_args_t {
     // Input members
     res_t *res;
     dnnl_engine_t engine;
-    const prb_t *prb;
+    const base_prb_t *base_prb;
     // Used to specify the prop_kind of the pd. Required for double-run drivers
     // to differentiate between fwd-for-bwd pd and actual bwd pd.
     dir_t dir;
@@ -137,6 +137,8 @@ struct init_pd_args_t {
     // when creating pd objects.
     bool force_f32_dt;
 };
+
+using init_pd_func_t = std::function<dnnl_status_t(init_pd_args_t &)>;
 
 struct cpu_cache_args_t {
     size_t L2_size = 0;
@@ -185,9 +187,8 @@ void skip_invalid_inplace(res_t *res, dnnl_data_type_t sdt,
         dnnl_data_type_t ddt, const std::string &stag, const std::string &dtag);
 void skip_unimplemented_arg_scale(const attr_t &attr, res_t *res);
 
-template <typename prb_t>
-int check_caches(benchdnn_dnnl_wrapper_t<dnnl_primitive_t> &primw,
-        const prb_t *prb, res_t *res) {
+inline int check_caches(benchdnn_dnnl_wrapper_t<dnnl_primitive_t> &primw,
+        const thr_ctx_t &ctx_init, res_t *res) {
     if (!primw) return OK;
 
     // Under assumption of a limited cache capacity, which is usually the case,
@@ -200,10 +201,9 @@ int check_caches(benchdnn_dnnl_wrapper_t<dnnl_primitive_t> &primw,
     // of infinite cache though.
     if (!has_bench_mode_modifier(mode_modifier_t::par_create)) {
         const_dnnl_primitive_desc_t pd = query_pd(primw);
-        SAFE(create_in_thr_ctx(prb->ctx_init, check_pd_cache, pd, res), WARN);
+        SAFE(create_in_thr_ctx(ctx_init, check_pd_cache, pd, res), WARN);
         // Check primitive is picked up from the cache if applicable.
-        SAFE(create_in_thr_ctx(
-                     prb->ctx_init, check_primitive_cache, primw, res),
+        SAFE(create_in_thr_ctx(ctx_init, check_primitive_cache, primw, res),
                 WARN);
     }
 
@@ -219,12 +219,11 @@ int check_caches(benchdnn_dnnl_wrapper_t<dnnl_primitive_t> &primw,
 // descriptor creation. Based on the status, it produces additional checks:
 // * For `invalid_arguments` it just updates the `res` object with it.
 // * For `unimplemented` it checks whether the lack of support is expected or
-//   not. It relies on `skip_unimplemented_prb` function declared and defined
-//   at every driver and expects it to find in correspondent namespace from
-//   where `prb_t` was picked up. If the case is unknown, `UNIMPLEMENTED` status
-//   will be returned.
-template <typename prb_t>
-int check_dnnl_status(dnnl_status_t status, const prb_t *prb, res_t *res) {
+//   not. It relies on the `skip_unimplemented` virtual method overridden by
+//   every driver's `prb_t` to dispatch to its driver-specific logic. If the
+//   case is unknown, `UNIMPLEMENTED` status will be returned.
+inline int check_dnnl_status(
+        dnnl_status_t status, const base_prb_t *base_prb, res_t *res) {
     if (!res || status == dnnl_success) return OK;
 
     switch (status) {
@@ -244,7 +243,7 @@ int check_dnnl_status(dnnl_status_t status, const prb_t *prb, res_t *res) {
             //
             // Note: since it's done post pd creation, code in these
             // driver-defined functions can end up being dead.
-            skip_unimplemented_prb(prb, res);
+            base_prb->skip_unimplemented(res);
             if (res->state == SKIPPED || res->state == DEFERRED) return OK;
 
             // If the case is not known to be skipped, it is unimplemented.
@@ -264,9 +263,8 @@ int check_dnnl_status(dnnl_status_t status, const prb_t *prb, res_t *res) {
 //     values.
 //
 // Note: `res` can be empty when fetching impl for prim_ref support.
-template <typename prb_t>
-int fetch_impl(benchdnn_dnnl_wrapper_t<dnnl_primitive_desc_t> &pdw,
-        init_pd_args_t<prb_t> &init_pd_args, const impl_filter_t &impl_filter,
+inline int fetch_impl(benchdnn_dnnl_wrapper_t<dnnl_primitive_desc_t> &pdw,
+        init_pd_args_t &init_pd_args, const impl_filter_t &impl_filter,
         res_t *res, bool is_service_prim) {
     if (!init_pd_args.pd) return FAIL;
 
@@ -316,27 +314,28 @@ int fetch_impl(benchdnn_dnnl_wrapper_t<dnnl_primitive_desc_t> &pdw,
 // This is an internal to `init_prim` function that utilizes the logic of
 // creating a `pd` and `prim` and assign them to input wrappers. It allows to
 // remove code duplication and keep all the logic in a single place.
-template <typename func_t, typename prb_t>
-int create_primitive(benchdnn_dnnl_wrapper_t<dnnl_primitive_t> &primw,
-        dnnl_engine_t engine, const func_t &init_pd_func, const prb_t *prb,
-        res_t *res, dir_t dir, const_dnnl_primitive_desc_t hint,
-        bool is_service_prim, const_dnnl_memory_desc_t src_md,
-        bool force_f32_dt, bool is_graph_ref = false) {
+inline int create_primitive(benchdnn_dnnl_wrapper_t<dnnl_primitive_t> &primw,
+        dnnl_engine_t engine, const init_pd_func_t &init_pd_func,
+        const base_prb_t *base_prb, res_t *res, dir_t dir,
+        const_dnnl_primitive_desc_t hint, bool is_service_prim,
+        const_dnnl_memory_desc_t src_md, bool force_f32_dt,
+        bool is_graph_ref = false) {
     dnnl_status_t status = dnnl_success;
     dnnl_primitive_t prim {};
 
     benchdnn_dnnl_wrapper_t<dnnl_primitive_desc_t> pdw;
 
-    init_pd_args_t<prb_t> init_pd_args(
-            res, engine, prb, dir, hint, src_md, force_f32_dt);
+    init_pd_args_t init_pd_args(
+            res, engine, base_prb, dir, hint, src_md, force_f32_dt);
     status = init_pd_func(init_pd_args);
 
-    SAFE(check_dnnl_status(status, prb, res), WARN);
+    SAFE(check_dnnl_status(status, base_prb, res), WARN);
     if (res->state == SKIPPED) return OK;
     if (is_graph_ref && res->state == DEFERRED) return OK;
 
     // Fetch also checks if user requested to skip certain implementations.
-    SAFE(fetch_impl(pdw, init_pd_args, prb->impl_filter, res, is_service_prim),
+    SAFE(fetch_impl(pdw, init_pd_args, base_prb->impl_filter, res,
+                 is_service_prim),
             WARN);
     if (res->state == SKIPPED) return OK;
 
@@ -377,35 +376,34 @@ int create_primitive(benchdnn_dnnl_wrapper_t<dnnl_primitive_t> &primw,
     return OK;
 }
 
-template <typename func_t, typename prb_t>
-int check_pd_w_and_wo_attr(dnnl_engine_t engine, const func_t &init_pd_func,
-        const prb_t *prb, res_t *res, dir_t dir,
-        const_dnnl_primitive_desc_t hint) {
+inline int check_pd_w_and_wo_attr(dnnl_engine_t engine,
+        const init_pd_func_t &init_pd_func, const base_prb_t *base_prb,
+        res_t *res, dir_t dir, const_dnnl_primitive_desc_t hint) {
 
-    if (!attr_same_pd_check || prb->attr.is_def()) return OK;
+    if (!attr_same_pd_check || base_prb->attr.is_def()) return OK;
 
-    if (prb->attr.post_ops.convolution_index() != -1) return OK;
+    if (base_prb->attr.post_ops.convolution_index() != -1) return OK;
 
     // Check that adding attributes doesn't cause a fall back to another impl.
-    auto *prb_mutable = const_cast<prb_t *>(prb);
-    auto old_attr = prb_mutable->attr;
-    prb_mutable->attr = attr_t();
-    init_pd_args_t<prb_t> init_pd_args_without_attr(
-            res, engine, prb_mutable, dir, hint, /* src_md = */ nullptr);
+    auto *base_prb_mutable = const_cast<base_prb_t *>(base_prb);
+    auto old_attr = base_prb_mutable->attr;
+    base_prb_mutable->attr = attr_t();
+    init_pd_args_t init_pd_args_without_attr(
+            res, engine, base_prb_mutable, dir, hint, /* src_md = */ nullptr);
     DNN_SAFE(init_pd_func(init_pd_args_without_attr), WARN);
     benchdnn_dnnl_wrapper_t<dnnl_primitive_desc_t> pdw(
             init_pd_args_without_attr.pd);
-    prb_mutable->attr = old_attr;
+    base_prb_mutable->attr = old_attr;
     SAFE(check_same_pd(pdw, res), WARN);
     return OK;
 }
 
 int check_ref_impl_hit(res_t *res);
 
-template <typename func_t, typename prb_t>
-int init_prim(benchdnn_dnnl_wrapper_t<dnnl_primitive_t> &user_prim,
-        const func_t &init_pd_func, const prb_t *prb, res_t *res,
-        dir_t dir = FLAG_FWD, const_dnnl_primitive_desc_t hint = nullptr,
+inline int init_prim(benchdnn_dnnl_wrapper_t<dnnl_primitive_t> &user_prim,
+        const init_pd_func_t &init_pd_func, const base_prb_t *base_prb,
+        res_t *res, dir_t dir = FLAG_FWD,
+        const_dnnl_primitive_desc_t hint = nullptr,
         bool is_service_prim = false) {
     benchdnn_dnnl_wrapper_t<dnnl_primitive_t> primw;
 
@@ -418,7 +416,7 @@ int init_prim(benchdnn_dnnl_wrapper_t<dnnl_primitive_t> &user_prim,
     // This function MUST NOT take care of cases that return `invalid_arguments`
     // status. The library must return this status for all incorrect API calls
     // and such cases must be updated on the user side.
-    skip_invalid_prb(prb, res);
+    base_prb->skip_invalid(res);
     if (res->state == SKIPPED) return OK;
 #ifndef DNNL_DISABLE_PRIMITIVE_CACHE
 
@@ -434,8 +432,8 @@ int init_prim(benchdnn_dnnl_wrapper_t<dnnl_primitive_t> &user_prim,
         engine_t engine(get_test_engine(), /* recreate_on_copy = */ true);
 
         // The first primitive creation using a temporary engine.
-        SAFE(create_primitive(primw, engine, init_pd_func, prb, res, dir, hint,
-                     is_service_prim, /* src_md = */ nullptr,
+        SAFE(create_primitive(primw, engine, init_pd_func, base_prb, res, dir,
+                     hint, is_service_prim, /* src_md = */ nullptr,
                      /* force_f32_dt = */ false),
                 WARN);
         if (res->state == SKIPPED) return OK;
@@ -444,8 +442,8 @@ int init_prim(benchdnn_dnnl_wrapper_t<dnnl_primitive_t> &user_prim,
 #endif
     // The second (if the cache is enabled) primitive creation using the global
     // test engine. This primitive is expected to come from the cache.
-    SAFE(create_primitive(primw, get_test_engine(), init_pd_func, prb, res, dir,
-                 hint, is_service_prim, /* src_md = */ nullptr,
+    SAFE(create_primitive(primw, get_test_engine(), init_pd_func, base_prb, res,
+                 dir, hint, is_service_prim, /* src_md = */ nullptr,
                  /* force_f32_dt = */ false),
             WARN);
     if (res->state == SKIPPED) return OK;
@@ -465,7 +463,7 @@ int init_prim(benchdnn_dnnl_wrapper_t<dnnl_primitive_t> &user_prim,
     if (has_bench_mode_bit(mode_bit_t::corr)) {
         // Check if adding attributes doesn't cause a fall back to another impl.
         SAFE(check_pd_w_and_wo_attr(
-                     get_test_engine(), init_pd_func, prb, res, dir, hint),
+                     get_test_engine(), init_pd_func, base_prb, res, dir, hint),
                 WARN);
         // Check if unexpected ref impl was hit.
         SAFE(check_ref_impl_hit(res), WARN);
@@ -475,18 +473,35 @@ int init_prim(benchdnn_dnnl_wrapper_t<dnnl_primitive_t> &user_prim,
     return res->state = INITIALIZED, OK;
 }
 
-template <typename func_t, typename prb_t>
-int init_prim(const thr_ctx_t &thr_ctx,
+inline int init_prim(const thr_ctx_t &thr_ctx,
         benchdnn_dnnl_wrapper_t<dnnl_primitive_t> &user_prim,
-        const func_t &init_pd_func, prb_t *prb, res_t *res,
-        dir_t dir = FLAG_FWD, const_dnnl_primitive_desc_t hint = nullptr,
+        const init_pd_func_t &init_pd_func, const base_prb_t *base_prb,
+        res_t *res, dir_t dir = FLAG_FWD,
+        const_dnnl_primitive_desc_t hint = nullptr,
         bool is_service_prim = false) {
-    int (*f)(benchdnn_dnnl_wrapper_t<dnnl_primitive_t> &, func_t &,
-            const prb_t *, res_t *, dir_t, const_dnnl_primitive_desc_t, bool)
-            = init_prim<func_t, prb_t>;
-    return create_in_thr_ctx(thr_ctx, f, user_prim, init_pd_func, prb, res, dir,
-            hint, is_service_prim);
+    int (*f)(benchdnn_dnnl_wrapper_t<dnnl_primitive_t> &,
+            const init_pd_func_t &, const base_prb_t *, res_t *, dir_t,
+            const_dnnl_primitive_desc_t, bool)
+            = init_prim;
+    return create_in_thr_ctx(thr_ctx, f, user_prim, init_pd_func, base_prb, res,
+            dir, hint, is_service_prim);
 }
+
+// `setup_cmp_func` function is defined in every driver.
+// It takes:
+// * A reference to a `compare_t` object which the function modifies based on
+//   driver's needs.
+// * A pointer to a `base_prb_t` problem.
+// * `data_kind` value to help to setup threshold depending on output argument.
+// * Driver's reference memory arguments since some drivers can't validate
+//   certain scenarios for sure without additional memory arguments.
+// Returns nothing since the object is modified by reference due to lifetime of
+// the compare object is controlled by `check_correctness`.
+using setup_cmp_func_t = std::function<void(
+        compare::compare_t &, const base_prb_t *, data_kind_t, const args_t &)>;
+
+using compute_ref_func_t = std::function<void(
+        const base_prb_t *, dir_t, const args_t &, dnnl_primitive_t)>;
 
 // `check_correctness` function is designed to be called from every driver where
 // correctness validation is needed. It takes:
@@ -511,30 +526,13 @@ int init_prim(const thr_ctx_t &thr_ctx,
 //   arguments, and CPU primitive for GPU backend, if available.
 // * For each kind to validate it:
 //   - Creates and sets up the compare object. Setting is done with
-//     `setup_cmp_func`.
+//     `setup_cmp_func` (see above).
 //   - Finds correspondent memory arguments from backend and reference and
 //     compares them.
 //   - Result of comparison is saved into `res` object.
-//
-// `setup_cmp_func` is a function that supposed to be defined in every driver's
-// namespace. Its interface is:
-// `void (compare::compare_t &, const prb_t *, data_kind_t, const args_t &);`
-// It takes:
-// * A reference to a `compare_t` object which the function modifies based on
-//   driver's needs.
-// * A pointer to a `prb_t` problem.
-// * `data_kind` value to help to setup threshold depending on output argument.
-// * Driver's reference memory arguments since some drivers can't validate
-//   certain scenarios for sure without additional memory arguments.
-// Returns nothing since the object is modified by reference due to lifetime of
-// the compare object is controlled by `check_correctness`.
-//
-// Note: a dedicated non-templated type for `setup_cmp_func_t` could be used but
-// since it relies on a `prb_t` type which is individual for each driver,
-// it isn't possible without a template.
-template <typename setup_cmp_func_t, typename prb_t>
-void check_correctness(const prb_t *prb, const std::vector<data_kind_t> &kinds,
-        const args_t &args, const args_t &ref_args,
+inline void check_correctness(const base_prb_t *base_prb,
+        const std::vector<data_kind_t> &kinds, const args_t &args,
+        const args_t &ref_args, const compute_ref_func_t &compute_ref_func,
         const setup_cmp_func_t &setup_cmp_func, res_t *res, dir_t dir,
         dnnl_primitive_t prim_ref = nullptr) {
     // Fast exit for any modes but correctness.
@@ -548,7 +546,7 @@ void check_correctness(const prb_t *prb, const std::vector<data_kind_t> &kinds,
         BENCHDNN_PRINT(8, "%s\n", "[NAIVE_REF]: Start");
     }
 
-    TIME_REF(compute_ref(prb, dir, ref_args, prim_ref));
+    TIME_REF(compute_ref_func(base_prb, dir, ref_args, prim_ref));
 
     // Forward-for-backward service primitives define `kinds` as empty to skip
     // validation. This is to avoid extra checks on higher level.
@@ -563,7 +561,7 @@ void check_correctness(const prb_t *prb, const std::vector<data_kind_t> &kinds,
         compare::compare_t cmp;
         cmp.set_data_kind(kind);
         cmp.set_has_prim_ref(bool(prim_ref));
-        setup_cmp_func(cmp, prb, kind, ref_args);
+        setup_cmp_func(cmp, base_prb, kind, ref_args);
 
         int arg = data_kind2exec_arg(kind);
         assert(arg > 0);
@@ -571,7 +569,7 @@ void check_correctness(const prb_t *prb, const std::vector<data_kind_t> &kinds,
         const auto &mem_dt = args.find(arg);
         const auto &mem_fp = ref_args.find(arg);
 
-        TIME_COMPARE(cmp.compare(mem_fp, mem_dt, prb->attr, res));
+        TIME_COMPARE(cmp.compare(mem_fp, mem_dt, base_prb->attr, res));
     }
 
     if (prim_ref && res->state == FAILED) {
@@ -654,10 +652,11 @@ dnnl_data_type_t deduce_cfg_data_type(
 // references once the object emplaced due to memory re-allocations happening
 // internally, while map doesn't not invalidate its references when adding a new
 // element which simplifies an implementation.
-template <typename prb_t>
-void init_memory_args(dnn_mem_map_t &mem_map, const prb_t *prb,
-        dnnl_primitive_t prim, const std::vector<int> &supported_exec_args,
+inline void init_memory_args(dnn_mem_map_t &mem_map, const base_prb_t *base_prb,
+        dnnl_primitive_t prim, bool override_dir_with_fwd = false,
         const engine_t &test_engine = get_test_engine()) {
+    const std::vector<int> supported_exec_args
+            = base_prb->supported_exec_args(override_dir_with_fwd);
     // Backward case when forward is required will have mem_map not empty.
     // Remove all memories that are not in `supported_exec_args` to save on
     // initializing reference memories.
@@ -707,10 +706,10 @@ void init_memory_args(dnn_mem_map_t &mem_map, const prb_t *prb,
         const auto &dst_md = query_md(const_pd, DNNL_ARG_TO);
         if (has_runtime_dims(src_md)) {
             mem_map.emplace(DNNL_ARG_FROM,
-                    dnn_mem_t(prb->get_md(DNNL_ARG_FROM), src_engine,
+                    dnn_mem_t(base_prb->get_md(DNNL_ARG_FROM), src_engine,
                             /* prefill = */ true));
             mem_map.emplace(DNNL_ARG_TO,
-                    dnn_mem_t(prb->get_md(DNNL_ARG_TO), dst_engine,
+                    dnn_mem_t(base_prb->get_md(DNNL_ARG_TO), dst_engine,
                             /* prefill = */ true));
         } else {
             mem_map.emplace(DNNL_ARG_FROM,
@@ -758,7 +757,8 @@ void init_memory_args(dnn_mem_map_t &mem_map, const prb_t *prb,
                 } else {
                     if (has_runtime_dims(md)) {
                         mem_map.emplace(exec_arg,
-                                dnn_mem_t(prb->get_md(exec_arg), test_engine,
+                                dnn_mem_t(base_prb->get_md(exec_arg),
+                                        test_engine,
                                         /* prefill = */ true));
                     } else {
                         // In case when arguments get updated on backward when
@@ -780,13 +780,14 @@ void init_memory_args(dnn_mem_map_t &mem_map, const prb_t *prb,
     // setting proper pointers to make in-place mode happen.
     // Note: must precede bitwise stash memory insertion to keep numbers
     // estimated by memory checker correct.
-    if (prb->inplace) {
-        const bool inplace_fwd = (prb->dir & FLAG_FWD);
+    if (base_prb->inplace) {
+        const bool inplace_fwd = (base_prb->dir & FLAG_FWD);
         const bool inplace_bwd
-                = (prb->dir & FLAG_BWD) && !is_fwd_prop_kind(prop_kind);
+                = (base_prb->dir & FLAG_BWD) && !is_fwd_prop_kind(prop_kind);
         if (inplace_fwd || inplace_bwd) {
-            const int inplace_dst_arg
-                    = (prb->dir & FLAG_FWD) ? DNNL_ARG_DST : DNNL_ARG_DIFF_SRC;
+            const int inplace_dst_arg = (base_prb->dir & FLAG_FWD)
+                    ? DNNL_ARG_DST
+                    : DNNL_ARG_DIFF_SRC;
             mem_map[inplace_dst_arg] = dnn_mem_t();
         }
     }
@@ -810,7 +811,7 @@ void init_memory_args(dnn_mem_map_t &mem_map, const prb_t *prb,
             const auto &md = query_md(const_pd, query_arg);
             if (has_runtime_dims(md)) {
                 mem_map.emplace(insert_arg,
-                        dnn_mem_t(prb->get_md(query_arg), test_engine,
+                        dnn_mem_t(base_prb->get_md(query_arg), test_engine,
                                 /* prefill = */ true));
             } else {
                 mem_map.emplace(insert_arg,
@@ -820,7 +821,7 @@ void init_memory_args(dnn_mem_map_t &mem_map, const prb_t *prb,
 
         // An inplace mode uses the source memory object as the destination one.
         // It results in the source is overwritten after the operation is done.
-        if (prb->inplace) {
+        if (base_prb->inplace) {
             const bool has_multiple_args = std::any_of(
                     supported_exec_args.begin(), supported_exec_args.end(),
                     [](int arg) { return arg == DNNL_ARG_MULTIPLE_SRC; });
@@ -831,7 +832,7 @@ void init_memory_args(dnn_mem_map_t &mem_map, const prb_t *prb,
             const auto &md = query_md(const_pd, query_arg);
             if (has_runtime_dims(md)) {
                 mem_map.emplace(insert_arg,
-                        dnn_mem_t(prb->get_md(query_arg), test_engine,
+                        dnn_mem_t(base_prb->get_md(query_arg), test_engine,
                                 /* prefill = */ true));
             } else {
                 mem_map.emplace(insert_arg,
@@ -879,7 +880,7 @@ void init_memory_args(dnn_mem_map_t &mem_map, const prb_t *prb,
         const auto &orig_dst_md = query_md(const_pd, DNNL_ARG_DST);
         benchdnn_dnnl_wrapper_t<dnnl_memory_desc_t> prb_dst_md;
         if (has_runtime_dims(orig_dst_md)) {
-            prb_dst_md = prb->get_md(DNNL_ARG_DST);
+            prb_dst_md = base_prb->get_md(DNNL_ARG_DST);
         }
         const auto &dst_md = prb_dst_md ? prb_dst_md : orig_dst_md;
 
@@ -897,18 +898,18 @@ void init_memory_args(dnn_mem_map_t &mem_map, const prb_t *prb,
     }
 
     // Dropout
-    if (is_fwd_training(prop_kind) && !prb->attr.dropout.is_def()) {
+    if (is_fwd_training(prop_kind) && !base_prb->attr.dropout.is_def()) {
         const auto &dropout_md = query_md(const_pd, DNNL_ARG_ATTR_DROPOUT_MASK);
         mem_map.emplace(DNNL_ARG_ATTR_DROPOUT_MASK,
                 dnn_mem_t(dropout_md, test_engine, /* prefill = */ true));
 
-        if (prb->attr.dropout.use_host_scalars) {
+        if (base_prb->attr.dropout.use_host_scalars) {
             auto prob_md = dnn_mem_t::init_host_scalar_md(dnnl_f32);
             mem_map.emplace(
                     DNNL_ARG_ATTR_DROPOUT_PROBABILITY, dnn_mem_t(prob_md));
             auto seed_md = dnn_mem_t::init_host_scalar_md(dnnl_s64);
             mem_map.emplace(DNNL_ARG_ATTR_DROPOUT_SEED, dnn_mem_t(seed_md));
-            if (prb->attr.dropout.offset != 0) {
+            if (base_prb->attr.dropout.offset != 0) {
                 auto offset_md = dnn_mem_t::init_host_scalar_md(dnnl_s64);
                 mem_map.emplace(
                         DNNL_ARG_ATTR_DROPOUT_OFFSET, dnn_mem_t(offset_md));
@@ -921,7 +922,7 @@ void init_memory_args(dnn_mem_map_t &mem_map, const prb_t *prb,
             auto seed_md = dnn_mem_t::init_md(1, &count, dnnl_s64, tag::abx);
             mem_map.emplace(DNNL_ARG_ATTR_DROPOUT_SEED,
                     dnn_mem_t(seed_md, test_engine, /* prefill = */ true));
-            if (prb->attr.dropout.offset != 0) {
+            if (base_prb->attr.dropout.offset != 0) {
                 auto offset_md
                         = dnn_mem_t::init_md(1, &count, dnnl_s64, tag::abx);
                 mem_map.emplace(DNNL_ARG_ATTR_DROPOUT_OFFSET,
@@ -932,8 +933,8 @@ void init_memory_args(dnn_mem_map_t &mem_map, const prb_t *prb,
     }
 
     // Scales.
-    if (!prb->attr.scales.is_def()) {
-        const auto &sc = prb->attr.scales;
+    if (!base_prb->attr.scales.is_def()) {
+        const auto &sc = base_prb->attr.scales;
 
         const auto &src_md = query_md(const_pd, DNNL_ARG_SRC);
         const auto &wei_md = query_md(const_pd, DNNL_ARG_WEIGHTS);
@@ -952,7 +953,7 @@ void init_memory_args(dnn_mem_map_t &mem_map, const prb_t *prb,
             if (mask > 0) {
                 const auto &md = query_md(const_pd, exec_arg);
                 if (has_runtime_dims(md)) {
-                    const auto prb_md = prb->get_md(exec_arg);
+                    const auto prb_md = base_prb->get_md(exec_arg);
                     dims = md2dims(prb_md, mask, false, groups);
                     ndims = static_cast<int>(dims.size());
                 } else {
@@ -994,8 +995,8 @@ void init_memory_args(dnn_mem_map_t &mem_map, const prb_t *prb,
     }
 
     // Zero points.
-    if (!prb->attr.zero_points.is_def()) {
-        const auto &zp = prb->attr.zero_points;
+    if (!base_prb->attr.zero_points.is_def()) {
+        const auto &zp = base_prb->attr.zero_points;
 
         const auto append_zero_points = [&](int exec_arg) {
             const int exec_zp_arg = DNNL_ARG_ATTR_ZERO_POINTS | exec_arg;
@@ -1010,7 +1011,7 @@ void init_memory_args(dnn_mem_map_t &mem_map, const prb_t *prb,
             if (mask > 0) {
                 const auto &md = query_md(const_pd, exec_arg);
                 if (has_runtime_dims(md)) {
-                    const auto prb_md = prb->get_md(exec_arg);
+                    const auto prb_md = base_prb->get_md(exec_arg);
                     dims = md2dims(prb_md, mask, false, groups);
                     ndims = static_cast<int>(dims.size());
                 } else {
@@ -1048,8 +1049,8 @@ void init_memory_args(dnn_mem_map_t &mem_map, const prb_t *prb,
     }
 
     // Precomputed reductions.
-    if (!prb->attr.precomputed_reductions.is_def()) {
-        const auto &pr = prb->attr.precomputed_reductions;
+    if (!base_prb->attr.precomputed_reductions.is_def()) {
+        const auto &pr = base_prb->attr.precomputed_reductions;
 
         const auto append_precomputed_reductions = [&](int exec_arg) {
             const int exec_pr_arg
@@ -1065,7 +1066,7 @@ void init_memory_args(dnn_mem_map_t &mem_map, const prb_t *prb,
             if (mask > 0) {
                 const auto &md = query_md(const_pd, exec_arg);
                 if (has_runtime_dims(md)) {
-                    const auto prb_md = prb->get_md(exec_arg);
+                    const auto prb_md = base_prb->get_md(exec_arg);
                     dims = md2dims(prb_md, mask, false, groups);
                     ndims = static_cast<int>(dims.size());
                 } else {
@@ -1098,7 +1099,7 @@ void init_memory_args(dnn_mem_map_t &mem_map, const prb_t *prb,
     }
 
     // rounding mode
-    if (!prb->attr.rounding_mode.is_def()) {
+    if (!base_prb->attr.rounding_mode.is_def()) {
         int64_t count = 1;
         auto seed_md = dnn_mem_t::init_md(1, &count, dnnl_s32, tag::abx);
         mem_map.emplace(DNNL_ARG_ATTR_ROUNDING_SEED,
@@ -1123,14 +1124,16 @@ int init_ref_memory_args_default_case(int exec_arg, dnn_mem_t &mem,
 int check_bitwise(dnnl_primitive_t prim, const std::vector<data_kind_t> &kinds,
         const args_t &args, const attr_t &attr, bool inplace, res_t *res);
 
-template <typename prb_t>
-int init_prim_ref_common(benchdnn_dnnl_wrapper_t<dnnl_primitive_t> &prim_ref,
-        const prb_t *prb_cpu, res_t *res) {
+inline int init_prim_ref_common(
+        benchdnn_dnnl_wrapper_t<dnnl_primitive_t> &prim_ref,
+        const base_prb_t *base_prb_cpu, res_t *res,
+        const init_pd_func_t &init_pd_func) {
 
-    init_pd_args_t<prb_t> init_pd_args(
-            /* res = */ nullptr, get_cpu_engine(), prb_cpu, prb_cpu->dir,
+    init_pd_args_t init_pd_args(
+            /* res = */ nullptr, get_cpu_engine(), base_prb_cpu,
+            base_prb_cpu->dir,
             /* hint = */ nullptr, /* src_md = */ nullptr);
-    init_pd(init_pd_args);
+    init_pd_func(init_pd_args);
 
     benchdnn_dnnl_wrapper_t<dnnl_primitive_desc_t> pdw;
     // `is_service_prim=true` prevents from filtering the implementation
@@ -1152,7 +1155,7 @@ int init_prim_ref_common(benchdnn_dnnl_wrapper_t<dnnl_primitive_t> &prim_ref,
     BENCHDNN_PRINT(5, "CPU reference oneDNN implementation: %s\n",
             query_impl_info(pdw).c_str());
 
-    res->prim_ref_repro = prb_cpu->str();
+    res->prim_ref_repro = base_prb_cpu->str();
     // Replace engine kind for repro line from GPU to CPU.
     const auto eng_pos = res->prim_ref_repro.find("engine=gpu");
     if (eng_pos != std::string::npos) {

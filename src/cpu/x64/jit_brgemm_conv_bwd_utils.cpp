@@ -1064,6 +1064,12 @@ void brg_blocking_t::iterate_ker_block(brg_blocking_t &best_brgb, int kd_block_,
         if (spb == prev_spb || spb > start_sp_block) continue;
         if (spb % stride_w != 0) continue;
         if (!has_uneven_iw && iw % spb != 0) continue;
+        // For AMX with stride, skip sp_blocks where the brgemm M dimension
+        // is smaller than amx_h (16). Such small M values severely
+        // underutilize AMX tiles and incur disproportionate setup overhead.
+        if (is_amx(isa) && stride_w > 1 && div_up(spb, stride_w) < amx_h
+                && spb < sp)
+            continue;
 
         prev_spb = spb;
         iw_block = spb;
@@ -1593,7 +1599,8 @@ status_t init_jcp(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
                             && everyone_is(14, jcp.oh, jcp.ow)
                             && everyone_is(4, jcp.kh, jcp.kw)
                             && everyone_is(2, jcp.stride_h, jcp.stride_w)));
-    VDISPATCH_CONV_IC(!(is_f32 && is_regression_shape),
+    VDISPATCH_CONV_IC(!(is_f32 && !(jcp.is_deconv && attr.post_ops_.len() > 0)
+                              && is_regression_shape),
             "implementation skipped due to low performance");
 
     const bool is_signed_input = jcp.src_dt == s8;

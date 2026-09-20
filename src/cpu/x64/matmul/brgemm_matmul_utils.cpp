@@ -372,10 +372,10 @@ brgemm_matmul_conf_utils_t::brgemm_matmul_conf_utils_t(
     , f32_with_int_wei_dt(weights_decompression_support
               && everyone_is(f32, bgmmc.src_dt, bgmmc.dst_dt))
     // int8 grouped quantization: any grouped scales/ZP attribute on
-    // int8 src x {s4,u4,s8} wei, dst in {f16,bf16,f32,s8,u8}.
+    // int8 src x {s4,u4,s8} wei, dst in {f16,bf16,f32,s8,u8,s32}.
     , int8_grouped_quantization_dt(one_of(bgmmc.src_dt, u8, s8)
               && one_of(bgmmc.wei_dt, s4, u4, s8)
-              && one_of(bgmmc.dst_dt, f16, bf16, f32, s8, u8)
+              && one_of(bgmmc.dst_dt, f16, bf16, f32, s8, u8, s32)
               && (!attr.zero_points_.get(DNNL_ARG_SRC).has_default_values()
                       || !attr.zero_points_.get(DNNL_ARG_WEIGHTS)
                                   .has_default_values())
@@ -1765,8 +1765,6 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
                                                       : s8;
         bgmmc.tr_a_dt_sz = types::data_type_size(bgmmc.src_dt);
         bgmmc.tr_b_dt_sz = types::data_type_size(bgmmc.wei_dt);
-        bgmmc.s8s8_compensation_required
-                = bgmmc.src_dt == s8 && !isa_has_s8s8(isa);
     }
 
     // Grouped int8 quantization accumulates in f32: per-K scale/ZP
