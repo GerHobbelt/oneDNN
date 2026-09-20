@@ -44,8 +44,7 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(impl::engine_t *engine) {
     assert(engine->kind() == engine_kind::gpu);
     auto *intel_engine = utils::downcast<intel::engine_t *>(engine);
     auto *dev_info = intel_engine->device_info();
-    bool use_systolic_ukernel = intel_engine->mayiuse(
-            compute::device_ext_t::intel_subgroup_matrix_multiply_accumulate);
+    bool use_systolic_ukernel = dev_info->mayiuse_systolic();
 
     /* Get device information */
     HWInformation hw_info;
@@ -139,13 +138,15 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(impl::engine_t *engine) {
                 = static_cast<int>(utils::rnd_up_pow2(src_group_sizes_[1]));
     }
 
-    // internal conversions do not work well when both A and B are integers
-    if (problem.Ta.isInteger() && problem.Tb.isInteger()) {
+    // When both A and B are integers and group sums are needed, we
+    // can avoid using group sums by converting one of the inputs to
+    // f16/bf16.
+    if (problem.Ta.isInteger() && problem.Tb.isInteger()
+            && (problem.needsAGroupSums() || problem.needsBGroupSums())) {
         Type ctype = Type::f16;
         if (utils::one_of(Type::bf16, problem.Ta_scale, problem.Tb_scale,
                     convert_dnnl_to_kernel_type(dst_mdw.data_type())))
             ctype = Type::bf16;
-
         if (problem.Ta_ext.bits() < problem.Tb_ext.bits()) {
             problem.Ta = ctype;
         } else {
@@ -163,7 +164,7 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(impl::engine_t *engine) {
         using namespace gemmstone;
         newStrat = gpu_utils::dev_getenv("GRPGEMM_USTRATEGY", newStrat);
         if (!newStrat.empty()) {
-            // Example: 16 16 aT32 aM32 aB wg 2x4 sys
+            // Example: 16 16 1 0 aT32 aM32 aB wg 2x4 sys
             printf("GRPGEMM_USTRATEGY: %s\n", newStrat.c_str());
             auto product = ngen::npack::decodeHWIPVersion(hw_info.gmdid);
             auto hw = getCore(product.family);
@@ -188,16 +189,33 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(impl::engine_t *engine) {
         gemm_ = selectGEMM(opts, hw_info, sizes, problem, {}, strat_override);
     } catch (const std::runtime_error &) {
         std::vector<StrategyRequirement> reqs;
-        int m_unroll = sg_size_;
-        int max_n_unroll = 0;
+
+        // TODO: These values should be based on the eu_count
+        dim_t m_unroll = sg_size_;
+        float avg_m = float(M()) / ngroups_;
+        dim_t n_unroll = utils::rnd_up_pow2(dim_t(avg_m));
+        dim_t max_n_unroll = 0;
+        dim_t max_wg_n = 4;
+        dim_t min_wg_n = 1;
 
         switch (dev_info->gpu_arch()) {
             case compute::gpu_arch_t::xe_lp:
             case compute::gpu_arch_t::xe_hp:
+                max_n_unroll = (problem.aqGroupK > 64
+                                       && problem.A.layout == MatrixLayout::T)
+                                || (problem.Ta_ext.isF8() && opts.scaleA
+                                        && opts.scaleB)
+                                || (problem.Ta_scale == Type::f8_e8m0
+                                        || problem.Tb_scale == Type::f8_e8m0)
+                        ? 8
+                        : 16;
+                break;
             case compute::gpu_arch_t::xe_hpg:
+                if (!dev_info->mayiuse_systolic()) max_wg_n = 2;
                 max_n_unroll = (problem.Ta_ext.bits() < 8)
                         ? sg_size_ * problem.Ta_ext
                         : 16;
+                if (problem.Ta_ext.bits() <= 8) min_wg_n = 2;
                 break;
             case compute::gpu_arch_t::xe_hpc: max_n_unroll = 32; break;
             default:
@@ -208,11 +226,11 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(impl::engine_t *engine) {
 
         reqs.push_back(StrategyRequirement::UnrollM == m_unroll);
         reqs.push_back(StrategyRequirement::UnrollN
-                == utils::rnd_up_pow2(std::min<dim_t>(M(), max_n_unroll)));
+                == std::min(n_unroll, max_n_unroll));
         reqs.push_back(StrategyRequirement::WGM == 2);
         reqs.push_back(StrategyRequirement::WGN
-                == utils::rnd_up_pow2(std::max<dim_t>(
-                        1, std::min<dim_t>(M() / reqs[1].value, 4))));
+                == utils::rnd_up_pow2(std::max<dim_t>(min_wg_n,
+                        std::min<dim_t>(avg_m / reqs[1].value, max_wg_n))));
         try {
             gemm_ = selectGEMM(
                     opts, hw_info, sizes, problem, reqs, strat_override);
@@ -540,10 +558,16 @@ status_t grouped_micro_gemm_t::execute(const exec_ctx_t &ctx) const {
     lws[1] *= sg_per_wg_n;
     lws[2] *= sg_per_wg_k;
 
+    dim_t m_dispatch = m_all;
+    const int32_t *max_var_dim
+            = CTX_IN_MEM(const int32_t *, DNNL_ARG_HINT_MAX_GROUP_SIZE);
+    if (max_var_dim && *max_var_dim > 0 && *max_var_dim <= m_all)
+        m_dispatch = *max_var_dim;
+
     compute::range_t gws = lws;
     // Swap wg_tile_[mn]_ for col-major vs row-major representations
     gws[0] *= utils::div_up(n, wg_tile_m);
-    gws[1] *= utils::div_up(m_all, wg_tile_n);
+    gws[1] *= utils::div_up(m_dispatch, wg_tile_n);
     gws[2] *= num_groups;
 
     return parallel_for(ctx, compute::nd_range_t(gws, lws), kernel_, arg_list);

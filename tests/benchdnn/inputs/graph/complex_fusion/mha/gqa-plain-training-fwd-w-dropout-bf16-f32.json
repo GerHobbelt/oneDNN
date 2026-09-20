@@ -282,7 +282,7 @@
       "outputs": [
         {
           "id": 7,
-          "dtype": "bf16",
+          "dtype": "f32",
           "shape": [
             2,
             2,
@@ -330,7 +330,7 @@
       "inputs": [
         {
           "id": 7,
-          "dtype": "bf16",
+          "dtype": "f32",
           "shape": [
             2,
             2,
@@ -376,6 +376,56 @@
       "outputs": [
         {
           "id": 10,
+          "dtype": "f32",
+          "shape": [
+            2,
+            2,
+            8,
+            128,
+            128
+          ],
+          "stride": [
+            262144,
+            131072,
+            16384,
+            128,
+            1
+          ],
+          "layout_type": "strided",
+          "property_type": "undef"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "name": "typecast",
+      "kind": "TypeCast",
+      "attrs": {},
+      "inputs": [
+        {
+          "id": 10,
+          "dtype": "f32",
+          "shape": [
+            2,
+            2,
+            8,
+            128,
+            128
+          ],
+          "stride": [
+            262144,
+            131072,
+            16384,
+            128,
+            1
+          ],
+          "layout_type": "strided",
+          "property_type": "undef"
+        }
+      ],
+      "outputs": [
+        {
+          "id": 11,
           "dtype": "bf16",
           "shape": [
             2,
@@ -416,7 +466,7 @@
       },
       "inputs": [
         {
-          "id": 10,
+          "id": 11,
           "dtype": "bf16",
           "shape": [
             2,
