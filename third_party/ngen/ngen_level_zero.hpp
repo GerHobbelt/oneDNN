@@ -123,7 +123,7 @@ static inline void handleL0(ze_result_t result)
 }
 
 struct ze_module_deleter_t {
-    void operator()(ze_module_handle_t *h) const { handleL0(dynamic::zeModuleDestroy(*h)); }
+    void operator()(ze_module_handle_t *h) const { dynamic::zeModuleDestroy(*h); }
 };
 
 static inline std::vector<uint8_t> getDummyModuleBinary(ze_context_handle_t context, ze_device_handle_t device) {
@@ -239,7 +239,7 @@ template <HW hw>
 bool LevelZeroCodeGenerator<hw>::detectEfficient64Bit(ze_context_handle_t context, ze_device_handle_t device, HW inHW)
 {
     if (inHW == HW::Unknown) inHW = hw;
-    if (inHW < HW::XE3P_35_10) return false;
+    if (inHW < HW::Xe3p) return false;
 
     auto binary = detail::getDummyModuleBinary(context, device);
     return npack::isBinaryEfficient64Bit(binary, inHW);

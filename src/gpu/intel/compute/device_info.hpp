@@ -30,10 +30,13 @@
 
 #include "oneapi/dnnl/dnnl_config.h"
 
+// NOLINTBEGIN(readability-identifier-naming)
 namespace ngen {
 enum class Core;
 using HW = Core;
+struct Product;
 } // namespace ngen
+// NOLINTEND(readability-identifier-naming)
 
 namespace dnnl {
 namespace impl {
@@ -49,9 +52,7 @@ enum class gpu_arch_t {
     xe_hpc,
     xe2,
     xe3,
-    xe3p_35_10,
-    xe3p_35_11,
-    xe3p_35_unknown,
+    xe3p,
 };
 
 // Memory for storing ngen::Product to avoid directly including nGEN because of
@@ -69,9 +70,7 @@ static inline const char *to_string(gpu_arch_t arch) {
     CASE(xe_hpc);
     CASE(xe2);
     CASE(xe3);
-    CASE(xe3p_35_10);
-    CASE(xe3p_35_11);
-    CASE(xe3p_35_unknown);
+    CASE(xe3p);
     return "unknown";
 #undef CASE
 }
@@ -85,9 +84,7 @@ static inline gpu_arch_t str2gpu_arch(const char *str) {
     CASE(xe_hpc);
     CASE(xe2);
     CASE(xe3);
-    CASE(xe3p_35_10);
-    CASE(xe3p_35_11);
-    CASE(xe3p_35_unknown);
+    CASE(xe3p);
     return gpu_arch_t::unknown;
 #undef CASE
 }
@@ -161,18 +158,17 @@ static inline const char *ext2cl_str(device_ext_t ext) {
 }
 
 enum class native_ext_t : uint64_t {
-    // clang-format off
     // OpenCL data types
-    fp32_atomic_add = 1ull << 0,                   
-    fp32_atomic_min_max = 1ull << 1, 
-    fp32_atomic_load_store = 1ull << 2,  
-    fp16_atomic_add = 1ull << 3,                   
-    fp16_atomic_min_max = 1ull << 4,              
-    fp16_atomic_load_store = 1ull << 5,  
+    fp32_atomic_add = 1ull << 0,
+    fp32_atomic_min_max = 1ull << 1,
+    fp32_atomic_load_store = 1ull << 2,
+    fp16_atomic_add = 1ull << 3,
+    fp16_atomic_min_max = 1ull << 4,
+    fp16_atomic_load_store = 1ull << 5,
     fp64_atomic_add = 1ull << 6,
     fp64_atomic_min_max = 1ull << 7,
-    fp64_atomic_load_store = 1ull << 8,  
-    last
+    fp64_atomic_load_store = 1ull << 8,
+    last,
 };
 
 // Needed workaround for future HW extensions
@@ -183,35 +179,18 @@ struct device_info_t {
 public:
     virtual ~device_info_t() = default;
 
-    status_t init(
-            impl::engine_t *engine, const std::vector<uint8_t> &cache_blob = {}) {
-        if (!cache_blob.empty()) {
-            CHECK(init_from_cache_blob(cache_blob));
-            return init_serialized_device_info(cache_blob);
-        }
-
-        CHECK(init_device_name(engine));
-        CHECK(init_arch(engine));
-        CHECK(init_runtime_version(engine));
-        CHECK(init_extensions(engine));
-        CHECK(init_attributes(engine));
-        fixup_l3_cache_size();
-
-        CHECK(init_attributes_common(engine));
-
-        if (dnnl_version()->gpu_runtime == DNNL_RUNTIME_OCL) {
-            CHECK(init_serialized_device_info());
-        }
-
-        return status::success;
-    }
+    status_t init(impl::engine_t *engine,
+            const std::vector<uint8_t> &cache_blob = {});
 
     std::string get_cl_ext_options() const;
 
     bool has(device_ext_t ext) const { return extensions_ & (uint64_t)ext; }
-    bool has_native(native_ext_t ext) const { return native_extensions_ & (uint64_t)ext; }
+    bool has_native(native_ext_t ext) const {
+        return native_extensions_ & (uint64_t)ext;
+    }
     gpu_arch_t gpu_arch() const { return gpu_arch_; }
-    const gpu_product_t &gpu_product() const {return gpu_product_;}
+    const gpu_product_t &gpu_product() const { return gpu_product_; }
+    static const ngen::Product &ngen_product(gpu_product_t &product);
     ngen::HW ngen_hw() const;
     int stepping_id() const;
     uint64_t native_extensions() const { return native_extensions_; }
@@ -226,7 +205,7 @@ public:
     int max_subgroup_size(data_type_t type = data_type::undef) const;
     static int max_subgroup_size(gpu_arch_t gpu_arch);
     static int grf_size(gpu_arch_t gpu_arch);
-    int grf_size() const { return grf_size(gpu_arch_); };
+    int grf_size() const { return grf_size(gpu_arch_); }
     int min_subgroup_size() const;
     size_t max_wg_size(bool large_grf_mode, size_t subgroup_size = 0) const;
     int eu_count() const { return eu_count_; }
@@ -235,10 +214,10 @@ public:
         return hw_threads_[large_grf_mode ? 1 : 0];
     }
     static int threads_per_eu(gpu_arch_t gpu_arch, bool large_grf_mode = false);
-    static int max_slm_size(gpu_arch_t gpu_arch);
-    static int max_slm_size_per_tg(gpu_arch_t gpu_arch);
+    static int max_slm_size(gpu_product_t product);
+    static int max_slm_size_per_tg(gpu_product_t product);
     static int max_slm_size_per_tg(
-            gpu_arch_t gpu_arch, int tg_size, bool large_grf_mode = false);
+            int tg_size, bool large_grf_mode, gpu_product_t product);
     size_t memory_size() const { return memory_size_; }
     size_t l3_cache_size() const { return l3_cache_size_; }
     size_t icache_size() const;
