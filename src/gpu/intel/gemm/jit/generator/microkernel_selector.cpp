@@ -424,7 +424,7 @@ static inline bool getStrategyByHeuristics(HW hw, GEMMStrategy &strategy, bool l
     } else if (!block2DA) {
         s.A.accessType = AccessType::Block;
         if (systolic)
-            s.ka_load = (problem.A.layout == MatrixLayout::T) ? (64 / problem.Ta_ext) : 16;
+            s.ka_load = (problem.A.layout == MatrixLayout::T) ? 64 / problem.Ta_ext : 16;
         s.slmA = true;
     } else if (problem.A.layout == MatrixLayout::T) {
         s.A.accessType = AccessType::Block2DTranspose;
@@ -459,18 +459,6 @@ static inline bool getStrategyByHeuristics(HW hw, GEMMStrategy &strategy, bool l
         s.kb_load = 32;
     }
 
-    if(block2DA) {
-        problem.A.alignment = std::min(problem.A.alignment,
-                                       static_cast<uint8_t>(block2DMinAlignment(hw, problem.A, strategy.A)));
-    } else {
-        problem.A.alignment = std::min<uint8_t>(16, problem.A.alignment);
-    }
-    if(block2DB) {
-        problem.B.alignment = std::min(problem.B.alignment,
-                                       static_cast<uint8_t>(block2DMinAlignment(hw, problem.B, strategy.B)));
-    } else {
-        problem.B.alignment = std::min<uint8_t>(16, problem.B.alignment);
-    }
     s.C.accessType = AccessType::Block;
 
     s.A.base = localA ? AddressBase::createSLM() : AddressBase::createA64(true);
@@ -514,6 +502,19 @@ static inline bool getStrategyByHeuristics(HW hw, GEMMStrategy &strategy, bool l
         default: break;
     }
 
+    if(block2DA) {
+        problem.A.alignment = std::min(problem.A.alignment,
+                                        static_cast<uint8_t>(block2DMinAlignment(hw, problem.A, strategy.A)));
+    } else {
+        problem.A.setAlignment(std::min<uint8_t>(problem.A.alignment, s.unroll[LoopM] * problem.Ta));
+    }
+    if(block2DB) {
+        problem.B.alignment = std::min(problem.B.alignment,
+                                        static_cast<uint8_t>(block2DMinAlignment(hw, problem.B, strategy.B)));
+    } else {
+        problem.B.alignment = std::min<uint8_t>(16, problem.B.alignment);
+    }
+
     if (s.wgTile(LoopM) * s.wgTile(LoopN) == 0)
         return false;
 
@@ -527,7 +528,18 @@ static inline bool getStrategyByHeuristics(HW hw, GEMMStrategy &strategy, bool l
     if (systolic && hw >= HW::XeHPC)
         s.extendedAtomicFMA = s.atomicFMA = true;
     s.registerScheme = GEMMStrategy::VAvoid;
-    if (s.wgTile(LoopM) * s.wgTile(LoopN) > 512)
+
+    // TODO: Refine GRF limits further. This should be based on the
+    // GRF requirements of the A/B/C GRF requirements.
+    int grf_limit = 512;
+    if(hw < HW::XeHPC) {
+        if (problem.A.layout == MatrixLayout::T) {
+            grf_limit = 256 * problem.Ta_ext;
+        } else {
+            grf_limit = 256;
+        }
+    }
+    if (s.wgTile(LoopM) * s.wgTile(LoopN) > grf_limit)
         s.GRFs = 256;
     if (localA && !localB)
         s.loadBFirst = true;

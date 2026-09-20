@@ -172,6 +172,10 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(impl::engine_t *engine) {
             std::stringstream ss(newStrat);
             ss >> strat.unroll[0];
             ss >> strat.unroll[1];
+            float a, b;
+            ss >> a;
+            ss >> b;
+            Scalar alpha(a), beta(b);
             std::string strategyString;
             std::getline(ss >> std::ws, strategyString);
             parseStrategy(strategyString.c_str(), hw, problem, strat);
@@ -180,19 +184,27 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(impl::engine_t *engine) {
         strategyGRFs_ = strat.GRFs;
     };
 
-    auto sg_size = dev_info->min_subgroup_size();
     try {
         gemm_ = selectGEMM(opts, hw_info, sizes, problem, {}, strat_override);
     } catch (const std::runtime_error &) {
         std::vector<StrategyRequirement> reqs;
-        int m_unroll = problem.Ta.isInt4()
-                        && dev_info->gpu_arch() > compute::gpu_arch_t::xe_hpc
-                ? sg_size / problem.Ta
-                : sg_size;
-        int max_n_unroll = problem.Ta.isInt4()
-                        && dev_info->gpu_arch() > compute::gpu_arch_t::xe_hpc
-                ? 16 * problem.Ta
-                : 32;
+        int m_unroll = sg_size_;
+        int max_n_unroll = 0;
+
+        switch (dev_info->gpu_arch()) {
+            case compute::gpu_arch_t::xe_lp:
+            case compute::gpu_arch_t::xe_hp:
+            case compute::gpu_arch_t::xe_hpg:
+                max_n_unroll = (problem.Ta_ext.bits() < 8)
+                        ? sg_size_ * problem.Ta_ext
+                        : 16;
+                break;
+            case compute::gpu_arch_t::xe_hpc: max_n_unroll = 32; break;
+            default:
+                m_unroll = sg_size_ / problem.Ta_ext;
+                max_n_unroll
+                        = problem.Ta.isInt4() ? sg_size_ * problem.Ta_ext : 32;
+        }
 
         reqs.push_back(StrategyRequirement::UnrollM == m_unroll);
         reqs.push_back(StrategyRequirement::UnrollN
@@ -213,11 +225,11 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(impl::engine_t *engine) {
 
     /* Generate microkernel shims */
     ShimOptions shimOptions;
-    shimOptions.subgroupSize = sg_size;
+    shimOptions.subgroupSize = sg_size_;
     shimOptions.useTileOps = true;
     shimOptions.decorator = "grouped";
 
-    kernel_ctx_.define_int("SUBGROUP_SIZE", sg_size);
+    kernel_ctx_.define_int("SUBGROUP_SIZE", sg_size_);
     kernel_ctx_.add_custom_header("gemm_grouped.h",
             generateShim(gemm_, HostLanguage::OpenCL_C, shimOptions));
 
@@ -315,9 +327,6 @@ status_t grouped_micro_gemm_t::pd_t::init(impl::engine_t *engine) {
     assert(engine->kind() == engine_kind::gpu);
     auto *intel_engine = utils::downcast<intel::engine_t *>(engine);
     auto *dev_info = intel_engine->device_info();
-    // TODO: Limiting support for GPUS >= XeHPC temporarily
-    VDISPATCH_MATMUL(dev_info->gpu_arch() >= compute::gpu_arch_t::xe_hpc,
-            VERBOSE_UNSUPPORTED_ARCH, to_string(dev_info->gpu_arch()));
     VDISPATCH_MATMUL(compute::mayiuse_microkernels(intel_engine),
             VERBOSE_UNSUPPORTED_DEVICE_FEATURE, "microkernels");
 
@@ -467,8 +476,8 @@ status_t grouped_micro_gemm_t::execute(const exec_ctx_t &ctx) const {
     const bool with_wei_scales = pd()->wei_quant_.with_scale();
     const bool with_wei_zero_points = pd()->wei_quant_.with_zp();
 
-    int ldsrcq = 0;
-    int ldweiq = 0;
+    dim_t ldsrcq = 0;
+    dim_t ldweiq = 0;
 
     if (with_src_scales || with_src_zero_points) {
         const memory_desc_t *src_quant_md = with_src_scales
@@ -484,12 +493,12 @@ status_t grouped_micro_gemm_t::execute(const exec_ctx_t &ctx) const {
         ldweiq = static_cast<int>(
                 wei_quant_md->format_desc.blocking.strides[1]);
     }
-    int m_all = static_cast<int>(dst_md->dims[dst_md->ndims - 2]);
-    int n = static_cast<int>(dst_md->dims[dst_md->ndims - 1]);
-    int k = static_cast<int>(src_md->dims[src_md->ndims - 1]);
+    dim_t m_all = dst_md->dims[dst_md->ndims - 2];
+    dim_t n = dst_md->dims[dst_md->ndims - 1];
+    dim_t k = src_md->dims[src_md->ndims - 1];
 
-    int ldsrc = static_cast<int>(src_md->dims[src_md->ndims - 1]);
-    int lddst = static_cast<int>(dst_md->dims[dst_md->ndims - 1]);
+    dim_t ldsrc = src_md->dims[src_md->ndims - 1];
+    dim_t lddst = dst_md->dims[dst_md->ndims - 1];
     const dims_t &wei_strides_ = wei_md->format_desc.blocking.strides;
     compute::int64x4_t wei_strides
             = {static_cast<int64_t>(wei_strides_[wei_md->ndims - 3]),

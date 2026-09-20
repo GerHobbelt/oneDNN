@@ -343,12 +343,13 @@ __attribute__((enable_if(sg == 16, "wrong subgroup size"))) {
 
 #define tile_elementwise_s(t, f) \
     do { \
-        _Pragma("unroll") for (int i = 0; i < sizeof(t.x) / sizeof(t.x[0]); \
-                               i++) { \
+        _Pragma("unroll") for (int i = 0; \
+                               i < sizeof((t).x) / sizeof((t).x[0]); i++) { \
             _Pragma("unroll") for (int s = 0; \
-                                   s < sizeof(t.x[0]) / sizeof(t.x[0][0]); \
-                                   s++) t.x[i][s] \
-                    = f(t.x[i][s]); \
+                                   s < sizeof((t).x[0]) / sizeof((t).x[0][0]); \
+                                   s++)(t) \
+                    .x[i][s] \
+                    = f((t).x[i][s]); \
         } \
     } while (0)
 
@@ -357,6 +358,21 @@ __attribute__((enable_if(sg == 16, "wrong subgroup size"))) {
         _Pragma("unroll") for (int i = 0; i < sizeof(t.x) / sizeof(t.x[0]); \
                                i++) t.x[i] \
                 = f(t.x[i], t2.x[i]); \
+    } while (0)
+
+#define tile_store_global_bounds_cvt(_t, _ptr, _ld, _off_r, _off_c, _max_r, \
+        _max_c, _cvt, _sg, _br, _bc, _nbr, _nbc) \
+    do { \
+        for (int _j = 0; _j < (_bc * _nbc); _j++) { \
+            for (int _i0 = 0; _i0 < (_br * _nbr); _i0 += _sg) { \
+                int _i = _i0 + get_sub_group_local_id(); \
+                int _gr = (_off_r) + _j; \
+                int _gc = (_off_c) + _i; \
+                if (_gr < (_max_r) && _gc < (_max_c)) \
+                    (_ptr)[(ulong)_gc * (_ld) + _gr] = _cvt( \
+                            tile_access(_t, _i0, _j, _sg, _br, _bc, _nbr)); \
+            } \
+        } \
     } while (0)
 
 #define tile_copy(t, t_new) \
@@ -423,6 +439,38 @@ __attribute__((enable_if(sg == 16, "wrong subgroup size"))) {
                 int offset_c = sg_offset_c + j; \
                 if (predicate(offset_r, offset_c)) { \
                     tile_access(t, i0, j, sg, br, bc, nbr) = value; \
+                } \
+            } \
+        } \
+    } while (0)
+
+#define tile_predicated_select_t(t, sg_offset_r, sg_offset_c, predicate, \
+        true_value, false_value, sg, br, bc, nbr, nbc) \
+    do { \
+        for (int j = 0; j < (bc * nbc); j++) { \
+            for (int i0 = 0; i0 < (br * nbr); i0 += sg) { \
+                int i = i0 + get_sub_group_local_id(); \
+                int offset_r = sg_offset_r + j; \
+                int offset_c = sg_offset_c + i; \
+                tile_access(t, i0, j, sg, br, bc, nbr) \
+                        = predicate(offset_r, offset_c) ? true_value \
+                                                        : false_value; \
+            } \
+        } \
+    } while (0)
+
+#define tile_predicated_select(t, sg_offset_r, sg_offset_c, predicate, \
+        true_value, false_value, sg, br, bc, nbr, nbc) \
+    do { \
+        for (int j = 0; j < (bc * nbc); j++) { \
+            for (int i0 = 0; i0 < (br * nbr); i0 += sg) { \
+                int i = i0 + get_sub_group_local_id(); \
+                int offset_r = sg_offset_r + i; \
+                int offset_c = sg_offset_c + j; \
+                if (predicate(offset_r, offset_c)) { \
+                    tile_access(t, i0, j, sg, br, bc, nbr) \
+                            = predicate(offset_r, offset_c) ? true_value \
+                                                            : false_value; \
                 } \
             } \
         } \
@@ -649,6 +697,34 @@ __attribute__((enable_if(sg == 16, "wrong subgroup size"))) {
             global element_type *ptr, int m, int n, int offset_r, \
             int offset_c) { \
         tile_store(t, ptr, m, n, m, offset_r, offset_c); \
+    } \
+    __attribute__((overloadable)) void tile_store_t_full(tile_type t, \
+            global element_type *ptr, int ld, int offset_r, int offset_c) { \
+        ptr += ld * offset_r + offset_c; \
+        _Pragma("unroll") for (int j = 0; j < bc * nbc; j++, ptr++) { \
+            _Pragma("unroll") for (int i0 = 0; i0 < br * nbr; i0 += sg) { \
+                int i = ld * (i0 + get_sub_group_local_id()); \
+                ptr[i] = tile_access(t, i0, j, sg, br, bc, nbr); \
+            } \
+        } \
+    } \
+    __attribute__((overloadable)) void tile_store_t(tile_type t, \
+            global element_type *ptr, int m, int n, int ld, int offset_r, \
+            int offset_c) { \
+        if (m >= offset_r + br * nbr && n >= offset_c + bc * nbc) { \
+            tile_store_t_full(t, ptr, ld, offset_r, offset_c); \
+            return; \
+        } \
+        ptr += ld * offset_r + offset_c; \
+        _Pragma("unroll") for (int j = 0; j < bc * nbc; j++, ptr++) { \
+            if (offset_c + j < n) { \
+                _Pragma("unroll") for (int i0 = 0; i0 < br * nbr; i0 += sg) { \
+                    int i = ld * (i0 + get_sub_group_local_id()); \
+                    if ((offset_r + i0 + get_sub_group_local_id()) < m) \
+                        ptr[i] = tile_access(t, i0, j, sg, br, bc, nbr); \
+                } \
+            } \
+        } \
     } \
     __attribute__((overloadable)) void tile_load_t_packed_src1(tile_type *t, \
             local element_type *ptr, int panel, int ld, int offset_r, \

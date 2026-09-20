@@ -14,6 +14,7 @@
 * limitations under the License.
 *******************************************************************************/
 
+#include "gpu/intel/include/philox.h"
 #include "gpu/intel/include/tile_ops.h"
 #include "gpu/intel/include/types_interop.h"
 #include "gpu/intel/sdpa/utils.h"
@@ -27,6 +28,72 @@
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define DIV_UP(x, y) (((x) + (y) - 1) / (y))
+
+#if WITH_DROPOUT
+#define dropout_mul(x, y) ((x) * (y))
+#define dropout_predicate(offset_r, offset_c) \
+    ({ \
+        ulong _goff = batch_head_base + (ulong)offset_c * (ulong)k_stride \
+                + (ulong)offset_r; \
+        uint _philox = use_dropout_offset \
+                ? philox_4x32_s64(_goff, (ulong)seed, (ulong)offset) \
+                : philox_4x32((uint)_goff, (uint)seed); \
+        (offset_r < max_r && offset_c < max_c) && (_philox > threshold); \
+    })
+
+inline void apply_dropout_s_tile(
+        s_tile_type *tile, int tile_offset_r, int tile_offset_c, int max_r,
+        int max_c, ulong batch_head_base, int k_stride, int use_dropout_offset,
+        long seed, long offset, uint threshold, float inv_q
+#if DROPOUT_OUTPUT_MASK
+        ,
+        global uchar *mask_buf
+#endif
+) {
+    s_tile_type scale_tile;
+    /* Build float scale tile: inv_q if keep, 0.f if drop -- same type as s_tile */
+    tile_predicated_select(scale_tile, tile_offset_r, tile_offset_c,
+            dropout_predicate, inv_q, 0.f, SUBGROUP_SIZE,
+            ugemm_kq_c_type_block0, ugemm_kq_c_type_block1,
+            ugemm_kq_c_type_nblock0, ugemm_kq_c_type_nblock1);
+
+    /* Multiply S_tile element-wise by scale tile (both float, no conversion) */
+    s_tile_type tmp = *tile;
+    tile_binary(tmp, scale_tile, dropout_mul);
+    *tile = tmp;
+
+#if DROPOUT_OUTPUT_MASK
+    /* Derive uchar mask from scale_tile: nonzero -> 1 (keep), zero -> 0 (drop) */
+#define dropout_scale_to_mask(x) ((uchar)((x) != 0.f))
+    tile_store_global_bounds_cvt(scale_tile, mask_buf + batch_head_base,
+            (ulong)k_stride, tile_offset_r, tile_offset_c, max_r, max_c,
+            dropout_scale_to_mask, SUBGROUP_SIZE, ugemm_kq_c_type_block0,
+            ugemm_kq_c_type_block1, ugemm_kq_c_type_nblock0,
+            ugemm_kq_c_type_nblock1);
+#undef dropout_scale_to_mask
+#endif
+}
+
+inline void apply_dropout_dP_tile(p_tile_type *tile, int tile_offset_r,
+        int tile_offset_c, int max_r, int max_c, ulong batch_head_base,
+        int k_stride, int use_dropout_offset, long seed, long offset,
+        uint threshold, float inv_q) {
+    /* Build float scale tile using vtdA geometry: inv_q if keep, 0.f if drop */
+    p_tile_type scale_p_tile;
+    tile_predicated_select(scale_p_tile, tile_offset_r, tile_offset_c,
+            dropout_predicate, inv_q, 0.f, SUBGROUP_SIZE,
+            ugemm_vtdA_c_type_block0, ugemm_vtdA_c_type_block1,
+            ugemm_vtdA_c_type_nblock0, ugemm_vtdA_c_type_nblock1);
+
+    /* Multiply dP_tile element-wise by scale tile */
+    p_tile_type tmp = *tile;
+    tile_binary(tmp, scale_p_tile, dropout_mul);
+    *tile = tmp;
+}
+
+#undef dropout_mul
+#undef dropout_predicate
+#endif
 
 #define sg_per_wg_BcBr \
     (ugemm_kq_sg_per_wg_m * ugemm_kq_sg_per_wg_n) // same for kq, vtdA
@@ -266,7 +333,8 @@ DECLARE_2D_TILE_SLM_ADD_T(a_tile_type, float, SUBGROUP_SIZE,
 #define binary_add(x, y) ((x) + (y))
 
 inline void tile_load_k(k_tile_type *K_tile, const global KEY_DATA_T *K,
-        int seq_len, int ldk, int seq_off, int sg_ij, int load_rem) {
+        int seq_len, int head_size, int ldk, int seq_off, int sg_ij,
+        int load_rem) {
 
 #if TRANSPOSE_K
     // Bc / n_sg -- each sg loads k_tile_t_sg_n k-columns
@@ -275,7 +343,7 @@ inline void tile_load_k(k_tile_type *K_tile, const global KEY_DATA_T *K,
 #if BLOCK_K
     tile_load_block(K_tile, K, ldk, 0, seq_off + k0_copy);
 #else
-    tile_load(K_tile, K, D_MAX, seq_len, ldk, 0, seq_off + k0_copy);
+    tile_load(K_tile, K, head_size, seq_len, ldk, 0, seq_off + k0_copy);
 #endif
 
 #else
@@ -285,7 +353,7 @@ inline void tile_load_k(k_tile_type *K_tile, const global KEY_DATA_T *K,
     // can ignore load_rem due to d_full requirement
     tile_load_block(K_tile, K, ldk, seq_off, k0_copy);
 #else
-    tile_load(K_tile, K, seq_len, D_MAX, ldk, seq_off, k0_copy);
+    tile_load(K_tile, K, seq_len, head_size, ldk, seq_off, k0_copy);
 #endif
 
 #endif
@@ -335,10 +403,19 @@ inline void tile_store_k_slm(
 #define DST_DATA_T_DKDV DST_DATA_T
 #endif
 
+// round f32 intermediate values to DST_DATA_T precision before GQA atomic
+// accumulation. Although less accurate, it matches the unfused path
+// where each query group matmul output passes through DST_DATA_T
+// storage before the reduction
+inline float round_to_dst(float v) {
+    return CONVERT_FLOAT_T(CONVERT_DATA_T(v));
+}
+
 inline void tile_store_dV(dv_tile_type *dV_tile_slm, global DST_DATA_T_DKDV *dV,
         int m, int n, int ld, int offset_r, int offset_c, int rem) {
 
 #if IS_GQA
+    tile_elementwise_s(*dV_tile_slm, round_to_dst);
     tile_atomic_add(*dV_tile_slm, dV, m, n, ld, offset_r, offset_c);
 #else // MHA update
 
@@ -359,6 +436,7 @@ inline void tile_store_dK_t(dv_tile_type *dK_tile, global DST_DATA_T_DKDV *dK,
         int m, int n, int ld, int offset_r, int offset_c, int rem) {
 
 #if IS_GQA
+    tile_elementwise_s(*dK_tile, round_to_dst);
     tile_atomic_add(*dK_tile, dK, m, n, ld, offset_r, offset_c);
 #else // MHA update
     dv_tile_type_dst dK_tile_dst;
@@ -378,6 +456,7 @@ inline void tile_store_dK(a_tile_type *dK_tile, global DST_DATA_T_DKDV *dK,
         int m, int n, int ld, int offset_r, int offset_c) {
 
 #if IS_GQA
+    tile_elementwise_s(*dK_tile, round_to_dst);
     tile_atomic_add(*dK_tile, dK, m, n, ld, offset_r, offset_c);
 #else // MHA update
 
@@ -410,6 +489,16 @@ micro_sdpa_bwd(const global KEY_DATA_T *K, const global QRY_DATA_T *Q,
         float scalar_scale, float inv_scalar_scale,
 #else
         const global SCALE_DATA_T *scale_ptr,
+#endif
+#if WITH_DROPOUT
+        global uchar *dropout_mask_buf, int use_dropout_offset,
+#if DROPOUT_HOST_SCALARS
+        long dropout_seed, long dropout_offset, float dropout_p,
+#else
+        const global long *dropout_seed_buf,
+        const global long *dropout_offset_buf,
+        const global float *dropout_p_buf,
+#endif
 #endif
         int d, int k, int q, const int attn_mask_type
 #if WITH_ATTN_MASK
@@ -577,7 +666,7 @@ micro_sdpa_bwd(const global KEY_DATA_T *K, const global QRY_DATA_T *Q,
         k_tile_type K_tile;
         tile_fill(K_tile, TO_DATA_T(0.f));
 
-        tile_load_k(&K_tile, K, k, ldk, wg_i0, sg_ij, remainder_k);
+        tile_load_k(&K_tile, K, k, d, ldk, wg_i0, sg_ij, remainder_k);
 
         /* Store K tile to SLM */
         tile_store_k_slm(&K_tile, K_slm, sg_ij);
@@ -607,6 +696,17 @@ micro_sdpa_bwd(const global KEY_DATA_T *K, const global QRY_DATA_T *Q,
 #endif
 #endif
     }
+
+#if WITH_DROPOUT
+#if !DROPOUT_HOST_SCALARS
+    long dropout_seed = dropout_seed_buf[0];
+    long dropout_offset = use_dropout_offset ? dropout_offset_buf[0] : 0;
+    float dropout_p = dropout_p_buf[0];
+#endif
+    uint dropout_threshold = get_dropout_threshold(dropout_p);
+    float dropout_inv_q = (dropout_p != 1.f) ? 1.f / (1.f - dropout_p) : 0.f;
+    const ulong batch_head_base = DST_BATCH(b1, b0);
+#endif
 
     /* Initialize dV, dK to zero */
 #pragma unroll
@@ -714,6 +814,18 @@ micro_sdpa_bwd(const global KEY_DATA_T *K, const global QRY_DATA_T *Q,
         tile_elementwise(S_tile, scaled_exp);
 #undef scaled_exp
 
+#if WITH_DROPOUT
+        /* Apply inverted dropout to rebuilt attention probabilities (P). */
+        apply_dropout_s_tile(&S_tile, k0 + sg_i0_kq, wg_j0 + sg_j0_kq, k0end, q,
+                dropout_batch_head_base, k, dropout_use_offset, dropout_seed,
+                dropout_offset, dropout_threshold, dropout_inv_q
+#if DROPOUT_OUTPUT_MASK
+                ,
+                dropout_mask_buf
+#endif
+        );
+#endif
+
         barrier(CLK_LOCAL_MEM_FENCE);
         {
 #if USE_SYSTOLIC_UKERNEL
@@ -762,6 +874,13 @@ micro_sdpa_bwd(const global KEY_DATA_T *K, const global QRY_DATA_T *Q,
                 (local char *)ugemm_slm);
 #else
         p_tile_type dP_tile;
+#endif
+
+#if WITH_DROPOUT
+        /* Backprop through dropout Jacobian: dP = dP_raw * Z / q. */
+        apply_dropout_dP_tile(dP_tile, k0 + sg_i0_kq, wg_j0 + sg_j0_kq, k0end,
+                q, dropout_batch_head_base, k, dropout_use_offset, dropout_seed,
+                dropout_offset, dropout_threshold, dropout_inv_q);
 #endif
 
         p_sum_tile_type D_i;

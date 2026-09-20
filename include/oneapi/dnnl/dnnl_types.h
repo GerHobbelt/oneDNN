@@ -2712,6 +2712,11 @@ typedef const struct dnnl_primitive *const_dnnl_primitive_t;
 /// A special mnemonic for shift argument of normalization primitives.
 #define DNNL_ARG_DIFF_SHIFT 256
 
+/// Optional upper bound on max per group size for grouped matmul dispatch.
+#if DNNL_EXPERIMENTAL_GROUPED_MEMORY
+#define DNNL_ARG_HINT_MAX_GROUP_SIZE 384
+#endif
+
 /// Dropout offset value passed via a buffer
 #define DNNL_ARG_ATTR_DROPOUT_OFFSET 507
 
@@ -2986,15 +2991,17 @@ typedef enum {
     /// @copydoc dnnl_cpu_isa_avx10_1_512_amx_fp16
     dnnl_cpu_isa_avx512_core_amx_fp16 = dnnl_cpu_isa_avx10_1_512_amx_fp16,
 
-    /// Intel AVX10.2 with float16, Intel DL Boost and bfloat16 support
+    /// Intel AVX10.2
     /// for Intel Xeon Scalable processor family
     /// and Intel Core processor family
     dnnl_cpu_isa_avx10_2 = 0x201ff,
+    /// @copydoc dnnl_cpu_isa_avx10_2
     dnnl_cpu_isa_avx10_2_512 = dnnl_cpu_isa_avx10_2,
 
-    /// Intel AVX10.2 with float16, Intel DL Boost and bfloat16 support and
+    /// Intel AVX10.2
     /// Intel AMX with 8-bit integer, bfloat16, float16, float8 support
     dnnl_cpu_isa_avx10_2_amx_2 = 0x22fff,
+    /// @copydoc dnnl_cpu_isa_avx10_2_amx_2
     dnnl_cpu_isa_avx10_2_512_amx_2 = dnnl_cpu_isa_avx10_2_amx_2,
 } dnnl_cpu_isa_t;
 
