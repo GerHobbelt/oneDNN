@@ -14,8 +14,8 @@
 * limitations under the License.
 *******************************************************************************/
 
-#ifndef CPU_RV64_JIT_RVV_SOFTMAX_AFFINE_KERNEL_HPP
-#define CPU_RV64_JIT_RVV_SOFTMAX_AFFINE_KERNEL_HPP
+#ifndef CPU_RV64_JIT_RVV_INNER_PRODUCT_KERNEL_HPP
+#define CPU_RV64_JIT_RVV_INNER_PRODUCT_KERNEL_HPP
 
 #include "common/c_types_map.hpp"
 #include "cpu/rv64/jit_generator.hpp"
@@ -25,18 +25,19 @@ namespace impl {
 namespace cpu {
 namespace rv64 {
 
-struct jit_rvv_softmax_affine_kernel_t : public jit_generator_t {
+struct jit_rvv_inner_product_kernel_t : public jit_generator_t {
+    enum class dt_pair_t { s8_s8, u8_s8 };
+
     struct call_params_t {
-        const float *src;
-        float *dst;
+        const void *src;
+        const void *weights;
         dim_t len;
-        float sub;
-        float mul;
+        float *acc;
     };
 
-    DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_rvv_softmax_affine_kernel_t)
+    DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_rvv_inner_product_kernel_t)
 
-    jit_rvv_softmax_affine_kernel_t();
+    explicit jit_rvv_inner_product_kernel_t(dt_pair_t dt_pair);
 
     void operator()(const call_params_t *p) const {
         jit_generator_t::operator()(p);
@@ -44,11 +45,21 @@ struct jit_rvv_softmax_affine_kernel_t : public jit_generator_t {
 
 protected:
     void generate() override;
+
+private:
+    void generate_x8_s8(bool src_is_u8);
+
+    dt_pair_t dt_pair_;
 };
+
+float jit_rvv_inner_product_fwd_s8_s8(
+        const void *src, const void *weights, dim_t len);
+float jit_rvv_inner_product_fwd_u8_s8(
+        const void *src, const void *weights, dim_t len);
 
 } // namespace rv64
 } // namespace cpu
 } // namespace impl
 } // namespace dnnl
 
-#endif
+#endif // CPU_RV64_JIT_RVV_INNER_PRODUCT_KERNEL_HPP

@@ -79,6 +79,156 @@ status_t memory_desc_sanity_check(const memory_desc_t &md) {
             md.ndims, md.dims, md.data_type, md.format_kind);
 }
 
+// Returns true if strides are compatible with memory_desc_t
+status_t memory_desc_strides_check(
+        const memory_desc_t &md, const dims_t strides) {
+    if (strides == nullptr || md.ndims == 0
+            || md.format_kind != format_kind::blocked)
+        return status::success;
+
+    dims_t blocks = {0};
+    int perm[DNNL_MAX_NDIMS] = {0};
+    for (int d = 0; d < md.ndims; ++d) {
+        // no strides check needed for empty tensor
+        if (md.padded_dims[d] == 0) return status::success;
+
+        // no strides verification for runtime dims
+        const bool has_runtime_dim
+                = any_runtime_value(strides[d], md.padded_dims[d]);
+        if (has_runtime_dim) return status::success;
+
+        perm[d] = d;
+        blocks[d] = 1;
+    }
+
+    dim_t block_size = 1;
+    const auto &blk = md.format_desc.blocking;
+    for (int iblk = 0; iblk < blk.inner_nblks; ++iblk) {
+        blocks[blk.inner_idxs[iblk]] *= blk.inner_blks[iblk];
+        block_size *= blk.inner_blks[iblk];
+    }
+
+    // Returns `true` if @p idx is among blocked indices and @p pos_idx saves
+    // its position when passed.
+    auto is_inner_index = [&](const int idx, int *pos_idx = nullptr) {
+        for (int iblk = 0; iblk < blk.inner_nblks; ++iblk) {
+            if (blk.inner_idxs[iblk] == idx) {
+                if (pos_idx) *pos_idx = idx;
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // A custom comparator sorting perm dimension indices by strides.
+    // Typically, strides are all different and sorting is smooth.
+    // But there're situations, when they are same. Such situation involve:
+    // * Dims of 1;
+    // * Blocked dimension contains a single block, e.g., dim=16, block=32;
+    //
+    // In such case, prioritize blocked dimensions as more innermost over unit
+    // dimensions.
+    auto stride_sorter = [&](const int a, const int b) -> bool {
+        if (strides[a] == strides[b]) {
+            int pos_a = 0;
+            int pos_b = 0;
+            if (is_inner_index(a, &pos_a) + is_inner_index(b, &pos_b) == 2) {
+                // When both dimensions are blocked, check how many blocks they
+                // have. For same strides it means at least one of them has a
+                // single block which should go first.
+                // If strides are same and both blocks are unit, put in natural
+                // blocking order.
+                auto block_ratio_a = md.padded_dims[a] / blocks[a];
+                auto block_ratio_b = md.padded_dims[b] / blocks[b];
+                if (block_ratio_a == block_ratio_b)
+                    return pos_a > pos_b;
+                else
+                    return block_ratio_a < block_ratio_b;
+            } else if (is_inner_index(a) + is_inner_index(b) == 1) {
+                // When it's just one, the one that blocked goes first.
+                return is_inner_index(a);
+            } else {
+                // When none are blocked, the unit dim goes first, and if equal,
+                // the natural order is used.
+                if (md.padded_dims[a] == md.padded_dims[b])
+                    return a < b;
+                else
+                    return md.padded_dims[a] < md.padded_dims[b];
+            }
+        } else {
+            return strides[a] < strides[b];
+        }
+    };
+    std::sort(perm, perm + md.ndims, stride_sorter);
+
+    // tracks max stride for integral overflow checks
+    dim_t max_stride = 1;
+    int max_stride_d = 0;
+
+    dim_t min_stride = block_size;
+    for (int idx = 0; idx < md.ndims; ++idx) {
+        const int d = perm[idx];
+
+        // Make an exception for strides[d] == 0 as it has broadcast semantics
+        // Note: owing to being sorted, these are the initial strides
+
+        // FIXME: make an exception for dims[d] == 1 with the
+        // assumption that no code applies that stride when the only
+        // index accessed for that dimension is 0. This is because PT
+        // can use "dummy" padding in those situations
+        if ((strides[d] == 0) || (md.padded_dims[d] == 1))
+            continue;
+        else if (strides[d] < min_stride)
+            VCONDCHECK(common, create, check, memory, false,
+                    status::invalid_arguments, VERBOSE_INTEGRAL_OVERFLOW_DIM,
+                    "strides", d);
+
+        using namespace data_type;
+        if (utils::one_of(md.data_type, s4, u4, f4_e2m1)) {
+            VCONDCHECK(common, create, check, memory,
+                    IMPLICATION(strides[d] > 1, strides[d] % 2 == 0),
+                    status::invalid_arguments, VERBOSE_BAD_DIM, "strides", d);
+        }
+
+        // update min_stride for next iteration
+        const auto padded_dim = md.padded_dims[d];
+
+        const dim_t blocks_ratio = padded_dim / blocks[d];
+        VCONDCHECK(common, create, check, memory,
+                IMPLICATION(
+                        strides[d] > 0 && block_size > 0 && blocks_ratio > 0,
+                        strides[d] <= std::numeric_limits<dim_t>::max()
+                                        / (block_size * blocks_ratio)),
+                status::invalid_arguments, VERBOSE_INTEGRAL_OVERFLOW_DIM,
+                "strides", d);
+
+        // `strides` already account block_size in it, use block ratio to
+        // increase the minimal stride requirement.
+        min_stride = strides[d] * blocks_ratio;
+        if (max_stride <= strides[d]) {
+            max_stride = strides[d];
+            max_stride_d = d;
+        }
+    }
+
+    const size_t dt_size = types::data_type_size(md.data_type);
+
+    // guard against integral overflow due to strides exceeding numeric limits
+    if (!is_runtime_value(md.padded_dims[max_stride_d])) {
+        size_t dim_val = static_cast<size_t>(
+                md.padded_dims[max_stride_d] / blocks[max_stride_d]);
+        dim_val = dim_val == (size_t)max_stride ? 1 : dim_val;
+        VCONDCHECK(common, create, check, memory,
+                (dim_val <= SIZE_MAX / max_stride), status::invalid_arguments,
+                VERBOSE_INTEGRAL_OVERFLOW_DIM, "padded_dims", max_stride_d);
+        VCONDCHECK(common, create, check, memory,
+                (dt_size && ((dim_val * max_stride) <= SIZE_MAX / dt_size)),
+                status::invalid_arguments, VERBOSE_INTEGRAL_OVERFLOW_DIM,
+                "padded_dims", max_stride_d);
+    }
+    return status::success;
+}
+
 status_t memory_desc_init_host_scalar(
         memory_desc_t &memory_desc, data_type_t data_type) {
     memory_desc.ndims = 1;
@@ -116,6 +266,7 @@ status_t memory_desc_init_by_tag(memory_desc_t &memory_desc, int ndims,
         // nop
     } else if (format_kind == format_kind::blocked) {
         status = memory_desc_wrapper::compute_blocking(md, tag);
+        CHECK(memory_desc_strides_check(md, md.format_desc.blocking.strides));
     } else {
         assert(!"unreachable");
         status = invalid_arguments;

@@ -1770,7 +1770,7 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
     // adjacent in memory, i.e. no batch dimension is physically interleaved
     // between them (e.g. an acbd layout). The format tag is unreliable here
     // since tag matching ignores strides of unit dimensions.
-    const bool m_and_k_contiguous
+    const bool m_and_k_adjacent
             = dims_adjacent(src_d, bgmmc.ndims - 2, bgmmc.ndims - 1);
 
     // We cannot change M at this point as all gemv related parameters have
@@ -1783,7 +1783,7 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
             && plain_A_layout && helper.is_src_dst_layout_batch_fusable()
             && post_ops_ok(
                     bgmmc, attr, dst_d, true /* limit_bcast_strategies_set */)
-            && m_and_k_contiguous;
+            && m_and_k_adjacent;
     if (merge_batch_dims_into_M) {
         bgmmc.M *= bgmmc.batch;
         bgmmc.batch = 1;
@@ -1872,19 +1872,10 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
         bgmmc.C_strides[d] = bgmmc.c_dt_sz * dst_d.blocking_desc().strides[dim];
     }
 
-    // We need to correct A_strides if batched dimensions are merged in M and
-    // A layout is formally transposed but could be treated as plain
-    // For 4D tensors, only apply adjustment for treat_A_as_plain, not for acbd tag
-    const bool adjust_for_acbd = src_d.matches_tag(acbd) && bgmmc.ndims == 3;
-    bgmmc.adjust_a_strides = merge_batch_dims_into_M
-            && (adjust_for_acbd || bgmmc.treat_A_as_plain);
+    // We need to adjust A_strides if the batched dimensions are merged into M
+    // and A layout can be treated as plain.
+    bgmmc.adjust_a_strides = merge_batch_dims_into_M && bgmmc.treat_A_as_plain;
     if (bgmmc.adjust_a_strides) bgmmc.A_strides[1] = bgmmc.A_strides[2];
-
-    // We need to correct C_strides if batched dimensions are merged in M and
-    // C layout is formally transposed but could be treated as plain
-    if (merge_batch_dims_into_M && dst_d.matches_tag(acbd)) {
-        bgmmc.C_strides[1] = bgmmc.C_strides[2];
-    }
 
     // BF32 'Hint' Heuristic:
     // Under the following conditions, F32 through AVX512_CORE performs better
