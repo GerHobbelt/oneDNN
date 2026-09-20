@@ -33,58 +33,19 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define DIV_UP(x, y) (((x) + (y) - 1) / (y))
 
-/* When a data type is a struct (e.g. bf16), it cannot be used as an
- * ext_vector_type element. Use the underlying scalar type for tile storage
- * and convert at tile boundaries. */
-#ifdef DST_DT_BF16
-#define DST_TILE_DATA_T ushort
-#define CONVERT_TILE_DATA_T(v) (into_bf16(v).data)
-#else
-#define DST_TILE_DATA_T DST_DATA_T
-#define CONVERT_TILE_DATA_T CONVERT_DATA_T
-#endif
+typedef NATIVE_LAYOUT_TYPE(DST_DATA_T) dst_tile_data_t;
+typedef NATIVE_LAYOUT_TYPE(MSK_DATA_T) msk_tile_data_t;
+typedef NATIVE_LAYOUT_TYPE(QRY_DATA_T) qry_tile_data_t;
 
-#ifdef MSK_DT_BF16
-#define MSK_TILE_DATA_T ushort
-#define CONVERT_TILE_FLOAT_MSK_T(v) into_float(as_bf16(v))
-#else
-#define MSK_TILE_DATA_T MSK_DATA_T
-#define CONVERT_TILE_FLOAT_MSK_T CONVERT_FLOAT_T
-#endif
+#define CONVERT_TILE_DATA_T(value) as_native_layout(CONVERT_DATA_T(value))
 
-/* Punned conversion for FMA tile storage: produces FMA_TYPE (ushort when bf16)
- * rather than the bf16 struct that CONVERT_DATA_T returns. */
-#ifdef QRY_DT_BF16
-#define CONVERT_TILE_FMA_T(v) (into_bf16(convert_float(v)).data)
-#else
-#define CONVERT_TILE_FMA_T CONVERT_DATA_T
-#endif
+#define CONVERT_TILE_FLOAT_MSK_T(value) \
+    into_float(AS_NATIVE_LAYOUT_TYPE(MSK_DATA_T, value))
 
-/* Conditional casts for ugemm pointer arguments: cast when the data type
- * is a struct, since the ugemm microkernels use punned scalar types. */
-#ifdef KEY_DT_BF16
-#define AS_KEY_TILE_PTR(p) ((const global FMA_TYPE *)(p))
-#elif defined(KEY_DT_S4) || defined(KEY_DT_U4)
-#define AS_KEY_TILE_PTR(p) ((const global uchar *)(p))
-#else
-#define AS_KEY_TILE_PTR(p) (p)
-#endif
-
-#ifdef VAL_DT_BF16
-#define AS_VAL_TILE_PTR(p) ((const global FMA_TYPE *)(p))
-#elif defined(VAL_DT_S4) || defined(VAL_DT_U4)
-#define AS_VAL_TILE_PTR(p) ((const global uchar *)(p))
-#else
-#define AS_VAL_TILE_PTR(p) (p)
-#endif
-
-#ifdef QRY_DT_BF16
-#define AS_QRY_TILE_PTR(p) ((const global FMA_TYPE *)(p))
-#define AS_QRY_SLM_TILE_PTR(p) ((const local FMA_TYPE *)(p))
-#else
-#define AS_QRY_TILE_PTR(p) (p)
-#define AS_QRY_SLM_TILE_PTR(p) (p)
-#endif
+/* FMA tile storage, which follows the query type rather than the ambient dst
+ * type -- see FMA_TYPE below. */
+#define CONVERT_TILE_FMA_T(v) \
+    as_native_layout(CONCAT2(into_, QRY_DATA_T)(convert_float(v)))
 
 #define sg_per_wg (ugemm_kq_sg_per_wg_m * ugemm_kq_sg_per_wg_n)
 #define q_tile_sg_n DIV_UP(ugemm_kq_wg_tile_n, sg_per_wg)
@@ -153,46 +114,20 @@ inline void apply_dropout_s_tile(
 // example: Prints the entire S_tile in the (0, 1, 0) work group
 // print_tile(S_tile, "%7.2f", 0, 1, 0, ugemm_kq_sg_per_wg_m, ugemm_kq_sg_per_wg_n);
 
-#ifdef QRY_DT_F32
-#define FMA_TYPE float
-#elif QRY_DT_F16
+#ifdef QRY_DT_F16
 #define VEC_TYPE2 half2
-#define FMA_TYPE half
 #elif defined(QRY_DT_BF16)
 #define VEC_TYPE2 ushort2
-#define FMA_TYPE ushort
-#else
+#elif !defined(QRY_DT_F32)
 #error "Data type not supported for VEC_TYPE2"
-#endif
-
-#ifdef SCALE_DT_BF16
-#define SCALES_TO_FLOAT into_float
-#else
-#define SCALES_TO_FLOAT convert_float
-#endif
-
-#ifdef VAL_ATTR_SCALES_DT_BF16
-#define VAL_SCALES_TO_FLOAT into_float
-#define AS_VAL_SCALES_PTR(p) ((const global ushort *)(p))
-#else
-#define VAL_SCALES_TO_FLOAT convert_float
-#define AS_VAL_SCALES_PTR(p) (p)
-#endif
-
-#if KEY_ATTR_SCALES_DT_BF16
-#define KEY_SCALES_TO_FLOAT into_float
-#define AS_KEY_SCALES_PTR(p) ((const global ushort *)(p))
-#else
-#define KEY_SCALES_TO_FLOAT convert_float
-#define AS_KEY_SCALES_PTR(p) (p)
 #endif
 
 #if USE_SYSTOLIC_UKERNEL
 DECLARE_2D_TILE(
         q_tile_type, uint, SUBGROUP_SIZE, D_MAX_KQ / 2, 1, 1, q_tile_sg_n)
 #else
-DECLARE_2D_TILE(
-        q_tile_type, FMA_TYPE, SUBGROUP_SIZE, D_MAX_KQ, 1, 1, q_tile_sg_n)
+DECLARE_2D_TILE(q_tile_type, qry_tile_data_t, SUBGROUP_SIZE, D_MAX_KQ, 1, 1,
+        q_tile_sg_n)
 #endif
 
 #if BLOCK_Q
@@ -201,24 +136,24 @@ DECLARE_2D_TILE(
 DECLARE_2D_TILE_BLOCK_OPS(
         q_tile_type, uint, SUBGROUP_SIZE, D_MAX_KQ / 2, 1, 1, q_tile_sg_n)
 #else
-DECLARE_2D_TILE_BLOCK_OPS(
-        q_tile_type, FMA_TYPE, SUBGROUP_SIZE, D_MAX_KQ, 1, 1, q_tile_sg_n)
+DECLARE_2D_TILE_BLOCK_OPS(q_tile_type, qry_tile_data_t, SUBGROUP_SIZE, D_MAX_KQ,
+        1, 1, q_tile_sg_n)
 #endif
 
 #elif Q_ALIGN < 4
 
 #if USE_SYSTOLIC_UKERNEL
-DECLARE_2D_TILE_LOAD_PACKED_VEC(q_tile_type, QRY_DATA_T, VEC_TYPE2,
+DECLARE_2D_TILE_LOAD_PACKED_VEC(q_tile_type, qry_tile_data_t, VEC_TYPE2,
         SUBGROUP_SIZE, D_MAX_KQ / 2, 1, 1, q_tile_sg_n)
 #endif
 
 #endif
 
 #if BLOCK_A
-DECLARE_2D_TILE(a_tile_type_dst, DST_TILE_DATA_T, SUBGROUP_SIZE,
+DECLARE_2D_TILE(a_tile_type_dst, dst_tile_data_t, SUBGROUP_SIZE,
         ugemm_vs_sg_tile_m, 1, 1, ugemm_vs_sg_tile_n)
 #else
-DECLARE_2D_TILE(a_tile_type_dst, DST_TILE_DATA_T, SUBGROUP_SIZE,
+DECLARE_2D_TILE(a_tile_type_dst, dst_tile_data_t, SUBGROUP_SIZE,
         ugemm_vs_sg_tile_m, 8, 1, ugemm_vs_sg_tile_n / 8)
 #endif
 
@@ -247,10 +182,10 @@ DECLARE_2D_TILE_COPY_REBLOCK(a_tile_type, SUBGROUP_SIZE, ugemm_vs_c_type_block0,
 DECLARE_2D_TILE(s_tile_type_packed, uint, SUBGROUP_SIZE, ugemm_kq_c_type_block0,
         ugemm_kq_c_type_block1 / 2, ugemm_kq_c_type_nblock0,
         ugemm_kq_c_type_nblock1)
-DECLARE_2D_TILE(s_tile_type_reblock, FMA_TYPE, SUBGROUP_SIZE,
+DECLARE_2D_TILE(s_tile_type_reblock, qry_tile_data_t, SUBGROUP_SIZE,
         ugemm_vs_sg_tile_n, 1, ugemm_kq_sg_tile_n / ugemm_vs_sg_tile_n,
         ugemm_kq_sg_tile_m)
-DECLARE_2D_TILE_BLOCK_OPS(s_tile_type_reblock, FMA_TYPE, SUBGROUP_SIZE,
+DECLARE_2D_TILE_BLOCK_OPS(s_tile_type_reblock, qry_tile_data_t, SUBGROUP_SIZE,
         ugemm_vs_sg_tile_n, 1, ugemm_kq_sg_tile_n / ugemm_vs_sg_tile_n,
         ugemm_kq_sg_tile_m)
 
@@ -276,11 +211,11 @@ DECLARE_2D_TILE(kmask_tile_type_float, float, SUBGROUP_SIZE, ugemm_kq_sg_tile_m,
         1, 1, 1)
 
 #if WITH_ATTN_MASK
-DECLARE_2D_TILE(mask_tile_type, MSK_TILE_DATA_T, SUBGROUP_SIZE, mask_br,
+DECLARE_2D_TILE(mask_tile_type, msk_tile_data_t, SUBGROUP_SIZE, mask_br,
         mask_bc, mask_nbr, mask_nbc)
 
 #if BROADCAST_MASK_Q
-DECLARE_2D_TILE_BLOCK_OPS(mask_tile_type, MSK_TILE_DATA_T, SUBGROUP_SIZE,
+DECLARE_2D_TILE_BLOCK_OPS(mask_tile_type, msk_tile_data_t, SUBGROUP_SIZE,
         mask_br, mask_bc, mask_nbr, mask_nbc)
 #endif
 DECLARE_2D_TILE(mask_tile_type_float, float, SUBGROUP_SIZE, mask_br, mask_bc,
@@ -291,11 +226,11 @@ DECLARE_2D_TILE_COPY_REBLOCK(mask_tile_type, SUBGROUP_SIZE, mask_br, mask_bc,
 #endif
 
 #if BLOCK_A
-DECLARE_2D_TILE_BLOCK_OPS(a_tile_type_dst, DST_TILE_DATA_T, SUBGROUP_SIZE,
+DECLARE_2D_TILE_BLOCK_OPS(a_tile_type_dst, dst_tile_data_t, SUBGROUP_SIZE,
         ugemm_vs_sg_tile_m, 1, 1, ugemm_vs_sg_tile_n)
 #endif
 #if BLOCK_2D_A
-DECLARE_2D_TILE_BLOCK2D_OPS(a_tile_type_dst, DST_TILE_DATA_T, SUBGROUP_SIZE,
+DECLARE_2D_TILE_BLOCK2D_OPS(a_tile_type_dst, dst_tile_data_t, SUBGROUP_SIZE,
         ugemm_vs_sg_tile_m, 8, 1, ugemm_vs_sg_tile_n / 8)
 #endif
 
@@ -460,28 +395,30 @@ inline void tile_load_src1(q_tile_type *Q_tile, const global QRY_DATA_T *Q,
 #else // FMA
 
 #if BLOCK_Q
-    tile_load_block_rem_q(
-            Q_tile, AS_QRY_TILE_PTR(Q), n, ldq, offset_r, offset_c);
+    tile_load_block_rem_q(Q_tile, (const global qry_tile_data_t *)Q, n, ldq,
+            offset_r, offset_c);
 #else
-    tile_load(Q_tile, AS_QRY_TILE_PTR(Q), m, n, ldq, offset_r, offset_c);
+    tile_load(Q_tile, (const global qry_tile_data_t *)Q, m, n, ldq, offset_r,
+            offset_c);
 #endif
 
 #endif
 }
 
-inline void tile_store_t_slm_src1(q_tile_type *Q_tile, local FMA_TYPE *Q_slm,
+inline void tile_store_t_slm_src1(q_tile_type *Q_tile, local QRY_DATA_T *Q_slm,
         int panel, int ld, int offset_r, int offset_c) {
 #if USE_SYSTOLIC_UKERNEL
     tile_store_t_sys_src1(
             *Q_tile, (local uint *)&Q_slm[0], ld / 2, offset_r, offset_c);
 #else // FMA
-    tile_store_t_packed_src1(*Q_tile, Q_slm, panel, ld, offset_r, offset_c);
+    tile_store_t_packed_src1(*Q_tile, (local qry_tile_data_t *)Q_slm, panel, ld,
+            offset_r, offset_c);
 #endif
 }
 
 __attribute__((intel_reqd_sub_group_size(SUBGROUP_SIZE))) kernel void
 micro_sdpa(const global KEY_DATA_T *K, const global QRY_DATA_T *Q,
-        const global VAL_DATA_T *V, global float *ws, global DST_DATA_T *A,
+        const global VAL_DATA_T *V, global float *ws, global dst_tile_data_t *A,
 #if WITH_HOST_SCALE
         float scalar_scale, float inv_scalar_scale,
 #else
@@ -494,7 +431,7 @@ micro_sdpa(const global KEY_DATA_T *K, const global QRY_DATA_T *Q,
         const global VAL_ATTR_ZP_DATA_T *V_zp, const int attn_mask_type
 #if WITH_ATTN_MASK
         ,
-        const global MSK_DATA_T *msk
+        const global msk_tile_data_t *msk
 #endif
         ,
         KEY_OFFSETS, QRY_OFFSETS, VAL_OFFSETS, DST_OFFSETS
@@ -584,13 +521,13 @@ micro_sdpa(const global KEY_DATA_T *K, const global QRY_DATA_T *Q,
     local char slm[Q_slm_size + S_slm_size + S_sum_slm_size + S_max_slm_size
             + ugemm_slm_size];
 
-    local FMA_TYPE *Q_slm = (local FMA_TYPE *)&slm[0];
-    local FMA_TYPE *S_slm = (local FMA_TYPE *)&slm[Q_slm_size];
+    local QRY_DATA_T *Q_slm = (local QRY_DATA_T *)&slm[0];
+    local QRY_DATA_T *S_slm = (local QRY_DATA_T *)&slm[Q_slm_size];
     local float *S_sum_slm = (local float *)&slm[Q_slm_size + S_slm_size];
     local float *S_max_slm
             = (local float *)&slm[Q_slm_size + S_slm_size + S_sum_slm_size];
-    local uint *ugemm_slm = (local uint *)&slm[Q_slm_size + S_slm_size
-            + S_sum_slm_size + S_max_slm_size];
+    local char *ugemm_slm = (local char *)(&slm[Q_slm_size + S_slm_size
+            + S_sum_slm_size + S_max_slm_size]);
 
     const bool need_sum_barrier = (ugemm_vs_barrier_count == 0);
 
@@ -613,7 +550,7 @@ micro_sdpa(const global KEY_DATA_T *K, const global QRY_DATA_T *Q,
     K_scales += k_offset / KEY_GROUP_SIZE;
 #endif
 #if KEY_SCALES == QUANTIZE_COMMON
-    float k_scale = KEY_SCALES_TO_FLOAT(*K_scales);
+    float k_scale = into_float(*K_scales);
 #endif
 #if KEY_ZERO_POINTS
     K_zp += k_offset / KEY_GROUP_SIZE / KEY_ZP_ELEMENTS_PER_BYTE;
@@ -622,7 +559,7 @@ micro_sdpa(const global KEY_DATA_T *K, const global QRY_DATA_T *Q,
     V_scales += v_offset / VAL_GROUP_SIZE;
 #endif
 #if VAL_SCALES == QUANTIZE_COMMON
-    float v_scale = VAL_SCALES_TO_FLOAT(*V_scales);
+    float v_scale = into_float(*V_scales);
 #endif
 #if VAL_ZERO_POINTS
     V_zp += v_offset / VAL_GROUP_SIZE / VAL_ZP_ELEMENTS_PER_BYTE;
@@ -659,10 +596,10 @@ micro_sdpa(const global KEY_DATA_T *K, const global QRY_DATA_T *Q,
 #endif
 #else
 #if INVERT_SCALE
-        iscale = SCALES_TO_FLOAT(*scale_ptr);
+        iscale = into_float(*scale_ptr);
         scale = native_recip(iscale);
 #else
-        scale = SCALES_TO_FLOAT(*scale_ptr);
+        scale = into_float(*scale_ptr);
         iscale = native_recip(scale);
 #endif
 #endif
@@ -779,15 +716,13 @@ micro_sdpa(const global KEY_DATA_T *K, const global QRY_DATA_T *Q,
         mask_tile_type mask_tile;
 #if BROADCAST_MASK_Q
         if (block_msk) {
-            tile_load_block(&mask_tile, (const global MSK_TILE_DATA_T *)msk,
-                    MSK_S2, 0, k0 + sg_i0_kq, 0);
+            tile_load_block(&mask_tile, msk, MSK_S2, 0, k0 + sg_i0_kq, 0);
         } else {
-            tile_load(&mask_tile, (const global MSK_TILE_DATA_T *)msk, k, 1,
-                    MSK_S2, k0 + sg_i0_kq, 0);
+            tile_load(&mask_tile, msk, k, 1, MSK_S2, k0 + sg_i0_kq, 0);
         }
 #else
-        tile_load_t(&mask_tile, (const global MSK_TILE_DATA_T *)msk, q, k,
-                MSK_S2, sg_j0_kq + wg_j0, k0 + sg_i0_kq);
+        tile_load_t(
+                &mask_tile, msk, q, k, MSK_S2, sg_j0_kq + wg_j0, k0 + sg_i0_kq);
 #endif
 #endif
 
@@ -816,15 +751,14 @@ micro_sdpa(const global KEY_DATA_T *K, const global QRY_DATA_T *Q,
 #else
         s_tile_type S_tile
 #endif
-                = ugemm_kq(AS_KEY_TILE_PTR(K), ldk, AS_QRY_SLM_TILE_PTR(Q_slm),
-                        D_MAX_KQ, k0end, ugemm_kq_wg_tile_n, d_qk, k0, 0, 0,
-                        sg_i_kq, sg_j_kq, (local char *)ugemm_slm
+                = ugemm_kq(K, ldk, Q_slm, D_MAX_KQ, k0end, ugemm_kq_wg_tile_n,
+                        d_qk, k0, 0, 0, sg_i_kq, sg_j_kq, ugemm_slm
 #if KEY_SCALES == QUANTIZE_2D
                         ,
-                        AS_KEY_SCALES_PTR(K_scales)
+                        K_scales
 #endif
 #if KEY_ZERO_POINTS
-                                ,
+                        ,
                         K_zp
 #endif
 #if (KEY_SCALES == QUANTIZE_2D) || KEY_ZERO_POINTS
@@ -977,8 +911,8 @@ micro_sdpa(const global KEY_DATA_T *K, const global QRY_DATA_T *Q,
         /* Reblock and store to SLM */
         s_tile_type_reblock S_tile_reblock;
         tile_copy_reblock(S_tile, &S_tile_reblock);
-        tile_store_block_packed(S_tile_reblock, S_slm, ugemm_vs_sg_tile_n,
-                ugemm_kq_wg_tile_m, sg_j0_kq, sg_i0_kq);
+        tile_store_block_packed(S_tile_reblock, (local qry_tile_data_t *)S_slm,
+                ugemm_vs_sg_tile_n, ugemm_kq_wg_tile_m, sg_j0_kq, sg_i0_kq);
 #endif
 
         intel_work_group_barrier_arrive(CLK_LOCAL_MEM_FENCE);
@@ -1114,15 +1048,15 @@ micro_sdpa(const global KEY_DATA_T *K, const global QRY_DATA_T *Q,
 #else
         a_tile_type A_tile1
 #endif
-                = ugemm_vs(AS_VAL_TILE_PTR(V), ldv, AS_QRY_SLM_TILE_PTR(S_slm),
-                        ugemm_kq_wg_tile_m, d_v, ugemm_kq_wg_tile_n, k_chunk, 0,
-                        0, 0, sg_i_vs, sg_j_vs, (local char *)ugemm_slm
+                = ugemm_vs(V, ldv, S_slm, ugemm_kq_wg_tile_m, d_v,
+                        ugemm_kq_wg_tile_n, k_chunk, 0, 0, 0, sg_i_vs, sg_j_vs,
+                        ugemm_slm
 #if VAL_SCALES == QUANTIZE_2D
                         ,
-                        AS_VAL_SCALES_PTR(V_scales)
+                        V_scales
 #endif
 #if VAL_ZERO_POINTS
-                                ,
+                        ,
                         V_zp
 #endif
 #if (VAL_SCALES == QUANTIZE_2D) || VAL_ZERO_POINTS
@@ -1218,13 +1152,12 @@ micro_sdpa(const global KEY_DATA_T *K, const global QRY_DATA_T *Q,
     uint sg_j0_vs = sg_j_vs * ugemm_vs_sg_tile_n + wg_j0;
 
 #if BLOCK_2D_A
-    tile_store_block2d(A_tile_dst, (global DST_TILE_DATA_T *)A, d_v,
-            q_group_size, lda, sg_i0_vs, sg_j0_vs);
+    tile_store_block2d(
+            A_tile_dst, A, d_v, q_group_size, lda, sg_i0_vs, sg_j0_vs);
 #elif BLOCK_A
-    tile_store_block_rem_q(A_tile_dst, (global DST_TILE_DATA_T *)A,
-            q_group_size, lda, sg_i0_vs, sg_j0_vs);
+    tile_store_block_rem_q(
+            A_tile_dst, A, q_group_size, lda, sg_i0_vs, sg_j0_vs);
 #else
-    tile_store(A_tile_dst, (global DST_TILE_DATA_T *)A, d_v, q_group_size, lda,
-            sg_i0_vs, sg_j0_vs);
+    tile_store(A_tile_dst, A, d_v, q_group_size, lda, sg_i0_vs, sg_j0_vs);
 #endif
 }

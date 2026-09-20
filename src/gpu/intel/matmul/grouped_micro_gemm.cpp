@@ -433,8 +433,11 @@ status_t grouped_micro_gemm_t::pd_t::init_m_axis(const impl::engine_t *engine) {
     const sparse_desc_t::grouped_desc_t &dst_grouped
             = dst_d.sparse_desc().grouped_desc;
 
-    VDISPATCH_MATMUL(wei_d.matches_one_of_tag(format_tag::ab, format_tag::ba,
-                             format_tag::abc, format_tag::acb),
+    // Resolve format_any to plain dense
+    if (wei_d.format_any())
+        CHECK(memory_desc_init_by_strides(weights_md_, nullptr));
+
+    VDISPATCH_MATMUL(wei_d.matches_one_of_tag(format_tag::abc, format_tag::acb),
             VERBOSE_UNSUPPORTED_TAG_S, "weights");
 
     // Validate matching number of groups
@@ -651,11 +654,8 @@ status_t grouped_micro_gemm_t::pd_t::init_kernel_ctx_m_axis() {
     kernel_ctx_.define_int("WITH_BINARY_NVFP4_SCALE", with_binary_nvfp4_scale);
     kernel_ctx_.add_custom_header("grouped_post_ops.h",
             generate_post_ops_microgemm_header(*attr(), po_chain_));
-    if (with_binary_grouped_scale || with_binary_dense_scale) {
-        def_data_type(
-                kernel_ctx_, binary_scale_dts_[0], "BINARY_SCALE_GROUPED");
-        def_data_type(kernel_ctx_, binary_scale_dts_[1], "BINARY_SCALE_DENSE");
-    }
+    def_data_type(kernel_ctx_, binary_scale_dts_[0], "BINARY_SCALE_GROUPED");
+    def_data_type(kernel_ctx_, binary_scale_dts_[1], "BINARY_SCALE_DENSE");
 
     return status::success;
 }
