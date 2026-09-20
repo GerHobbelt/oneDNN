@@ -83,6 +83,12 @@ bool has_only_digits(const std::string &s) {
     });
 }
 
+std::string lowercase(const std::string &s) {
+    std::string s_low(s);
+    std::transform(s.begin(), s.end(), s_low.begin(), ::tolower);
+    return s_low;
+}
+
 // Covers all integer parsing routines: `atoi`, `atol, `atoll`, `stoi`, `stol`.
 int64_t stoll_safe(const std::string &s) {
     int64_t value = 0;
@@ -390,14 +396,22 @@ attr_t::post_ops_t str2attr_post_ops(const std::string &s) {
                 if (src_subpos == std::string::npos) return;
 
                 // parse tag input - processed for both src1/2 tensors.
+                //
+                // WARNING: "grouped" in the tag position means post-op tensor
+                // follows dst layout (e.g., offsets, layout, strides),
+                // in this case tag is left as default (any)
                 const auto tag_str = get_substr(s, src_subpos, delim);
-                if (check_tag(tag_str) != OK) {
-                    BENCHDNN_PRINT(0, "%s \'%s\' %s\n",
-                            "Error: binary post-op tag", tag_str.c_str(),
-                            "is not recognized.");
-                    SAFE_V(FAIL);
+                if (tag_str == "grouped") {
+                    e.binary.grouped = true;
+                } else {
+                    if (check_tag(tag_str) != OK) {
+                        BENCHDNN_PRINT(0, "%s \'%s\' %s\n",
+                                "Error: binary post-op tag", tag_str.c_str(),
+                                "is not recognized.");
+                        SAFE_V(FAIL);
+                    }
+                    e.binary.tag = tag_str;
                 }
-                e.binary.tag = tag_str;
 
                 if (src_subpos == std::string::npos) return;
 
@@ -668,10 +682,11 @@ cold_cache_input_t str2cold_cache_input(const std::string &s) {
     return c;
 }
 
-bool str2bool(const std::string &s) {
-    if (s == "1" || s == "true" || s == "TRUE") {
+bool str2bool(const std::string &str) {
+    auto s = utils::lowercase(str);
+    if (s == "1" || s == "true") {
         return true;
-    } else if (s == "0" || s == "false" || s == "FALSE") {
+    } else if (s == "0" || s == "false") {
         return false;
     } else {
         BENCHDNN_PRINT(0,

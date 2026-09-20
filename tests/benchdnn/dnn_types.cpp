@@ -173,9 +173,8 @@ const char *attr_t::policy2str(policy_t policy) {
 }
 
 dnnl_rounding_mode_t str2rounding_mode(const std::string &str) {
-    std::string s(str);
     // s.compare is lexicographical, case matters
-    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+    auto s = parser::utils::lowercase(str);
 #define CASE(_rm) \
     if (s.compare(STRINGIFY(_rm)) == 0) return dnnl_rounding_mode_##_rm
     CASE(environment);
@@ -693,9 +692,8 @@ static po_table_entry_t kind_table[] = {
         {pk_t::KIND_TOTAL, {"kind_undef"}, dnnl_alg_kind_undef}};
 
 pk_t attr_t::post_ops_t::str2kind(const std::string &str) {
-    std::string s(str);
     // string::operator== is lexicographical, case matters
-    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+    auto s = parser::utils::lowercase(str);
     for (const auto &e : kind_table) {
         for (const auto &name : e.kind_names) {
             if (s == name) return e.kind;
@@ -965,6 +963,7 @@ std::ostream &operator<<(std::ostream &s, const attr_t::post_ops_t &post_ops) {
             if (e.binary.tag != tag::any) s << src_delim << e.binary.tag;
             if (!e.binary.strides.empty())
                 s << src_delim << dims2str(e.binary.strides);
+            if (e.binary.grouped) s << src_delim << "grouped";
 
             if (e.is_binary_kind_with_ternary_op()) {
                 bool delim_added = false;
@@ -1330,11 +1329,23 @@ post_ops_rhs_tensor_entry_t get_po_rhs_tensor_entry(
 } // namespace
 
 int attr_args_t::prepare_post_ops_mds(const attr_t &attr, int ndims,
-        const dnnl_dims_t prb_dims, dnnl_primitive_kind_t prim_kind) {
+        const dnnl_dims_t prb_dims, dnnl_primitive_kind_t prim_kind,
+        const sparse_options_t *sparse_options) {
     const auto &po = attr.post_ops;
     dnnl_dims_t dims;
     for (int d = 0; d < ndims; ++d)
         dims[d] = prb_dims[d];
+
+#if DNNL_EXPERIMENTAL_GROUPED_MEMORY
+    int grouped_var_dim_idx = -1;
+    dnnl_dim_t grouped_count = 0;
+    if (sparse_options) {
+        grouped_var_dim_idx
+                = sparse_options->get_variable_dim_idx(DNNL_ARG_SRC);
+        grouped_count = sparse_options->get_group_count();
+    }
+#endif
+
     // iterate over all post ops and prepare md for each binary
     for (int idx = 0; idx < po.len(); ++idx) {
         const auto &e = po.entry[idx];
@@ -1351,6 +1362,13 @@ int attr_args_t::prepare_post_ops_mds(const attr_t &attr, int ndims,
             auto rhs_tensor_desc = dnn_mem_t::init_md(ndims, rhs_tensor_dims,
                     po_rhs_tensor_entry.dt, po_rhs_tensor_entry.tag,
                     po_rhs_tensor_entry.strides);
+#if DNNL_EXPERIMENTAL_GROUPED_MEMORY
+            if (e.binary.grouped) {
+                rhs_tensor_desc = dnn_mem_t::init_grouped_md(ndims,
+                        rhs_tensor_dims, po_rhs_tensor_entry.dt,
+                        grouped_var_dim_idx, grouped_count);
+            }
+#endif
             mds.emplace((DNNL_ARG_ATTR_MULTIPLE_POST_OP(idx)
                                 | po_rhs_tensor_entry.arg_attr_mask),
                     std::move(rhs_tensor_desc));
