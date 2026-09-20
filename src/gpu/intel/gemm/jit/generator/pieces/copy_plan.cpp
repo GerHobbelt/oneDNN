@@ -593,7 +593,8 @@ void CopyPlan::copyThrough(CopyInstruction &i, DataType type, int stride, bool s
         i0.dst = i0.src0;
         i0.dst.offset = (i0.dst.offset * ssize) / isize;
         i0.dst.stride = (i0.dst.stride * ssize) / isize;
-        i0.src1 = i0.src2 = CopyOperand();
+        i0.flag = i0.src1 = i0.src2 = CopyOperand();
+        i0.cmod = ConditionModifier::none;
         i1.src0 = i0.dst;
     } else if (inplaceDst) {
         // Convert dst in place
@@ -601,7 +602,8 @@ void CopyPlan::copyThrough(CopyInstruction &i, DataType type, int stride, bool s
         i1.src0 = i1.dst;
         i1.src0.offset = (i1.src0.offset * dsize) / isize;
         i1.src0.stride = (i1.src0.stride * dsize) / isize;
-        i1.src1 = i1.src2 = CopyOperand();
+        i1.flag = i1.src1 = i1.src2 = CopyOperand();
+        i1.cmod = ConditionModifier::none;
         i0.dst = i1.src0;
     } else {
         // No space for in-place conversion -- create temporary.
@@ -625,7 +627,8 @@ void CopyPlan::copyThrough(CopyInstruction &i, DataType type, int stride, bool s
 
         auto &im = movAfter ? i1 : i0;
         im.op = Opcode::mov;
-        im.src1 = im.src2 = CopyOperand();
+        im.flag = im.src1 = im.src2 = CopyOperand();
+        im.cmod = ConditionModifier::none;
     }
     i1.src0.overwrite = true;
     i0.dst.type = i1.src0.type = type;
@@ -645,12 +648,20 @@ void CopyPlan::copyThrough(CopyInstruction &i, DataType type, int stride, bool s
         return !isSubsetOf(st, dt);
     };
 
+    auto setNullDstRegioning = [](CopyOperand &dst, const CopyOperand &src) {
+        if (!dst.isNull()) return;
+        dst.stride = src.width == 1 ? src.vs : src.stride;
+        dst.width = dst.vs = 0;
+        dst.type = src.type;
+    };
+
+    setNullDstRegioning(i0.dst, i0.src0);
+    setNullDstRegioning(i1.dst, i1.src0);
+
     if (needsSaturate(i0.src0, i0.dst))
         i0.sat = true;
     if (needsSaturate(i1.src0, i1.dst))
         i1.sat = true;
-
-    i0.cmod = ConditionModifier::none;
 }
 
 // Adjust stride on src0.
@@ -707,6 +718,12 @@ void CopyPlan::repositionSrc(CopyInstruction &i, int n, int stride, int offset)
     i1.*src = i0.dst;
     (i1.*src).overwrite = true;
     (i1.*src).abs = abs;
+
+    if (!i1.dst) {
+        i1.dst.stride = i1.src0.width == 1 ? i1.src0.vs : i1.src0.stride;
+        i1.dst.width = i1.dst.vs = 0;
+        i1.dst.type = i1.src0.type;
+    }
 
     i0.cmod = ConditionModifier::none;
     i0.moveToIntegerPipe();
@@ -903,12 +920,9 @@ void CopyPlan::planTypeConversions()
                     planEmulatedHalveFloat(i);
             }
         } else if (st == DataType::bf8 && dt == DataType::bf) {
-            bfArithmeticOK(i) ? planUnpack8To16High(i)
-                              : copyThrough(i, DataType::hf, 1);
-            rerunZip = true;
-        } else if (st == ngen_b16() && srange == DataType::bf8 && dt == DataType::bf)
-            planEmulatedBF8ToBF(i);
-        else if (st == DataType::hf8 && dt == DataType::hf) {
+            copyThrough(i, DataType::hf, 1);
+            rerun = true;
+        } else if (st == DataType::hf8 && dt == DataType::hf) {
             if (hw < HW::Xe3) {
                 planUnpack8To16High(i);
                 rerunZip = true;
@@ -1295,21 +1309,16 @@ void CopyPlan::planInt8ToBF(CopyInstruction &i)
 void CopyPlan::legalizeBfImmediate(CopyInstruction &i1)
 {
     if (i1.src1.kind != CopyOperand::Immediate) return;
-    auto op = i1.op;
     auto temp = newTemp(DataType::uw, i1.simd, 1);
-    auto src0 = i1.src0;
-    auto dst = i1.dst;
+    auto &i2 = split(i1);
 
     i1.op = Opcode::mov;
     i1.dst = temp;
     i1.src0 = Immediate::uw((uint16_t)(i1.src1.value >> 16));
     i1.src0.type = DataType::uw;
+    i1.flag = i1.src1 = i1.src2 = CopyOperand{};
+    i1.cmod = ConditionModifier::none;
 
-    auto &i2 = split(i1);
-
-    i2.op = op;
-    i2.dst = dst;
-    i2.src0 = src0;
     i2.src1 = temp;
     i2.src1.type = DataType::bf;
 }
@@ -1868,56 +1877,6 @@ void CopyPlan::planE8M0ToF(CopyInstruction &i)
     ie[2]->dst.offset += 1;
     ie[2]->src0 = ie[2]->dst;
     ie[2]->src1 = 0x40;
-}
-
-// Emulation sequence for bf8->bf conversion.
-void CopyPlan::planEmulatedBF8ToBF(CopyInstruction &i)
-{
-    if (i.src0.neg || i.sat || i.hasCMod()) stub("Unsupported modifier");
-    if (!bfArithmeticOK(i)) stub();      /* need bf * f multiply */
-
-    // Emulation sequence for mov y:bf x:bf8:
-    // shl          y:uw    x:ub    8               /* already done */
-    // asr          y:w     y:w     3
-    // and          y:uw    y:uw    0x8FFF
-    // cmp (ge)f0   null:bf (abs)y:bf 0x0F80:bf     /* Inf/NaN check */
-    // mul          y:bf    y:bf    0x7780:bf
-    // (f0) or      y:uw    y:uw    0x7F80          /* Preserve Inf/NaNs */
-
-    auto ie = splitMultiple<5>(i);
-
-    auto y = i.dst, yUW = y, yW = y;
-    yUW.type = DataType::uw;
-    yW.type = DataType::w;
-    y.type = DataType::bf;
-
-    auto f = newFlag(i.simd);
-
-    ie[0]->op = Opcode::asr;
-    ie[0]->src0 = ie[0]->dst = yW;
-    ie[0]->src1 = 3;
-
-    ie[1]->op = Opcode::and_;
-    ie[1]->src0 = ie[1]->dst = yUW;
-    ie[1]->src1 = 0x8FFF;
-
-    ie[2]->op = Opcode::cmp;
-    ie[2]->src0 = abs(y);
-    ie[2]->src1 = bfImmediate(0x0F80, false);
-    ie[2]->dst = CopyOperand();
-    ie[2]->dst.stride = y.stride;
-    ie[2]->dst.type = DataType::bf;
-    ie[2]->cmod = ConditionModifier::ge;
-    ie[2]->flag = f;
-
-    ie[3]->op = Opcode::mul;
-    ie[3]->src0 = ie[3]->dst = y;
-    ie[3]->src1 = bfImmediate(0x7780, false);
-
-    ie[4]->op = Opcode::or_;
-    ie[4]->src0 = ie[4]->dst = yUW;
-    ie[4]->src1 = 0x7F80;
-    ie[4]->flag = f;
 }
 
 // Emulation sequence for hf8->hf conversion.

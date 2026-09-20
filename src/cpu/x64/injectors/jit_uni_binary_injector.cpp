@@ -15,6 +15,7 @@
 *******************************************************************************/
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include "common/math_utils.hpp"
 #include "common/primitive.hpp"
@@ -3058,6 +3059,53 @@ void jit_uni_binary_injector_t<isa, Vmm>::load_rhs(const data_type_t &data_type,
             load_rhs_tail_statically(data_type, tmp_reg, rhs_addr);
     } else
         load_rhs_no_tail(data_type, tmp_reg, rhs_addr);
+}
+
+template <cpu_isa_t isa, typename Vmm>
+void jit_uni_binary_injector_t<isa, Vmm>::load_acc_as_f32(const Vmm &dst,
+        const Xbyak::Reg64 &base, size_t byte_off, data_type_t data_type,
+        bool with_tail, const tail_lode_mode_t tail_load_mode) const {
+
+    // The RHS address register, reused here to point at accumulator memory
+    // (see the declaration on reusing the RHS load path).
+    const auto addr_reg = rhs_arg_static_params_.rhs_addr_reg;
+    const bool byte_off_fits
+            = byte_off <= (size_t)std::numeric_limits<int>::max();
+
+    // The address needs its own register (`addr_reg`) when it cannot be
+    // represented as a `[base + disp]` operand. Two cases force that:
+    //   1. AVX2 tail loads: the helper reads the pointer from `addr_reg` and
+    //      ignores the operand.
+    //   2. A byte offset that doesn't fit int range.
+    // No-tail and AVX-512 opmask tail loads take the operand directly.
+    const bool need_scratch_reg = (with_tail && !is_avx512_) || !byte_off_fits;
+
+    // This is a direct entry point so the register-preserve guard is not in
+    // effect here. Since we need to follow the defined ABI we preserve the
+    // helper GPRs when the caller requested it.
+    const bool preserve_gpr = rhs_arg_static_params_.preserve_gpr_helpers;
+    if (need_scratch_reg) {
+        if (preserve_gpr) host_->push(addr_reg);
+
+        if (byte_off_fits) {
+            host_->lea(addr_reg, host_->ptr[base + (int)byte_off]);
+        } else {
+            // Use a scratch register to handle large offsets.
+            const auto tmp_reg = rhs_arg_static_params_.rhs_helper_reg;
+            if (preserve_gpr) host_->push(tmp_reg);
+
+            host_->mov(tmp_reg, byte_off);
+            host_->lea(addr_reg, host_->ptr[base + tmp_reg]);
+
+            if (preserve_gpr) host_->pop(tmp_reg);
+        }
+    }
+    const auto addr = need_scratch_reg ? host_->ptr[addr_reg]
+                                       : host_->ptr[base + (int)byte_off];
+    load_rhs(data_type, dst, addr, tail_load_mode, with_tail);
+
+    if (types::is_integral_dt(data_type)) cvt_to_f32(dst);
+    if (need_scratch_reg && preserve_gpr) host_->pop(addr_reg);
 }
 
 template <cpu_isa_t isa, typename Vmm>
