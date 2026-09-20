@@ -68,23 +68,25 @@ struct grouped_micro_gemm_t : public primitive_t {
         DECLARE_COMMON_PD_T("grouped_gemm:micro", grouped_micro_gemm_t);
 
         status_t init(impl::engine_t *engine);
+        status_t init_microkernels(impl::engine_t *engine);
 
+        bool is_gemv_ = false;
         int sg_size_ = 0;
+        int strategyGRFs_ = 0;
         dim_t ngroups_ = 0;
         std::array<int, 2> src_group_sizes_ = {0, 0};
         std::array<int, 3> wei_group_sizes_ = {0, 0, 0};
         quantization_t src_quant_;
         quantization_t wei_quant_;
+        gemmstone::microkernel::Package gemm_;
+        compute::kernel_ctx_t kernel_ctx_;
     };
     status_t init(impl::engine_t *engine) override;
-    status_t init_microkernels(impl::engine_t *engine);
 
     status_t execute(const exec_ctx_t &ctx) const override;
 
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
 
-    gemmstone::microkernel::Package gemm_;
-    compute::kernel_ctx_t kernel_ctx_;
     compute::kernel_t kernel_;
 };
 

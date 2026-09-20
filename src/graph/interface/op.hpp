@@ -545,6 +545,7 @@ public:
             CASE(_host_scalar);
             CASE(_identity);
             CASE(_dropout);
+            CASE(_gated_mlp);
             default: return "undefined_op";
         }
 #undef CASE
@@ -604,6 +605,8 @@ public:
         writer->end_object();
         return dnnl::impl::graph::status::success;
     }
+
+    std::string str() const;
 
 private:
     size_t id_ {};

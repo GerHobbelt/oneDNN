@@ -110,6 +110,8 @@ status_t ref_grouped_t::execute(const exec_ctx_t &ctx) const {
                     data_type::s4, data_type::u4)
             && pd()->attr()->fpmath_.apply_to_int_;
 
+    const bool with_post_ops = !pd()->attr()->post_ops_.has_default_values();
+
     // Parallelize over groups (experts in MoE)
     // Expectation is to see 128-256+ groups, with varying M per group
     // and possibly some empty groups (M == 0)
@@ -221,35 +223,45 @@ status_t ref_grouped_t::execute(const exec_ctx_t &ctx) const {
                     }
                 } else {
                     // fp arithmetic
-                    float acc = 0.0f;
+                    for (dim_t i_group = 0; i_group < n_k_groups; i_group++) {
+                        float acc = 0.0f;
 
-                    for (dim_t k = 0; k < K; ++k) {
-                        const dim_t src_idx = src_base_idx + m * K + k;
-                        const dim_t wei_idx = wei_group_base + k * wei_stride_k
-                                + n * wei_stride_n;
+                        for (dim_t k = 0; k < k_group_size; ++k) {
+                            const dim_t k_abs = k + i_group * k_group_size;
+                            const dim_t src_idx = src_base_idx + m * K + k_abs;
+                            const dim_t wei_idx = wei_group_base
+                                    + k_abs * wei_stride_k + n * wei_stride_n;
 
-                        const float s = io::load_float_value(
-                                src_dt, src_data, src_idx);
-                        const float w = io::load_float_value(
-                                wei_dt, wei_data, wei_idx);
-                        acc += s * w;
+                            const float s = io::load_float_value(
+                                    src_dt, src_data, src_idx);
+                            const float w = io::load_float_value(
+                                    wei_dt, wei_data, wei_idx);
+                            acc += s * w;
+                        }
+
+                        if (with_src_scales) {
+                            const dim_t src_k_group = i_group
+                                    * src_scale_ngroups_k / n_k_groups;
+                            const dim_t idx = (src_offset_start + m)
+                                            * src_scale_ngroups_k
+                                    + src_k_group;
+                            const float src_scale = io::load_float_value(
+                                    src_scale_dt, src_scales, idx);
+                            acc *= src_scale;
+                        }
+
+                        if (with_wei_scales) {
+                            const dim_t wei_k_group = i_group
+                                    * wei_scale_ngroups_k / n_k_groups;
+                            const dim_t idx = group_id * wei_scale_ngroups_k * N
+                                    + wei_k_group * N + n;
+                            const float wei_scale = io::load_float_value(
+                                    wei_scale_dt, wei_scales, idx);
+                            acc *= wei_scale;
+                        }
+
+                        result += acc;
                     }
-
-                    if (with_src_scales) {
-                        const dim_t idx = src_offset_start + m;
-                        const float scale = io::load_float_value(
-                                src_scale_dt, src_scales, idx);
-                        acc *= scale;
-                    }
-
-                    if (with_wei_scales) {
-                        const dim_t idx = group_id * N + n;
-                        const float scale = io::load_float_value(
-                                wei_scale_dt, wei_scales, idx);
-                        acc *= scale;
-                    }
-
-                    result = acc;
                 }
 
                 // Add bias
@@ -259,6 +271,18 @@ status_t ref_grouped_t::execute(const exec_ctx_t &ctx) const {
                 }
 
                 const dim_t dst_idx = dst_base_idx + m * N + n;
+
+                // Apply post-ops (binary mul for NVFP4 global scale)
+                if (with_post_ops) {
+                    ref_post_ops_t::args_t args;
+                    args.dst_val
+                            = io::load_float_value(dst_dt, dst_data, dst_idx);
+                    args.ctx = &ctx;
+                    args.l_offset = dst_idx;
+                    args.dst_md = pd()->dst_md();
+                    ref_post_ops->execute(result, args);
+                }
+
                 io::store_float_value(dst_dt, result, dst_data, dst_idx);
             }
         }

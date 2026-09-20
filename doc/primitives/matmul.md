@@ -44,18 +44,21 @@ dimension, the following constraint must hold true:
 When executed, the inputs and outputs should be mapped to an execution
 argument index as specified by the following table.
 
-| Primitive input/output           | Execution argument index                                                   |
-|----------------------------------|----------------------------------------------------------------------------|
-| \src                             | #DNNL_ARG_SRC                                                               |
-| \weights                         | #DNNL_ARG_WEIGHTS                                                           |
-| \bias                            | #DNNL_ARG_BIAS                                                              |
-| \dst                             | #DNNL_ARG_DST                                                               |
-| \f$\text{dropout output mask}\f$ | #DNNL_ARG_ATTR_DROPOUT_MASK                                                 |
-| \f$\text{dropout probability}\f$ | #DNNL_ARG_ATTR_DROPOUT_PROBABILITY                                          |
-| \f$\text{dropout rng seed}\f$    | #DNNL_ARG_ATTR_DROPOUT_SEED                                                 |
-| \f$\text{binary post-op}\f$      | #DNNL_ARG_ATTR_MULTIPLE_POST_OP(binary_post_op_position) \| #DNNL_ARG_SRC_1, |
-|                                  | #DNNL_ARG_ATTR_MULTIPLE_POST_OP(binary_post_op_position) \| #DNNL_ARG_SRC_2  |
-| \f$\text{prelu post-op}\f$       | #DNNL_ARG_ATTR_MULTIPLE_POST_OP(prelu_post_op_position) \| #DNNL_ARG_WEIGHTS |
+| Argument                         | Index                                                                      | Type   |
+|----------------------------------|----------------------------------------------------------------------------|--------|
+| \src                             | DNNL_ARG_SRC                                                               | Input  |
+| \weights                         | DNNL_ARG_WEIGHTS                                                           | Input  |
+| \bias                            | DNNL_ARG_BIAS                                                              | Input  |
+| \dst                             | DNNL_ARG_DST                                                               | Output |
+| \f$\text{dropout output mask}\f$ | DNNL_ARG_ATTR_DROPOUT_MASK                                                 | Output |
+| \f$\text{dropout probability}\f$ | DNNL_ARG_ATTR_DROPOUT_PROBABILITY                                          | Input  |
+| \f$\text{dropout rng seed}\f$    | DNNL_ARG_ATTR_DROPOUT_SEED                                                 | Input  |
+| \f$\text{binary post-op}\f$      | DNNL_ARG_ATTR_MULTIPLE_POST_OP(binary_post_op_position) \| DNNL_ARG_SRC_1  | Input  |
+|                                  | DNNL_ARG_ATTR_MULTIPLE_POST_OP(binary_post_op_position) \| DNNL_ARG_SRC_2  | Input  |
+| \f$\text{prelu post-op}\f$       | DNNL_ARG_ATTR_MULTIPLE_POST_OP(prelu_post_op_position) \| DNNL_ARG_WEIGHTS | Input  |
+| [scratchpad]                     | DNNL_ARG_SCRATCHPAD                                                        | Output |
+
+[scratchpad]: @ref dev_guide_attributes_scratchpad
 
 ## Implementation Details
 
@@ -422,7 +425,12 @@ The following are supported:
   - Weight Scales: column-wise (`mask = (1 << 0) | (1 << 2)`) and
     K-grouped (`mask = (1 << 0) | (1 << 1) | (1 << 2)`) with group specification
     are supported.
+  - Scale data type includes: `f32`, `bf16`, `f16`, `e8m0` for MXFP8 and MXFP4,
+    `f8_e4m3` for NVFP4 block scales.
 - Zero points attribute for weights tensors with the same masks as scales.
+- Post-ops: binary post-ops are supported (e.g., binary `mul` with a scalar
+  `f32` tensor can be used to apply a global scale factor, as needed for NVFP4
+  two-level scaling).
 - Bias supports per-expert shape.
 - Supported on CPU and GPU engines.
 
@@ -430,11 +438,13 @@ The following are supported:
 
 The following combinations of data types for source, destination, weights, and bias tensors are supported.
 
-| Source         | Weights              | Destination    | Bias           |
-|:---------------|:---------------------|:---------------|:---------------|
-| f32, bf16, f16 | f32, bf16, f16       | f32, bf16, f16 | f32, bf16, f16 |
-| f32, bf16, f16 | u8, s8, s4, u4 (1)   | f32, bf16, f16 | f32, bf16, f16 |
-| u8, s8         | u8, s8, s4, u4       | f32, bf16, f16 | f32, bf16, f16 |
+| Source           | Weights            | Destination    | Bias           |
+|:-----------------|:-------------------|:---------------|:---------------|
+| f32, bf16, f16   | f32, bf16, f16     | f32, bf16, f16 | f32, bf16, f16 |
+| f8_e5m2, f8_e4m3 | f8_e5m2, f8_e4m3   | f32, bf16, f16 |                |
+| f4_e2m1          | f4_e2m1            | f32, bf16, f16 |                |
+| f32, bf16, f16   | u8, s8, s4, u4 (1) | f32, bf16, f16 | f32, bf16, f16 |
+| u8, s8           | u8, s8, s4, u4     | f32, bf16, f16 | f32, bf16, f16 |
 
 Footnotes:
 1. Weight-Only Quantization (WOQ): floating-point source with integer weights
