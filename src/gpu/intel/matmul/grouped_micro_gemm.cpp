@@ -114,17 +114,24 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(impl::engine_t *engine) {
         problem.Tb_scale = convert_dnnl_to_kernel_type(src_scale_dt);
         problem.B_scale.setAlignment(
                 static_cast<int>(types::data_type_size(src_scale_dt)));
-        problem.B_scale.layout = MatrixLayout::N;
-        problem.bsPtrDims = 2;
+        problem.bsPtrDims
+                = (src_quant_.scale_mask() == (src_qmask_M() | src_qmask_K()))
+                ? 2
+                : 1;
+        problem.B_scale.layout
+                = problem.bsPtrDims > 1 ? MatrixLayout::N : MatrixLayout::T;
     }
     if (opts.offsetB) {
         data_type_t src_zp_dt = src_quant_.zp_dt();
         problem.Tbo = convert_dnnl_to_kernel_type(src_zp_dt);
         problem.BO.setAlignment(
                 static_cast<int>(types::data_type_size(src_zp_dt)));
-        problem.BO.layout = MatrixLayout::N;
-        problem.boPtrDims = 2;
+        problem.boPtrDims
+                = (src_quant_.zp_mask() == (src_qmask_M() | src_qmask_K())) ? 2
+                                                                            : 1;
         problem.bOffset = ABOffset::Calc;
+        problem.BO.layout
+                = problem.boPtrDims > 1 ? MatrixLayout::N : MatrixLayout::T;
     }
 
     if (opts.scaleA || opts.offsetA) {
@@ -142,7 +149,10 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(impl::engine_t *engine) {
     // can avoid using group sums by converting one of the inputs to
     // f16/bf16.
     if (problem.Ta.isInteger() && problem.Tb.isInteger()
-            && (problem.needsAGroupSums() || problem.needsBGroupSums())) {
+            && ((problem.needsAGroupSums() || problem.needsBGroupSums())
+                    || ((opts.scaleA || opts.scaleB)
+                            && dev_info->gpu_arch()
+                                    < compute::gpu_arch_t::xe_hpc))) {
         Type ctype = Type::f16;
         if (utils::one_of(Type::bf16, problem.Ta_scale, problem.Tb_scale,
                     convert_dnnl_to_kernel_type(dst_mdw.data_type())))
@@ -162,6 +172,7 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(impl::engine_t *engine) {
     auto strat_override = [&](gemmstone::GEMMStrategy &strat) {
         std::string newStrat;
         using namespace gemmstone;
+        strat.dpasw |= strat.fused;
         newStrat = gpu_utils::dev_getenv("GRPGEMM_USTRATEGY", newStrat);
         if (!newStrat.empty()) {
             // Example: 16 16 1 0 aT32 aM32 aB wg 2x4 sys
@@ -179,7 +190,7 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(impl::engine_t *engine) {
             Scalar alpha(a), beta(b);
             std::string strategyString;
             std::getline(ss >> std::ws, strategyString);
-            parseStrategy(strategyString.c_str(), hw, problem, strat);
+            parseStrategy(strategyString, hw, problem, strat);
             adjustStrategy(hw, problem, strat);
         }
         strategyGRFs_ = strat.GRFs;
@@ -353,19 +364,29 @@ status_t grouped_micro_gemm_t::pd_t::init(impl::engine_t *engine) {
     if (src_quant_.with_scale()) {
         VDISPATCH_MATMUL(utils::one_of(src_quant_.scale_dt(), f32, f16, bf16,
                                  f8_e5m2, f8_e4m3, e8m0, f4_e2m1, f4_e3m0),
-                VERBOSE_UNSUPPORTED_SCALES_CFG ": %s(%s)", "src scales",
+                VERBOSE_UNSUPPORTED_SCALES_CFG ": src scales dt(%s)",
                 dnnl_dt2str(src_quant_.scale_dt()));
     }
 
     if (src_quant_.with_zp()) {
         const int src_zp_mask = src_quant_.zp_mask();
-        const int src_qmask = src_qmask_M() | src_qmask_K();
         // Only per-row or per-column zero points supported for src
-        VDISPATCH_MATMUL(utils::one_of(src_zp_mask, src_qmask, 0),
-                VERBOSE_UNSUPPORTED_ZP_CFG ": %s", "src zero points");
-        VDISPATCH_MATMUL(utils::one_of(src_quant_.zp_dt(), u8, s8, u4, s4),
-                VERBOSE_UNSUPPORTED_ZP_CFG ": %s(%s)", "src zero points",
+        VDISPATCH_MATMUL(utils::one_of(src_zp_mask, src_qmask_M(),
+                                 src_qmask_M() | src_qmask_K(), 0),
+                VERBOSE_UNSUPPORTED_ZP_CFG ": src zero points mask(%d)",
+                src_zp_mask);
+        VDISPATCH_MATMUL(utils::one_of(src_quant_.zp_dt(), u8, s8),
+                VERBOSE_UNSUPPORTED_ZP_CFG ": src zero points dt(%s)",
                 dnnl_dt2str(src_quant_.zp_dt()));
+    }
+
+    if (src_quant_.with_scale() && src_quant_.with_zp()) {
+        const int src_scale_mask = src_quant_.scale_mask();
+        const int src_zp_mask = src_quant_.zp_mask();
+        VDISPATCH_MATMUL(src_scale_mask == src_zp_mask,
+                VERBOSE_UNSUPPORTED_SCALES_CFG
+                ": src scale(%d) and zp(%d) mask must match",
+                src_scale_mask, src_zp_mask);
     }
 
     if (wei_quant_.with_scale()) {
@@ -374,7 +395,7 @@ status_t grouped_micro_gemm_t::pd_t::init(impl::engine_t *engine) {
                 utils::one_of(wei_mask, 7, 5), VERBOSE_UNSUPPORTED_SCALES_CFG);
         VDISPATCH_MATMUL(utils::one_of(wei_quant_.scale_dt(), f32, f16, bf16,
                                  f8_e5m2, f8_e4m3, e8m0, f4_e2m1, f4_e3m0),
-                VERBOSE_UNSUPPORTED_SCALES_CFG ": %s(%s)", "wei scales",
+                VERBOSE_UNSUPPORTED_SCALES_CFG ": wei scales dt(%s)",
                 dnnl_dt2str(wei_quant_.scale_dt()));
     }
 
@@ -382,10 +403,20 @@ status_t grouped_micro_gemm_t::pd_t::init(impl::engine_t *engine) {
         const int wei_zp_mask = wei_quant_.zp_mask();
         // Only per-column zero points supported for weights
         VDISPATCH_MATMUL(utils::one_of(wei_zp_mask, 7, 5),
-                VERBOSE_UNSUPPORTED_ZP_CFG ": %s", "wei zero points");
+                VERBOSE_UNSUPPORTED_ZP_CFG ": wei zero points mask(%d)",
+                wei_zp_mask);
         VDISPATCH_MATMUL(utils::one_of(wei_quant_.zp_dt(), u8, s8, u4, s4),
-                VERBOSE_UNSUPPORTED_ZP_CFG ": %s(%s)", "wei zero points",
+                VERBOSE_UNSUPPORTED_ZP_CFG ": wei zero points dt(%s)",
                 dnnl_dt2str(wei_quant_.zp_dt()));
+    }
+
+    if (wei_quant_.with_scale() && wei_quant_.with_zp()) {
+        const int wei_scale_mask = wei_quant_.scale_mask();
+        const int wei_zp_mask = wei_quant_.zp_mask();
+        VDISPATCH_MATMUL(wei_scale_mask == wei_zp_mask,
+                VERBOSE_UNSUPPORTED_SCALES_CFG
+                ": wei scale(%d) and zp(%d) mask must match",
+                wei_scale_mask, wei_zp_mask);
     }
 
     VDISPATCH_MATMUL(attr_scales.has_default_values(DNNL_ARG_DST),
