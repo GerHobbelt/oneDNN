@@ -14,11 +14,13 @@
 * limitations under the License.
 *******************************************************************************/
 
+#include <numeric>
 #include <random>
 
 #include "dnnl_common.hpp"
 #include "input_displacer.hpp"
 #include "ref_partition.hpp"
+#include "ref_primitive.hpp"
 
 #include "utils/parallel.hpp"
 
@@ -73,7 +75,7 @@ void handle_special_dt_set(
     ref_prim->init_prim(::get_test_engine(), res, /* force_override = */ true);
     if (res->state == SKIPPED || res->state == UNIMPLEMENTED) return nullptr;
 
-    ref_prim->init_memory_args(::get_test_engine());
+    ref_prim->init_memory_args(::get_test_engine(), res);
     ref_prim->init_ref_memory_args(::get_test_engine(), res);
     if (res->state == SKIPPED || res->state == UNIMPLEMENTED
             || res->state == DEFERRED)
@@ -619,7 +621,7 @@ int partition_data_displacer_t::displace_input_data(size_t lt_id,
         SAFE_V(ref_prim.init_prim(
                 get_cpu_engine(), &res, /* force_override = */ true));
 
-        ref_prim.init_memory_args(get_cpu_engine());
+        ref_prim.init_memory_args(get_cpu_engine(), &res);
         SAFE_V(ref_prim.init_ref_memory_args(get_cpu_engine(), &res));
 
         const auto &src_mem = ref_prim.get_arg(DNNL_ARG_SRC);
@@ -648,7 +650,7 @@ int partition_data_displacer_t::displace_input_data(size_t lt_id,
         const bool mds_are_equal
                 = dnnl_memory_desc_equal(mem_replace.md_, mem.md_) == 1;
         if (mds_are_equal) {
-            SAFE(mem.reorder(mem_replace), WARN);
+            SAFE(mem.reorder(mem_replace, res), WARN);
             break;
         }
 
@@ -666,7 +668,7 @@ int partition_data_displacer_t::displace_input_data(size_t lt_id,
         if (mds_are_int8 || mds_are_fp8) {
             dnnl_memory_desc_destroy(mem_replace.md_);
             dnnl_memory_desc_clone(&mem_replace.md_, mem.md_);
-            SAFE(mem.reorder(mem_replace), WARN);
+            SAFE(mem.reorder(mem_replace, res), WARN);
             break;
         }
 
@@ -678,7 +680,7 @@ int partition_data_displacer_t::displace_input_data(size_t lt_id,
             if (groups > 1) {
                 dnnl_memory_desc_destroy(mem_replace.md_);
                 dnnl_memory_desc_clone(&mem_replace.md_, mem.md_);
-                SAFE(mem.reorder(mem_replace), WARN);
+                SAFE(mem.reorder(mem_replace, res), WARN);
                 break;
             }
         }
@@ -695,7 +697,7 @@ int partition_data_displacer_t::displace_input_data(size_t lt_id,
             dnnl_memory_desc_destroy(mem_replace.md_);
             dnnl_memory_desc_clone(&mem_replace.md_, new_replace_md);
             dnnl_memory_desc_destroy(new_replace_md);
-            SAFE(mem.reorder(mem_replace), WARN);
+            SAFE(mem.reorder(mem_replace, res), WARN);
             break;
         }
 
@@ -713,7 +715,7 @@ int partition_data_displacer_t::displace_input_data(size_t lt_id,
             dnnl_memory_desc_destroy(mem_replace.md_);
             dnnl_memory_desc_clone(&mem_replace.md_, new_replace_md);
             dnnl_memory_desc_destroy(new_replace_md);
-            SAFE(mem.reorder(mem_replace), WARN);
+            SAFE(mem.reorder(mem_replace, res), WARN);
             break;
         }
 

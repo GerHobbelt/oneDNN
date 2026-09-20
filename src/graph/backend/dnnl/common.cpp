@@ -79,22 +79,17 @@ dims group_dims(const dims &adims, dim groups) {
     return new_dims;
 }
 
-dnnl::engine make_dnnl_engine(const engine_t &g_engine) {
+dnnl::engine make_dnnl_engine(engine_t &g_engine) {
     dnnl::engine engine;
-    engine.reset(const_cast<engine_t *>(&g_engine), true); // not own
+    engine.reset(&g_engine, true); // not own
     return engine;
 }
 
-// The function will throw expection if cpu runtime is none.
-dnnl::engine make_host_engine() {
-    return dnnl::engine(dnnl::engine::kind::cpu, 0);
-}
-
 dnnl::stream make_dnnl_stream(
-        const dnnl::engine &p_engine, const stream_t &g_stream) {
+        const dnnl::engine &p_engine, stream_t &g_stream) {
     UNUSED(p_engine);
     dnnl::stream strm;
-    strm.reset(const_cast<stream_t *>(&g_stream), true); // not own
+    strm.reset(&g_stream, true); // not own
     return strm;
 }
 
@@ -369,13 +364,6 @@ bool is_format(const memory::desc &adesc, const std::string &tag) {
     if ("ncx" == tag) { return strides == get_ncx_strides(shape); }
 
     return strides == get_nxc_strides(shape);
-}
-
-bool is_4c_blocked(const memory::desc &adesc) {
-    if (adesc.get_format_kind() != format_kind::blocked) return false;
-
-    return adesc.get_inner_nblks() == 1 && adesc.get_inner_idxs()[0] == 1
-            && adesc.get_inner_blks()[0] == 4;
 }
 
 bool is_plain(const memory::desc &adesc) {

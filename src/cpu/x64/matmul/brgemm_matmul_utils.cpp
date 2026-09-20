@@ -209,25 +209,29 @@ bool post_ops_ok(brgemm_matmul_conf_t &bgmmc, const primitive_attr_t &attr,
 
 // Trivial: The motivation is to compute batch offset for a memory
 // (src or wei or dst) with minimal overhead, by using
-// `batch_offset = b * b_stride`.
-// This is possible when the batch layout is contiguous.
-bool is_batch_layout_trivial(
-        const memory_desc_wrapper &mdw, const dim_t batch) {
+// `batch_offset = b * b_stride`, where `b` is the flattened batch index
+// iterated in logical (row-major) order and `b_stride` is the stride of
+// the innermost batch dimension (strides[ndims - 3]).
+// This is only valid when the batch dimensions form a contiguous
+// row-major nesting, i.e. every batch dimension `d` satisfies
+// `strides[d] == b_stride * prod(dims[d + 1 .. ndims - 3])`.
+bool is_batch_layout_trivial(const memory_desc_wrapper &mdw) {
     const int ndims = mdw.ndims();
     if (ndims <= 3) return true;
 
+    const auto &dims = mdw.dims();
     const auto &strides = mdw.strides();
-    const int batch_start_idx = ndims - 3;
-    dim_t cur_stride = strides[batch_start_idx];
-    dim_t min_batch_stride = cur_stride;
-    dim_t max_batch_stride = cur_stride;
-    for (int d = batch_start_idx - 1; d >= 0; --d) {
-        cur_stride = strides[d];
-        min_batch_stride = nstl::min(min_batch_stride, cur_stride);
-        max_batch_stride = nstl::max(max_batch_stride, cur_stride);
+    const int innermost_batch_idx = ndims - 3;
+    dim_t expected_stride = strides[innermost_batch_idx];
+    if (expected_stride == 0) return false;
+    for (int d = innermost_batch_idx; d >= 0; --d) {
+        // Dimensions of size 1 do not contribute to the batch offset and
+        // their stride is irrelevant.
+        if (dims[d] == 1) continue;
+        if (strides[d] != expected_stride) return false;
+        expected_stride *= dims[d];
     }
-    if (min_batch_stride == 0) return false;
-    return max_batch_stride / min_batch_stride == batch;
+    return true;
 }
 
 bool dims_adjacent(const memory_desc_wrapper &mdw, const int outer_dim,
@@ -388,9 +392,7 @@ brgemm_matmul_conf_utils_t::brgemm_matmul_conf_utils_t(
                       || !attr.zero_points_.get(DNNL_ARG_SRC)
                                   .has_default_groups()
                       || !attr.zero_points_.get(DNNL_ARG_WEIGHTS)
-                                  .has_default_groups())
-              && bgmmc.ndims
-                      == 2) // 3D/4D cases will be enabled in separate PRs.
+                                  .has_default_groups()))
     , bf16_fp8_dt(bgmmc.src_dt == bf16 && one_of(bgmmc.wei_dt, f8_e5m2, f8_e4m3)
               && one_of(bgmmc.dst_dt, f16, f32, bf16, f8_e5m2, f8_e4m3))
     , f16_fp8_dt(bgmmc.src_dt == f16 && one_of(bgmmc.wei_dt, f8_e5m2, f8_e4m3)
@@ -1865,6 +1867,11 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
     if (has_src_zp) {
         bgmmc.src_zp_dt = src_zp.get_data_type();
         const auto src_zp_mask = src_zp.get_mask();
+
+        // Zero point and SRC should be the same data type for int8 grouped quantization.
+        VCONDCHECK_BG(IMPLICATION(bgmmc.with_int8_grouped_quantization,
+                              bgmmc.src_zp_dt == bgmmc.orig_src_dt),
+                VERBOSE_UNSUPPORTED_ZP_CFG);
         // src per-K grouped ZP: K bit set (the last dim for src is K) and
         // an explicit group size. Only meaningful for grouped int8 paths.
         bgmmc.is_src_zp_per_k = (src_zp_mask & (1 << (bgmmc.ndims - 1))) != 0
@@ -1886,6 +1893,11 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
         bgmmc.is_wei_zp_per_n = wei_zp_mask & (1 << (bgmmc.ndims - 1));
         bgmmc.wei_zp_dt = wei_zp.get_data_type();
         bgmmc.wei_zp_k_gsize = wei_zp.get_group(0);
+
+        // Zero point and WEI should be the same data type for int8 grouped quantization.
+        VCONDCHECK_BG(IMPLICATION(bgmmc.with_int8_grouped_quantization,
+                              bgmmc.wei_zp_dt == bgmmc.orig_wei_dt),
+                VERBOSE_UNSUPPORTED_ZP_CFG);
 
         VCONDCHECK_BG(wei_zp_mask == 0 || bgmmc.is_wei_zp_per_k
                         || bgmmc.is_wei_zp_per_n,
@@ -1910,6 +1922,9 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
     bgmmc.wei_zp_type = get_zp_type(attr, DNNL_ARG_WEIGHTS);
     bgmmc.dst_zp_type = get_zp_type(attr, DNNL_ARG_DST);
 
+    bgmmc.has_zero_point_a = bgmmc.src_zp_type != brgemm_broadcast_t::none;
+    bgmmc.has_zero_point_b = bgmmc.wei_zp_type != brgemm_broadcast_t::none;
+    bgmmc.has_zero_point_c = bgmmc.dst_zp_type != brgemm_broadcast_t::none;
     // Non-default src zero points (per-tensor, common, host_scalar) with
     // int8 grouped quantization: the per-(M,N) compensation tile (set via
     // bgmmc.with_per_mn_compensation later in init) covers the remaining
@@ -1945,6 +1960,62 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
     if (bgmmc.is_wei_scale_per_k && !bgmmc.is_runtime_K
             && bgmmc.wei_scales_k_gsize >= bgmmc.K) {
         bgmmc.is_wei_scale_per_k = false;
+    }
+
+    // Per-K weight scales are only applied for weight decompression (integer
+    // weights) and int8 grouped quantization. Other types (e.g. fp8) pass the
+    // check above (per_ocic/per_tensor also set the per-N bit) but the
+    // K-grouping would be ignored, so reject them here. A per-K group
+    // spanning all of K was already downgraded to per-N above.
+    VCONDCHECK_BG(IMPLICATION(bgmmc.is_wei_scale_per_k,
+                          bgmmc.with_wei_decompression
+                                  || bgmmc.with_int8_grouped_quantization),
+            VERBOSE_UNSUPPORTED_SCALES_CFG);
+
+    // Batched (3D/4D) per-batch scales/ZP have batch bits set in the mask.
+    // Compute the stride (in elements) between consecutive per-batch planes
+    // so the matmul driver can offset the scales/ZP pointer per batch index.
+    if (bgmmc.batch > 1) {
+        const int kn_mask = (1 << (bgmmc.ndims - 1)) | (1 << (bgmmc.ndims - 2));
+        const int &mk_mask = kn_mask; // just a naming alias
+        if (bgmmc.with_src_scales) {
+            const bool has_batch_bits = (src_scales.get_mask() & ~mk_mask) != 0;
+            if (has_batch_bits) {
+                const dim_t num_k_groups = bgmmc.is_src_scale_per_k
+                                && bgmmc.src_scales_k_gsize > 0
+                        ? utils::div_up(bgmmc.K, bgmmc.src_scales_k_gsize)
+                        : 1;
+                bgmmc.src_scales_batch_stride = num_k_groups * bgmmc.M;
+            }
+        }
+        if (bgmmc.with_wei_scales) {
+            const bool has_batch_bits = (wei_scales.get_mask() & ~kn_mask) != 0;
+            if (has_batch_bits) {
+                const dim_t num_k_groups = bgmmc.is_wei_scale_per_k
+                        ? utils::div_up(bgmmc.K, bgmmc.wei_scales_k_gsize)
+                        : 1;
+                bgmmc.wei_scales_batch_stride = num_k_groups * bgmmc.N;
+            }
+        }
+        if (has_src_zp) {
+            const bool has_batch_bits = (src_zp.get_mask() & ~mk_mask) != 0;
+            if (has_batch_bits) {
+                const dim_t num_k_groups
+                        = bgmmc.is_src_zp_per_k && bgmmc.src_zp_k_gsize > 0
+                        ? utils::div_up(bgmmc.K, bgmmc.src_zp_k_gsize)
+                        : 1;
+                bgmmc.src_zp_batch_stride = num_k_groups * bgmmc.M;
+            }
+        }
+        if (has_wei_zp) {
+            const bool has_batch_bits = (wei_zp.get_mask() & ~kn_mask) != 0;
+            if (has_batch_bits) {
+                const dim_t num_k_groups = bgmmc.is_wei_zp_per_k
+                        ? utils::div_up(bgmmc.K, bgmmc.wei_zp_k_gsize)
+                        : 1;
+                bgmmc.wei_zp_batch_stride = num_k_groups * bgmmc.N;
+            }
+        }
     }
 
     bgmmc.is_gemv = is_gemv_applicable(
@@ -2078,6 +2149,14 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
     const bool m_and_k_adjacent
             = dims_adjacent(src_d, bgmmc.ndims - 2, bgmmc.ndims - 1);
 
+    // Per-M source quantization (scales or zero-points) is indexed by the
+    // original M dimension and broadcast across batch. Merging batch into M
+    // would make the kernel address those per-M quant buffers with the fused
+    // (batch * M) row index, reading past the buffer for the extra rows.
+    // TODO: Enable fused indexing for fused batches.
+    const bool src_quant_per_m
+            = bgmmc.is_src_scale_per_m || bgmmc.is_src_zp_per_m;
+
     // We cannot change M at this point as all gemv related parameters have
     // already been set up.
     // TODO: move this logic into a dedicated function. The conditions that
@@ -2088,7 +2167,7 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
             && plain_A_layout && helper.is_src_dst_layout_batch_fusable()
             && post_ops_ok(
                     bgmmc, attr, dst_d, true /* limit_bcast_strategies_set */)
-            && m_and_k_adjacent;
+            && m_and_k_adjacent && !src_quant_per_m;
     if (merge_batch_dims_into_M) {
         bgmmc.M *= bgmmc.batch;
         bgmmc.batch = 1;
@@ -2302,12 +2381,9 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
                 : bgmmc.LDD;
     }
 
-    bgmmc.is_src_batch_layout_trivial
-            = is_batch_layout_trivial(src_d, bgmmc.batch);
-    bgmmc.is_wei_batch_layout_trivial
-            = is_batch_layout_trivial(weights_d, bgmmc.batch);
-    bgmmc.is_dst_batch_layout_trivial
-            = is_batch_layout_trivial(dst_d, bgmmc.batch);
+    bgmmc.is_src_batch_layout_trivial = is_batch_layout_trivial(src_d);
+    bgmmc.is_wei_batch_layout_trivial = is_batch_layout_trivial(weights_d);
+    bgmmc.is_dst_batch_layout_trivial = is_batch_layout_trivial(dst_d);
 
     // Sets things related to chunks and others
     init_aux_values(bgmmc, src_d, weights_d, dst_d);
@@ -2699,9 +2775,6 @@ void init_aux_values(brgemm_matmul_conf_t &bgmmc,
             ? dst_d.blocking_desc().strides[0] * bgmmc.c_dt_sz
             : 0;
 
-    bgmmc.has_zero_point_a = bgmmc.src_zp_type != brgemm_broadcast_t::none;
-    bgmmc.has_zero_point_b = bgmmc.wei_zp_type != brgemm_broadcast_t::none;
-    bgmmc.has_zero_point_c = bgmmc.dst_zp_type != brgemm_broadcast_t::none;
     bgmmc.with_per_mn_compensation = bgmmc.with_int8_grouped_quantization
             && (bgmmc.has_zero_point_a || bgmmc.has_zero_point_b
                     || bgmmc.s8s8_compensation_required);

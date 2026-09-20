@@ -299,6 +299,13 @@ struct brgemm_matmul_conf_t {
     bool is_wei_zp_common = false;
     data_type_t wei_zp_dt = data_type::undef;
 
+    // Batched (3D/4D) per-batch scales/ZP plane stride (in elements).
+    // Populated when the scales/ZP mask carries batch bits.
+    dim_t src_scales_batch_stride = 0;
+    dim_t src_zp_batch_stride = 0;
+    dim_t wei_scales_batch_stride = 0;
+    dim_t wei_zp_batch_stride = 0;
+
     dim_t zp_a_comp_shift_n;
     dim_t zp_a_comp_elems_per_thr;
 
@@ -315,6 +322,15 @@ struct brgemm_matmul_conf_t {
         const dim_t big_stride_threshold_in_bytes = 8192;
         const dim_t big_K_threshold = big_stride_threshold_in_bytes / a_dt_sz;
         return !transposed_A && math::is_pow2(K) && K >= big_K_threshold;
+    }
+
+    inline bool calculate_compensations_in_copy_routines() const {
+        const bool need_to_calculate_compensation_for_a
+                = has_zero_point_b && !with_wei_decompression;
+        const bool need_to_calculate_compensation_for_b = !IMPLICATION(
+                (has_zero_point_a || s8s8_compensation_required), blocked_B);
+        return need_to_calculate_compensation_for_a
+                || need_to_calculate_compensation_for_b;
     }
 };
 
@@ -533,7 +549,7 @@ int get_n_block_from_tag(format_tag_t matrix_b_tag);
 
 void mem_advice_init(brgemm_matmul_conf_t &bgmmc);
 
-bool is_batch_layout_trivial(const memory_desc_wrapper &mdw, const dim_t batch);
+bool is_batch_layout_trivial(const memory_desc_wrapper &mdw);
 
 // Returns true if logical dimension `inner_dim` is nested immediately inside
 // `outer_dim` in memory, i.e. no other dimension is physically interleaved
