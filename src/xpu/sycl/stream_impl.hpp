@@ -67,15 +67,10 @@ public:
 
     status_t barrier();
 
-    const xpu::sycl::context_t &sycl_ctx() const;
     xpu::sycl::context_t &sycl_ctx();
-
     xpu::context_t &ctx();
-    const xpu::context_t &ctx() const;
 
     ::sycl::event get_output_event();
-
-    void register_deps(::sycl::handler &cgh) const;
 
     status_t init_verbose_profiler(engine_kind_t kind) override;
 
@@ -99,7 +94,7 @@ public:
 private:
     std::unique_ptr<::sycl::queue> queue_;
 
-    mutable utils::thread_local_storage_t<xpu::sycl::context_t> ctx_;
+    utils::thread_local_storage_t<xpu::sycl::context_t> ctx_;
 
     // XXX: this is a temporary solution to make sycl_memory_arg_t
     // default constructible.

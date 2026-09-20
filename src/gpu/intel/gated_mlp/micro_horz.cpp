@@ -172,7 +172,6 @@ status_t micro_horz_t::pd_t::init_microkernels(
     hw_info.gmdid = dev_info->ip_version();
     hw_info.systolicAvailable = intel_engine->mayiuse(
             compute::device_ext_t::intel_subgroup_matrix_multiply_accumulate);
-    hw_info.isEfficient64Bit = dev_info->is_efficient_64bit();
 
     if (hw_info.gmdid == 0) return status::unimplemented;
 
@@ -270,6 +269,9 @@ status_t micro_horz_t::pd_t::init_microkernels(
                 "gemm_gateup microkernel generation failed with message: %s",
                 e.what());
     }
+
+    CHECK(compute::validate_microkernel(gemm_gate_up_pkg_, "gemm_gateup"));
+
     return status::success;
 }
 

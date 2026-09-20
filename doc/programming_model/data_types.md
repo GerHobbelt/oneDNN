@@ -213,11 +213,10 @@ Footnotes:
 oneDNN performance optimizations for Intel Graphics are specialized based on
 device microarchitecture (uArch). The following uArchs and associated devices
 have specialized optimizations in the library:
- * Xe-LP
-   * Intel Graphics for 11th-14th Gen Intel(R) Processors
-   * Intel Iris Xe MAX Graphics (formerly DG1)
  * Xe-LPG
    * Intel Graphics for Intel Core Ultra Series 1 processors (formerly Meteor Lake)
+ * Xe-LPG+
+   * Intel Graphics for Intel Core Ultra Series 2 processors (formerly Arrow Lake)
  * Xe-HPG
    * Intel Arc A-Series Graphics (formerly Achemist)
    * Intel Data Center GPU Flex Series (formerly Arctic Sound)
@@ -240,8 +239,8 @@ The following table indicates the data types support for each uArch supported by
 
 | ISA      | f64     | f32     | bf16    | f16     | s8/u8   | f8      | f4_e2m1 | s4/u4   |
 | -------- | ------- | ------- | ------- | ------- | ------- | ------- | ------- | ------- |
-| Xe-LP    |         | `+`     | `.`     | `+`(1)  | `+`     |         |         |         |
 | Xe-LPG   |         | `+`     | `.`     | `+`(1)  | `+`     |         |         |         |
+| Xe-LPG+  |         | `+`     | `+`     | `+`     | `+`     |         |         |         |
 | Xe-HPG   |         | `+`     | `+`     | `+`     | `+`     | `.`     |         | `.`     |
 | Xe-HPC   | `+`     | `+`     | `+`     | `+`     | `+`     | `.`     | `.`     | `.`     |
 | Xe2-LPG  | `+`     | `+`     | `+`     | `+`     | `+`     | `.`     | `.`     | `.`     |
@@ -255,7 +254,7 @@ Legend:
 * `.` indicates oneDNN supports this data type via conversion to a higher precision data type.
 
 Footnotes:
-1. Xe-LP architecture does not natively support `f16` operations with `f32`
+1. Xe-LPG architecture does not natively support `f16` operations with `f32`
    accumulation. Consider using
    [relaxed accumulation mode](@ref dev_guide_attributes_accumulation_mode)
    for the best performance results.

@@ -32,10 +32,6 @@
 #include <stdexcept>
 #include <string>
 
-#define VCHECK_MATMUL(cond, msg, ...) \
-    VCONDCHECK(primitive, create, check, matmul, (cond), \
-            status::unimplemented, msg, ##__VA_ARGS__);
-
 namespace dnnl {
 namespace impl {
 namespace gpu {
@@ -58,7 +54,6 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(impl::engine_t *engine) {
     hw_info.euCount = dev_info->eu_count();
     hw_info.gmdid = dev_info->ip_version();
     hw_info.systolicAvailable = use_systolic_ukernel;
-    hw_info.isEfficient64Bit = dev_info->is_efficient_64bit();
 
     if (hw_info.gmdid == 0) return status::unimplemented;
 
@@ -151,6 +146,19 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(impl::engine_t *engine) {
         problem.bqGroupN = src_group_sizes_[0];
         problem.bqGroupK
                 = static_cast<int>(utils::rnd_up_pow2(src_group_sizes_[1]));
+    }
+
+    // Mixed s8/s4 DPAS support:
+    // - Xe3p: Not supported, require s4->s8 upconversion
+    // - pre-Xe3p: supported, but only when s4 matrix doesn't have zero points
+    bool has_s8s4_dpas = dev_info->gpu_arch() != compute::gpu_arch_t::xe3p;
+    if (problem.Ta_ext.isInt4() && problem.Tb_ext.isInt8()) {
+        bool s8s4_dpas_ok = has_s8s4_dpas && !opts.offsetA;
+        if (!s8s4_dpas_ok) problem.Ta = Type::s8;
+    }
+    if (problem.Tb_ext.isInt4() && problem.Ta_ext.isInt8()) {
+        bool s8s4_dpas_ok = has_s8s4_dpas && !opts.offsetB;
+        if (!s8s4_dpas_ok) problem.Tb = Type::s8;
     }
 
     // When both A and B are integers and group sums are needed, we
@@ -259,6 +267,8 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(impl::engine_t *engine) {
                     ex.what());
         }
     }
+
+    CHECK(compute::validate_microkernel(gemm_, "grouped_gemm"));
 
     /* Generate microkernel shims */
     ShimOptions shimOptions;

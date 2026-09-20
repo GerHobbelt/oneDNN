@@ -623,8 +623,8 @@ static std::vector<fwd_config_record_t> sorted_configs = []() {
         {{compute::gpu_arch_t::xe3p, 512},                                        {32, 16, 32, 16, 16, 2, 16, 2}},
         {{compute::gpu_arch_t::xe3p, 512, second_token },                         {32, 16, 32, 16, 16, 1, 16, 1}},
         {{compute::gpu_arch_t::xe3p, 512, second_token | quantized },             {32, 16, 32, 16, 16, 1, 16, 1}},
-        {{compute::gpu_arch_t::xe3p, 512, fma | quantized },                      {32, 16, 32, 16, 16, 1, 16, 1}},
-        {{compute::gpu_arch_t::xe3p, 512, fma | f32 | second_token | quantized }, {32, 16, 32, 16, 16, 1, 16, 1}},
+        {{compute::gpu_arch_t::xe3p, 512, fma | quantized },                      {16, 16, 32, 16, 16, 1, 16, 1}},
+        {{compute::gpu_arch_t::xe3p, 512, fma | f32 | second_token | quantized }, {16, 16, 32, 16, 16, 1, 16, 1}},
     };
     // clang-format on
 
@@ -835,7 +835,6 @@ void deserialize_config_to_gemmstone(micro::HWInformation &hwInfo,
     hwInfo.gmdid = ukernel_config.hwinfo.gmdid;
     hwInfo.euCount = ukernel_config.hwinfo.euCount;
     hwInfo.systolicAvailable = ukernel_config.hwinfo.systolicAvailable;
-    hwInfo.isEfficient64Bit = ukernel_config.hwinfo.isEfficient64Bit;
 
     // options kq, vs
     auto deserialize_options
@@ -935,7 +934,6 @@ void deserialize_config_to_gemmstone(micro::HWInformation &hwInfo,
     hwInfo.gmdid = ukernel_config.hwinfo.gmdid;
     hwInfo.euCount = ukernel_config.hwinfo.euCount;
     hwInfo.systolicAvailable = ukernel_config.hwinfo.systolicAvailable;
-    hwInfo.isEfficient64Bit = ukernel_config.hwinfo.isEfficient64Bit;
 
     // options kq, vs
     auto deserialize_options

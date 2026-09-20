@@ -28,27 +28,37 @@ using namespace ngen;
 using namespace ngen::utils;
 using std::vector;
 
+inline namespace {
+int local_k_index(int h, int opCount, int period, const GEMMProblem &problem) {
+    int out = align_down(h, opCount) % period;
+    if (problem.backward()) {
+        if (period % opCount) stub();
+        return period - opCount - out;
+    }
+    return out;
+}
+} // anonymous namespace
 
 // Do one or more outer products (k = 1 slices) of A*B, updating C.
 //  ha and hb are the k indices within the A and B chunks, respectively.
 //  A_copy, B_copy are the indices of the A, B copies to use.
 template <HW hw>
-void Generator<hw>::outerProduct(int h, int ha, int hb, int opCount, bool rem,
+void Generator<hw>::outerProduct(int h, int ha_period, int hb_period, int opCount, bool rem,
                                  const RegisterLayout &A_layout, const RegisterLayout &B_layout,
                                  const GRFMultirange &A_regs, const GRFMultirange &B_regs,
                                  const GEMMProblem &problem, const GEMMStrategy &strategy, GEMMState &state)
 {
     if (strategy.dotVL)
-        innerProductFMA(h, ha, hb, opCount, rem, A_layout, B_layout, A_regs, B_regs, problem, strategy, state);
+        innerProductFMA(h, ha_period, hb_period, opCount, rem, A_layout, B_layout, A_regs, B_regs, problem, strategy, state);
     else if (strategy.systolic)
-        outerProductSystolic(h, ha, hb, opCount, rem, A_layout, B_layout, A_regs, B_regs, problem, strategy, state);
+        outerProductSystolic(h, ha_period, hb_period, opCount, rem, A_layout, B_layout, A_regs, B_regs, problem, strategy, state);
     else
-        outerProductFMA(h, ha, hb, opCount, rem, A_layout, B_layout, A_regs, B_regs, problem, strategy, state);
+        outerProductFMA(h, ha_period, hb_period, opCount, rem, A_layout, B_layout, A_regs, B_regs, problem, strategy, state);
 }
 
 // FMA or dp4a-based outer product implementation.
 template <HW hw>
-void Generator<hw>::outerProductFMA(int h, int ha, int hb, int opCount, bool rem, const RegisterLayout &A_layout, const RegisterLayout &B_layout,
+void Generator<hw>::outerProductFMA(int h, int ha_period, int hb_period, int opCount, bool rem, const RegisterLayout &A_layout, const RegisterLayout &B_layout,
                                     const GRFMultirange &A_regs, const GRFMultirange &B_regs,
                                     const GEMMProblem &problem, const GEMMStrategy &strategy, GEMMState &state)
 {
@@ -75,7 +85,7 @@ void Generator<hw>::outerProductFMA(int h, int ha, int hb, int opCount, bool rem
     int Cr_unrollM = state.Cr_layout.rows(), Cr_unrollN = state.Cr_layout.cols();
     int Cr_unrollX = globalCM ? Cr_unrollM : Cr_unrollN;
     if (repackC) {
-        auto rphase = align_down(h, opCount) % state.cRepackPeriod;
+        auto rphase = local_k_index(h, opCount, state.cRepackPeriod, problem);
         startRepackC = rem || (rphase == 0);
         endRepackC = rem || (rphase + opCount >= state.cRepackPeriod);
     }
@@ -125,8 +135,8 @@ void Generator<hw>::outerProductFMA(int h, int ha, int hb, int opCount, bool rem
             setDefaultAutoSWSB(true);
     };
 
-    ha = align_down(ha, opCount);
-    hb = align_down(hb, opCount);
+    int ha = local_k_index(h, opCount, ha_period, problem);
+    int hb = local_k_index(h, opCount, hb_period, problem);
 
     if (atomicFMA && hw >= HW::XeHPC) {
         // PVC onward can't use {Atomic} on float pipes.
@@ -305,7 +315,7 @@ void Generator<hw>::outerProductFMA(int h, int ha, int hb, int opCount, bool rem
 
 // FMA-based inner product (dot) implementation.
 template <HW hw>
-void Generator<hw>::innerProductFMA(int h, int ha, int hb, int opCount, bool rem, const RegisterLayout &A_layout, const RegisterLayout &B_layout,
+void Generator<hw>::innerProductFMA(int h, int ha_period, int hb_period, int opCount, bool rem, const RegisterLayout &A_layout, const RegisterLayout &B_layout,
                                     const GRFMultirange &A_regs, const GRFMultirange &B_regs,
                                     const GEMMProblem &problem, const GEMMStrategy &strategy, GEMMState &state)
 {
@@ -317,7 +327,7 @@ void Generator<hw>::innerProductFMA(int h, int ha, int hb, int opCount, bool rem
     if (repackC) {
         if (state.Cr_layout.rows() != state.C_layout.rows()) stub();
         if (state.Cr_layout.cols() != state.C_layout.cols()) stub();
-        auto rphase = align_down(h, opCount) % state.cRepackPeriod;
+        auto rphase = local_k_index(h, opCount, state.cRepackPeriod, problem);
         startRepackC = rem || (rphase == 0);
         endRepackC = rem || (rphase + opCount >= state.cRepackPeriod);
     }
@@ -327,8 +337,8 @@ void Generator<hw>::innerProductFMA(int h, int ha, int hb, int opCount, bool rem
     const auto &C_regs   = repackC ? state.Cr_regs   : state.C_regs[0];
 
     bool globalCM = C_layout.colMajor();
-    ha = align_down(ha, opCount);
-    hb = align_down(hb, opCount);
+    int ha = local_k_index(h, opCount, ha_period, problem);
+    int hb = local_k_index(h, opCount, hb_period, problem);
 
     int nx = globalCM ? strategy.unroll[LoopM] : strategy.unroll[LoopN];
     int ny = globalCM ? strategy.unroll[LoopN] : strategy.unroll[LoopM];
@@ -371,7 +381,7 @@ void Generator<hw>::innerProductFMA(int h, int ha, int hb, int opCount, bool rem
 
 // Accumulate multiple outer products using the systolic array.
 template <HW hw>
-void Generator<hw>::outerProductSystolic(int h, int ha, int hb, int opCount, bool rem,
+void Generator<hw>::outerProductSystolic(int h, int ha_period, int hb_period, int opCount, bool rem,
                                          const RegisterLayout &A_layout, const RegisterLayout &B_layout,
                                          const GRFMultirange &A_regs, const GRFMultirange &B_regs,
                                          const GEMMProblem &problem, const GEMMStrategy &strategy, GEMMState &state)
@@ -394,7 +404,7 @@ void Generator<hw>::outerProductSystolic(int h, int ha, int hb, int opCount, boo
     int Cr_unrollM = state.Cr_layout.rows(), Cr_unrollN = state.Cr_layout.cols();
     int Cr_unrollX = globalCM ? Cr_unrollM : Cr_unrollN;
     if (repackC) {
-        auto rphase = align_down(h, opCount) % state.cRepackPeriod;
+        auto rphase = local_k_index(h, opCount, state.cRepackPeriod, problem);
         startRepackC = rem || (rphase == 0);
         endRepackC = rem || (rphase + opCount >= state.cRepackPeriod);
     }
@@ -403,8 +413,8 @@ void Generator<hw>::outerProductSystolic(int h, int ha, int hb, int opCount, boo
     sumBlock.colMajor = globalCM;
     sumBlock.crosspack = 1;
 
-    ha = align_down(ha, opCount);
-    hb = align_down(hb, opCount);
+    int ha = local_k_index(h, opCount, ha_period, problem);
+    int hb = local_k_index(h, opCount, hb_period, problem);
 
     // Decide whether to loop in column or row major order, to facilitate macro sequences.
     //  x is the non-accumulating dimension of dpas src1 (V matrix)
@@ -479,13 +489,17 @@ void Generator<hw>::outerProductSystolic(int h, int ha, int hb, int opCount, boo
 
                 const int cxCompA = -1, cxCompB = -1, cxCompC = -1, cBuffer = 0;
                 auto bdpasScaleArg = [&](const RegisterLayout Xr_scaleLayout, Type Tx_scaleOp,
-                                         GRFMultirange Xr_scaleRegs, bool isA, int x, int h) {
+                                         GRFMultirange Xr_scaleRegs, bool isA, int x) {
                     RegData XS;
                     if (state.useBDPAS && !Xr_scaleLayout.empty()) {
                         if (problem.aqGroupM > 1 || problem.bqGroupN > 1) stub();
 
                         int xqGroupK = isA ? problem.aqGroupK : problem.bqGroupK;
-                        int k = h / xqGroupK;
+                        int kxq = isA ? state.kaq : state.kbq;
+                        int kxq_load = xqGroupK * kxq;
+                        int hq = local_k_index(h, opCount, kxq_load, problem);
+                        hq = (hq + hh) % kxq_load;
+                        int k = hq / xqGroupK;
 
                         int io0 = isA ? x : k;
                         int jo0 = isA ? k : x;
@@ -510,8 +524,8 @@ void Generator<hw>::outerProductSystolic(int h, int ha, int hb, int opCount, boo
                         C = state.Cr_layout.find(i % Cr_unrollM, j % Cr_unrollN, state.Cr_regs, &nc, &C_block, cxCompC);
                     else
                         C = state.C_layout.find(i, j, state.C_regs[cBuffer], &nc, &C_block, cxCompC);
-                    AS = bdpasScaleArg(state.Ar_scaleLayout, state.Ta_scaleInt, state.Ar_scaleRegs, true,  i, hha);
-                    BS = bdpasScaleArg(state.Br_scaleLayout, state.Tb_scaleInt, state.Br_scaleRegs, false, j, hhb);
+                    AS = bdpasScaleArg(state.Ar_scaleLayout, state.Ta_scaleInt, state.Ar_scaleRegs, true, i);
+                    BS = bdpasScaleArg(state.Br_scaleLayout, state.Tb_scaleInt, state.Br_scaleRegs, false, j);
                 } else if (state.systolicSumA) {
                     A = A_layout.find(x, hha, A_regs, &na, &A_block);
                     B = state.sysSumAll1s[0];
@@ -521,7 +535,7 @@ void Generator<hw>::outerProductSystolic(int h, int ha, int hb, int opCount, boo
                         C = state.Asr_layout.find(x % Cr_unrollM, 0, state.Asr_regs, &nc, &C_block);
                     else
                         C = state.As_layout.find(x, 0, state.As_regs, &nc, &C_block);
-                    AS = bdpasScaleArg(state.Ar_scaleLayout, state.Ta_scaleInt, state.Ar_scaleRegs, true, x, hha);
+                    AS = bdpasScaleArg(state.Ar_scaleLayout, state.Ta_scaleInt, state.Ar_scaleRegs, true, x);
                     BS = NullRegister().setType(Type::ngen_e8m0());
                 } else {
                     A = state.sysSumAll1s[0];
@@ -533,7 +547,7 @@ void Generator<hw>::outerProductSystolic(int h, int ha, int hb, int opCount, boo
                     else
                         C = state.Bs_layout.find(0, x, state.Bs_regs, &nc, &C_block);
                     AS = NullRegister().setType(Type::ngen_e8m0());
-                    BS = bdpasScaleArg(state.Br_scaleLayout, state.Tb_scaleInt, state.Br_scaleRegs, false, hhb, x);
+                    BS = bdpasScaleArg(state.Br_scaleLayout, state.Tb_scaleInt, state.Br_scaleRegs, false, x);
                 }
 
                 int nv = globalCM ? na : nb;
