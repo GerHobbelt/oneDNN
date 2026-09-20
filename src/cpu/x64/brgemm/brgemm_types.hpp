@@ -369,8 +369,14 @@ struct brgemm_desc_t {
     bool is_runtime_ldc = false;
     bool is_runtime_ldd = false;
 
+    // GEMV-specific parameters.
+    //
+    // GEMV kernel path is enabled.
     bool is_gemv = false;
+    // Controls whether y is treated as a row in GEMV-specific code paths.
     bool treat_y_as_row = false;
+    // Tail along the reduction dimension.
+    int gemv_tail = 0;
 
     static constexpr int MAX_VPAD = 100;
     static constexpr int AMX_TILES_NUM = 8;
