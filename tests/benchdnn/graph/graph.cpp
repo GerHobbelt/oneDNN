@@ -28,6 +28,7 @@
 #include "utils/execution_mode.hpp"
 #include "utils/parser.hpp"
 #include "utils/stream_kind.hpp"
+#include "utils/stringstream.hpp"
 
 namespace {
 
@@ -362,8 +363,9 @@ std::string case_to_str(const std::string &json_file,
         const size_t expected_n_partitions, const int64_t mb,
         const dnnl_data_type_t dt,
         const std::map<size_t, dnnl_data_type_t> &dt_map,
-        const std::map<size_t, std::string> &op_kind_map) {
-    dnnl::impl::stringstream_t s;
+        const std::map<size_t, std::string> &op_kind_map,
+        const std::map<size_t, std::string> &tensor_property) {
+    stringstream_t s;
     dump_global_params(s);
 
     if (mb != 0) { s << "--mb=" << mb << " "; }
@@ -386,6 +388,17 @@ std::string case_to_str(const std::string &json_file,
         s << "--op-kind=";
         std::string tmp;
         for (const auto &v : op_kind_map) {
+            tmp += (std::to_string(v.first) + ":" + v.second + "+");
+        }
+        // Remove dangling '+'.
+        s << tmp.substr(0, tmp.size() - 1) << " ";
+    }
+
+    if (!(tensor_property.size() == 1 && tensor_property.count(SIZE_MAX) == 1
+                && tensor_property.at(SIZE_MAX) == "default")) {
+        s << "--tensor-property=";
+        std::string tmp;
+        for (const auto &v : tensor_property) {
             tmp += (std::to_string(v.first) + ":" + v.second + "+");
         }
         // Remove dangling '+'.

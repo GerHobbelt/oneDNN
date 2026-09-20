@@ -219,7 +219,7 @@ private:
     const char *bd_mask_buffer_ptr_ = nullptr;
     std::vector<dim_t> adj_bd_mask_buffer_;
     std::vector<dim_t> skipped_bd_mask_buffer_;
-    palette_config_t palette_;
+    palette_config_t palette_ {};
     // used to store offsets within wsp buffer where the data is
     // transformed(downconverted), to reuse when needed.
     std::unordered_map<std::string, dim_t> transform_buf_map_A_;
@@ -870,6 +870,7 @@ dim_t jit_brgemm_amx_uker_base_t::per_mn_comp_offset(
         int ldb) const noexcept {
     const auto bi_bd_start = get_out_bd(bi.bdi, 0, 0);
     const auto bd = get_out_bd(bi.bdi, bdb, inp_bd);
+    assert(bd >= 0);
     const auto bd_shift = bd - (ununroll_bd_loop ? bi_bd_start : 0);
     const dim_t ldc_elem = (dim_t)ldb * brg.ld_block;
     const dim_t bloc_idx = ldc_elem / brg.LDC;
