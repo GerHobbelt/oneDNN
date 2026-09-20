@@ -124,8 +124,8 @@ void emit_binary_loop(jit_generator_t *h, alg_kind_t alg, bool scalar_src1,
     }
 
     // Turn the comparison mask in v0 into a 0.0/1.0 result in vd (in the active
-    // f32 compute vtype). v0 is free here (the fwd eltwise post-op chain that
-    // runs afterwards is mask-free), as is fa5/fa6.
+    // f32 compute vtype). The data/aux groups stay away from v0 so later
+    // post-op injectors can also use it as a mask; fa5/fa6 are free here.
     auto cmp_to_01 = [&]() {
         const FReg f_zero = fa5, f_one = fa6;
         h->fmv_w_x(f_zero, x0); // 0.0
@@ -141,8 +141,20 @@ void emit_binary_loop(jit_generator_t *h, alg_kind_t alg, bool scalar_src1,
             case binary_sub: h->vfsub_vf(vd, vd, f); break;
             case binary_mul: h->vfmul_vf(vd, vd, f); break;
             case binary_div: h->vfdiv_vf(vd, vd, f); break;
-            case binary_max: h->vfmax_vf(vd, vd, f); break;
-            case binary_min: h->vfmin_vf(vd, vd, f); break;
+            case binary_max:
+                h->vfmv_v_f(vs1, f);
+                h->vmflt_vv(VReg(0), vd, vs1);
+                h->vmerge_vvm(vd, vd, vs1);
+                h->vmfne_vv(VReg(0), vs1, vs1);
+                h->vmerge_vvm(vd, vd, vs1);
+                break;
+            case binary_min:
+                h->vfmv_v_f(vs1, f);
+                h->vmflt_vv(VReg(0), vs1, vd);
+                h->vmerge_vvm(vd, vd, vs1);
+                h->vmfne_vv(VReg(0), vs1, vs1);
+                h->vmerge_vvm(vd, vd, vs1);
+                break;
             // Comparison: dst = (dst OP src1) ? 1 : 0 (vf form has gt/ge).
             case binary_ge:
                 h->vmfge_vf(VReg(0), vd, f);
@@ -177,8 +189,18 @@ void emit_binary_loop(jit_generator_t *h, alg_kind_t alg, bool scalar_src1,
             case binary_sub: h->vfsub_vv(vd, vd, v1); break;
             case binary_mul: h->vfmul_vv(vd, vd, v1); break;
             case binary_div: h->vfdiv_vv(vd, vd, v1); break;
-            case binary_max: h->vfmax_vv(vd, vd, v1); break;
-            case binary_min: h->vfmin_vv(vd, vd, v1); break;
+            case binary_max:
+                h->vmflt_vv(VReg(0), vd, v1);
+                h->vmerge_vvm(vd, vd, v1);
+                h->vmfne_vv(VReg(0), v1, v1);
+                h->vmerge_vvm(vd, vd, v1);
+                break;
+            case binary_min:
+                h->vmflt_vv(VReg(0), v1, vd);
+                h->vmerge_vvm(vd, vd, v1);
+                h->vmfne_vv(VReg(0), v1, v1);
+                h->vmerge_vvm(vd, vd, v1);
+                break;
             // Comparison: vmfgt/vmfge have no vv form, so swap operands
             // (dst > v1 == v1 < dst, dst >= v1 == v1 <= dst).
             case binary_ge:

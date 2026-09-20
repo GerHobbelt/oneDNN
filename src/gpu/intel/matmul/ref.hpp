@@ -57,19 +57,22 @@ struct ref_t : public primitive_t {
             VDISPATCH_MATMUL(
                     is_dense_format_kind(), VERBOSE_UNSUPPORTED_SPARSE_CFG);
             VDISPATCH_MATMUL(
+                    !with_reduce(), VERBOSE_UNSUPPORTED_FEATURE, "reduce");
+            VDISPATCH_MATMUL(
                     attr()->has_default_values(smask_t::scales_data_type
                             | smask_t::scales_groups | smask_t::dropout
                             | smask_t::zero_points_data_type
                             | smask_t::zero_points_groups | smask_t::post_ops
-                            | smask_t::accumulation_mode | smask_t::fpmath_mode
-                            | smask_t::rounding_mode
+                            | smask_t::sum_dt | smask_t::accumulation_mode
+                            | smask_t::fpmath_mode | smask_t::rounding_mode
                             | smask_t::precomputed_reductions),
                     VERBOSE_UNSUPPORTED_ATTR);
             VDISPATCH_MATMUL(attr_scales_ok({DNNL_ARG_SRC, DNNL_ARG_WEIGHTS,
                                                     DNNL_ARG_DST},
                                      {quantization_mode::static_sazp,
                                              quantization_mode::dynamic_mx,
-                                             quantization_mode::dynamic_fp}),
+                                             quantization_mode::dynamic_fp},
+                                     {{DNNL_ARG_SRC, {src_qmask_M()}}}),
                     VERBOSE_UNSUPPORTED_SCALES_CFG);
             VDISPATCH_MATMUL(zero_points_ok(), VERBOSE_UNSUPPORTED_ZP_CFG);
             VDISPATCH_MATMUL(
@@ -276,11 +279,16 @@ struct ref_t : public primitive_t {
         bool dyn_scales = pd()->attr()->scales_.get(DNNL_ARG_DST).is_dynamic();
         kernel_ctx.define_int("DYN_SCALES", dyn_scales);
 
-        bool runtime_dims = pd()->has_runtime_dims_or_strides() || ndims > 5;
+        const memory_desc_wrapper src_d(pd()->src_md(0));
+        const memory_desc_wrapper wei_d(pd()->weights_md(0));
+        const memory_desc_wrapper dst_d(pd()->dst_md(0));
+        // Plain layouts use runtime strides to maximize kernel reuse; blocked
+        // layouts require compile-time offset macros.
+        const bool all_plain
+                = src_d.is_plain() && wei_d.is_plain() && dst_d.is_plain();
+        bool runtime_dims
+                = pd()->has_runtime_dims_or_strides() || ndims > 5 || all_plain;
         if (!runtime_dims) {
-            const memory_desc_wrapper src_d(pd()->src_md(0));
-            const memory_desc_wrapper wei_d(pd()->weights_md(0));
-            const memory_desc_wrapper dst_d(pd()->dst_md(0));
             offsets_t off;
             set_offsets(src_d, off.src_off);
             set_offsets(wei_d, off.wei_off);
@@ -328,6 +336,11 @@ struct ref_t : public primitive_t {
         def_data_type(kernel_ctx,
                 pd()->attr()->scales_.get_data_type(DNNL_ARG_DST),
                 "DST_SCALES");
+        def_data_type(kernel_ctx,
+                pd()->attr_info_.sum_data_type == dnnl_data_type_undef
+                        ? pd()->dst_dt_
+                        : pd()->attr_info_.sum_data_type,
+                "SUM");
         CHECK(create_kernel(engine, &kernels_[0], "ref_matmul", kernel_ctx));
         if (pd()->dynamic_scales_)
             CHECK(create_kernel(
