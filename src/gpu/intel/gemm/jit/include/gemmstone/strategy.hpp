@@ -206,7 +206,7 @@ struct GEMMStrategyPOD : public CommonStrategy {
     MatrixAddressingStrategy AO, BO, CO;         // Strategies for accessing A/B/C offsets.
     MatrixAddressingStrategy A_scale, B_scale;   // Strategies for accessing A/B scales.
     MatrixAddressingStrategy Ag, Bg;             // Strategies for accessing A/B groupwise reductions.
-    int ka_load, kb_load;                        // How much of A/B is loaded at once, in k dimension
+    int ka_load = 0, kb_load = 0;                // How much of A/B is loaded at once, in k dimension
     int ka_load_masked = 0, kb_load_masked = 0;  // Same as above, when masking m/n (0 = default = same as ka/kb_load)
     bool loadBFirst = false;                     // If true, load B before A (default A then B).
     bool doubleMasking = false;                  // Allow A/B to be masked in both dimensions.
@@ -232,7 +232,8 @@ struct GEMMStrategyPOD : public CommonStrategy {
     int ka_prefetch = 0, kb_prefetch = 0;        // Chunk size for prefetching A/B.
     int ka_pfStride = 0, kb_pfStride = 0;        // k stride between A/B prefetches.
     bool cooperativePF = true;                   // Enable WG-cooperative A/B prefetches.
-                                    ZPAD(H, 3)
+    bool pfaux = false;                          // Auxiliary (quant scale/offset/group-sum) prefetches alongside A/B; off by default (register pressure).
+                                    ZPAD(H, 2)
     int prefetchA = 0, prefetchB = 0, prefetchC = 0;                // Prefetch distances, in units of unrollK.
     int prefetchAMasked = 0, prefetchBMasked = 0;                   // Same as above, when masking m/n.
     MatrixAddressingStrategy A_prefetch, B_prefetch, C_prefetch;    // Strategies for prefetching A/B/C.
@@ -333,6 +334,8 @@ struct GEMMStrategy : public GEMMStrategyPOD
     bool minimize(ngen::HW hw, const GEMMProblem &problem);
 
     void trimKChain(ngen::HW hw, int k, const GEMMProblem &problem);
+
+    void disableAtomics()                                   { C.atomic = CO.atomic = autoatomic = false; }
 
     int wgTile(LoopType l)                            const { return unroll[l] * wg[l]; }
     int cInterleaveChunk(Type Tc_ext)                 const { return cInterleave ? 64 / Tc_ext : 1; }
