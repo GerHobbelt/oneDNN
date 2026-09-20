@@ -60,7 +60,9 @@ inline status_t init_tag(format_tag_t &tag, memory_desc_t &md,
 }
 
 bool is_amx(cpu_isa_t isa) {
-    return is_superset(isa, avx512_core_amx);
+    // See the note on the forward is_amx(): this asks whether accumulators
+    // live in tile registers, which is true for ACE as well as for TMUL.
+    return isa_has_tile_accumulators(isa);
 }
 
 bool post_ops_ok(jit_brgemm_conv_conf_t &jcp, primitive_attr_t &attr,
@@ -113,16 +115,22 @@ status_t pick_tags(jit_brgemm_conv_conf_t &jcp, memory_desc_t &diff_dst_md,
         const bool no_vnni_format = jcp.wei_dt == f32
                 || (jcp.wei_dt == f16 && jcp.isa == avx512_core_fp16)
                 || jcp.is_f32_bf16 || jcp.is_f32_f16;
+        const bool req_emulation = jcp.isa == avx10_2 && jcp.is_fp8;
+        const auto vnni_block_dt
+                = get_mac_emu_data_type(jcp.wei_dt, jcp.isa, req_emulation);
+        const auto vnni_block = data_type_vnni_granularity(vnni_block_dt);
+        constexpr int vnni_block_8bit = 4; // s8, u8, fp8: 4 elements per dword
+        constexpr int vnni_block_16bit = 2; // bf16, f16: 2 elements per dword
         if (jcp.ic_block == 64) {
             if (is_3d) {
                 if (no_vnni_format)
                     wei_tag = with_groups ? gIdhwo64i : Idhwo64i;
-                else if (one_of(jcp.wei_dt, s8, f8_e5m2, f8_e4m3)) {
+                else if (vnni_block == vnni_block_8bit) {
                     if (jcp.is_oc_padded)
                         wei_tag = with_groups ? gIdhwO16o64i4o : IdhwO16o64i4o;
                     else
                         wei_tag = with_groups ? gIdhwO64i4o : IdhwO64i4o;
-                } else if (one_of(jcp.wei_dt, bf16, f16)) {
+                } else if (vnni_block == vnni_block_16bit) {
                     if (jcp.is_oc_padded)
                         wei_tag = with_groups ? gIdhwO16o64i2o : IdhwO16o64i2o;
                     else
@@ -132,12 +140,12 @@ status_t pick_tags(jit_brgemm_conv_conf_t &jcp, memory_desc_t &diff_dst_md,
             } else if (is_1d) {
                 if (no_vnni_format)
                     wei_tag = with_groups ? gIwo64i : Iwo64i;
-                else if (one_of(jcp.wei_dt, s8, f8_e5m2, f8_e4m3)) {
+                else if (vnni_block == vnni_block_8bit) {
                     if (jcp.is_oc_padded)
                         wei_tag = with_groups ? gIwO16o64i4o : IwO16o64i4o;
                     else
                         wei_tag = with_groups ? gIwO64i4o : IwO64i4o;
-                } else if (one_of(jcp.wei_dt, bf16, f16)) {
+                } else if (vnni_block == vnni_block_16bit) {
                     if (jcp.is_oc_padded)
                         wei_tag = with_groups ? gIwO16o64i2o : IwO16o64i2o;
                     else
@@ -149,12 +157,12 @@ status_t pick_tags(jit_brgemm_conv_conf_t &jcp, memory_desc_t &diff_dst_md,
                 UNUSED(is_2d);
                 if (no_vnni_format)
                     wei_tag = with_groups ? gIhwo64i : Ihwo64i;
-                else if (one_of(jcp.wei_dt, s8, f8_e5m2, f8_e4m3)) {
+                else if (vnni_block == vnni_block_8bit) {
                     if (jcp.is_oc_padded)
                         wei_tag = with_groups ? gIhwO16o64i4o : IhwO16o64i4o;
                     else
                         wei_tag = with_groups ? gIhwO64i4o : IhwO64i4o;
-                } else if (one_of(jcp.wei_dt, bf16, f16)) {
+                } else if (vnni_block == vnni_block_16bit) {
                     if (jcp.is_oc_padded)
                         wei_tag = with_groups ? gIhwO16o64i2o : IhwO16o64i2o;
                     else
@@ -166,12 +174,12 @@ status_t pick_tags(jit_brgemm_conv_conf_t &jcp, memory_desc_t &diff_dst_md,
             if (is_3d) {
                 if (no_vnni_format)
                     wei_tag = with_groups ? gIdhwo48i : Idhwo48i;
-                else if (one_of(jcp.wei_dt, s8, f8_e5m2, f8_e4m3)) {
+                else if (vnni_block == vnni_block_8bit) {
                     if (jcp.is_oc_padded)
                         wei_tag = with_groups ? gIdhwO16o48i4o : IdhwO16o48i4o;
                     else
                         wei_tag = with_groups ? gIdhwO48i4o : IdhwO48i4o;
-                } else if (one_of(jcp.wei_dt, bf16, f16)) {
+                } else if (vnni_block == vnni_block_16bit) {
                     if (jcp.is_oc_padded)
                         wei_tag = with_groups ? gIdhwO16o48i2o : IdhwO16o48i2o;
                     else
@@ -181,12 +189,12 @@ status_t pick_tags(jit_brgemm_conv_conf_t &jcp, memory_desc_t &diff_dst_md,
             } else if (is_1d) {
                 if (no_vnni_format)
                     wei_tag = with_groups ? gIwo48i : Iwo48i;
-                else if (one_of(jcp.wei_dt, s8, f8_e5m2, f8_e4m3)) {
+                else if (vnni_block == vnni_block_8bit) {
                     if (jcp.is_oc_padded)
                         wei_tag = with_groups ? gIwO16o48i4o : IwO16o48i4o;
                     else
                         wei_tag = with_groups ? gIwO48i4o : IwO48i4o;
-                } else if (one_of(jcp.wei_dt, bf16, f16)) {
+                } else if (vnni_block == vnni_block_16bit) {
                     if (jcp.is_oc_padded)
                         wei_tag = with_groups ? gIwO16o48i2o : IwO16o48i2o;
                     else
@@ -198,12 +206,12 @@ status_t pick_tags(jit_brgemm_conv_conf_t &jcp, memory_desc_t &diff_dst_md,
                 UNUSED(is_2d);
                 if (no_vnni_format)
                     wei_tag = with_groups ? gIhwo48i : Ihwo48i;
-                else if (one_of(jcp.wei_dt, s8, f8_e5m2, f8_e4m3)) {
+                else if (vnni_block == vnni_block_8bit) {
                     if (jcp.is_oc_padded)
                         wei_tag = with_groups ? gIhwO16o48i4o : IhwO16o48i4o;
                     else
                         wei_tag = with_groups ? gIhwO48i4o : IhwO48i4o;
-                } else if (one_of(jcp.wei_dt, bf16, f16)) {
+                } else if (vnni_block == vnni_block_16bit) {
                     if (jcp.is_oc_padded)
                         wei_tag = with_groups ? gIhwO16o48i2o : IhwO16o48i2o;
                     else
@@ -215,12 +223,12 @@ status_t pick_tags(jit_brgemm_conv_conf_t &jcp, memory_desc_t &diff_dst_md,
             if (is_3d) {
                 if (no_vnni_format)
                     wei_tag = with_groups ? gIdhwo32i : Idhwo32i;
-                else if (one_of(jcp.wei_dt, s8, f8_e5m2, f8_e4m3)) {
+                else if (vnni_block == vnni_block_8bit) {
                     if (jcp.is_oc_padded)
                         wei_tag = with_groups ? gIdhwO16o32i4o : IdhwO16o32i4o;
                     else
                         wei_tag = with_groups ? gIdhwO32i4o : IdhwO32i4o;
-                } else if (one_of(jcp.wei_dt, bf16, f16)) {
+                } else if (vnni_block == vnni_block_16bit) {
                     if (jcp.is_oc_padded)
                         wei_tag = with_groups ? gIdhwO16o32i2o : IdhwO16o32i2o;
                     else
@@ -230,12 +238,12 @@ status_t pick_tags(jit_brgemm_conv_conf_t &jcp, memory_desc_t &diff_dst_md,
             } else if (is_1d) {
                 if (no_vnni_format)
                     wei_tag = with_groups ? gIwo32i : Iwo32i;
-                else if (one_of(jcp.wei_dt, s8, f8_e5m2, f8_e4m3)) {
+                else if (vnni_block == vnni_block_8bit) {
                     if (jcp.is_oc_padded)
                         wei_tag = with_groups ? gIwO16o32i4o : IwO16o32i4o;
                     else
                         wei_tag = with_groups ? gIwO32i4o : IwO32i4o;
-                } else if (one_of(jcp.wei_dt, bf16, f16)) {
+                } else if (vnni_block == vnni_block_16bit) {
                     if (jcp.is_oc_padded)
                         wei_tag = with_groups ? gIwO16o32i2o : IwO16o32i2o;
                     else
@@ -247,12 +255,12 @@ status_t pick_tags(jit_brgemm_conv_conf_t &jcp, memory_desc_t &diff_dst_md,
                 UNUSED(is_2d);
                 if (no_vnni_format)
                     wei_tag = with_groups ? gIhwo32i : Ihwo32i;
-                else if (one_of(jcp.wei_dt, s8, f8_e5m2, f8_e4m3)) {
+                else if (vnni_block == vnni_block_8bit) {
                     if (jcp.is_oc_padded)
                         wei_tag = with_groups ? gIhwO16o32i4o : IhwO16o32i4o;
                     else
                         wei_tag = with_groups ? gIhwO32i4o : IhwO32i4o;
-                } else if (one_of(jcp.wei_dt, bf16, f16)) {
+                } else if (vnni_block == vnni_block_16bit) {
                     if (jcp.is_oc_padded)
                         wei_tag = with_groups ? gIhwO16o32i2o : IhwO16o32i2o;
                     else
@@ -264,18 +272,18 @@ status_t pick_tags(jit_brgemm_conv_conf_t &jcp, memory_desc_t &diff_dst_md,
             if (is_3d) {
                 if (no_vnni_format)
                     wei_tag = with_groups ? gIdhwo24i : Idhwo24i;
-                else if (one_of(jcp.wei_dt, s8, f8_e5m2, f8_e4m3))
+                else if (vnni_block == vnni_block_8bit)
                     wei_tag = with_groups ? gIdhwO24i4o : IdhwO24i4o;
-                else if (one_of(jcp.wei_dt, bf16, f16))
+                else if (vnni_block == vnni_block_16bit)
                     wei_tag = with_groups ? gIdhwO24i2o : IdhwO24i2o;
                 else
                     return status::unimplemented;
             } else if (is_1d) {
                 if (no_vnni_format)
                     wei_tag = with_groups ? gIwo24i : Iwo24i;
-                else if (one_of(jcp.wei_dt, s8, f8_e5m2, f8_e4m3))
+                else if (vnni_block == vnni_block_8bit)
                     wei_tag = with_groups ? gIwO24i4o : IwO24i4o;
-                else if (one_of(jcp.wei_dt, bf16, f16))
+                else if (vnni_block == vnni_block_16bit)
                     wei_tag = with_groups ? gIwO24i2o : IwO24i2o;
                 else
                     return status::unimplemented;
@@ -285,9 +293,9 @@ status_t pick_tags(jit_brgemm_conv_conf_t &jcp, memory_desc_t &diff_dst_md,
 
                 if (no_vnni_format)
                     wei_tag = with_groups ? gIhwo24i : Ihwo24i;
-                else if (one_of(jcp.wei_dt, s8, f8_e5m2, f8_e4m3))
+                else if (vnni_block == vnni_block_8bit)
                     wei_tag = with_groups ? gIhwO24i4o : IhwO24i4o;
-                else if (one_of(jcp.wei_dt, bf16, f16))
+                else if (vnni_block == vnni_block_16bit)
                     wei_tag = with_groups ? gIhwO24i2o : IhwO24i2o;
                 else
                     return status::unimplemented;
@@ -296,12 +304,12 @@ status_t pick_tags(jit_brgemm_conv_conf_t &jcp, memory_desc_t &diff_dst_md,
             if (is_3d) {
                 if (no_vnni_format)
                     wei_tag = with_groups ? gIdhwo16i : Idhwo16i;
-                else if (one_of(jcp.wei_dt, s8, f8_e5m2, f8_e4m3)) {
+                else if (vnni_block == vnni_block_8bit) {
                     if (jcp.is_oc_padded)
                         wei_tag = with_groups ? gIdhwO16o16i4o : IdhwO16o16i4o;
                     else
                         wei_tag = with_groups ? gIdhwO16i4o : IdhwO16i4o;
-                } else if (one_of(jcp.wei_dt, bf16, f16)) {
+                } else if (vnni_block == vnni_block_16bit) {
                     if (jcp.is_oc_padded)
                         wei_tag = with_groups ? gIdhwO16o16i2o : IdhwO16o16i2o;
                     else
@@ -311,12 +319,12 @@ status_t pick_tags(jit_brgemm_conv_conf_t &jcp, memory_desc_t &diff_dst_md,
             } else if (is_1d) {
                 if (no_vnni_format)
                     wei_tag = with_groups ? gIwo16i : Iwo16i;
-                else if (one_of(jcp.wei_dt, s8, f8_e5m2, f8_e4m3)) {
+                else if (vnni_block == vnni_block_8bit) {
                     if (jcp.is_oc_padded)
                         wei_tag = with_groups ? gIwO16o16i4o : IwO16o16i4o;
                     else
                         wei_tag = with_groups ? gIwO16i4o : IwO16i4o;
-                } else if (one_of(jcp.wei_dt, bf16, f16)) {
+                } else if (vnni_block == vnni_block_16bit) {
                     if (jcp.is_oc_padded)
                         wei_tag = with_groups ? gIwO16o16i2o : IwO16o16i2o;
                     else
@@ -329,12 +337,12 @@ status_t pick_tags(jit_brgemm_conv_conf_t &jcp, memory_desc_t &diff_dst_md,
 
                 if (no_vnni_format)
                     wei_tag = with_groups ? gIhwo16i : Ihwo16i;
-                else if (one_of(jcp.wei_dt, s8, f8_e5m2, f8_e4m3)) {
+                else if (vnni_block == vnni_block_8bit) {
                     if (jcp.is_oc_padded)
                         wei_tag = with_groups ? gIhwO16o16i4o : IhwO16o16i4o;
                     else
                         wei_tag = with_groups ? gIhwO16i4o : IhwO16i4o;
-                } else if (one_of(jcp.wei_dt, bf16, f16)) {
+                } else if (vnni_block == vnni_block_16bit) {
                     if (jcp.is_oc_padded)
                         wei_tag = with_groups ? gIhwO16o16i2o : IhwO16o16i2o;
                     else
@@ -346,18 +354,18 @@ status_t pick_tags(jit_brgemm_conv_conf_t &jcp, memory_desc_t &diff_dst_md,
             if (is_3d) {
                 if (no_vnni_format)
                     wei_tag = with_groups ? gIdhwo8i : Idhwo8i;
-                else if (one_of(jcp.wei_dt, s8, f8_e5m2, f8_e4m3))
+                else if (vnni_block == vnni_block_8bit)
                     wei_tag = with_groups ? gIdhwO8i4o : IdhwO8i4o;
-                else if (one_of(jcp.wei_dt, bf16, f16))
+                else if (vnni_block == vnni_block_16bit)
                     wei_tag = with_groups ? gIdhwO8i2o : IdhwO8i2o;
                 else
                     return status::unimplemented;
             } else if (is_1d) {
                 if (no_vnni_format)
                     wei_tag = with_groups ? gIwo8i : Iwo8i;
-                else if (one_of(jcp.wei_dt, s8, f8_e5m2, f8_e4m3))
+                else if (vnni_block == vnni_block_8bit)
                     wei_tag = with_groups ? gIwO8i4o : IwO8i4o;
-                else if (one_of(jcp.wei_dt, bf16, f16))
+                else if (vnni_block == vnni_block_16bit)
                     wei_tag = with_groups ? gIwO8i2o : IwO8i2o;
                 else
                     return status::unimplemented;
@@ -367,9 +375,9 @@ status_t pick_tags(jit_brgemm_conv_conf_t &jcp, memory_desc_t &diff_dst_md,
 
                 if (no_vnni_format)
                     wei_tag = with_groups ? gIhwo8i : Ihwo8i;
-                else if (one_of(jcp.wei_dt, s8, f8_e5m2, f8_e4m3))
+                else if (vnni_block == vnni_block_8bit)
                     wei_tag = with_groups ? gIhwO8i4o : IhwO8i4o;
-                else if (one_of(jcp.wei_dt, bf16, f16))
+                else if (vnni_block == vnni_block_16bit)
                     wei_tag = with_groups ? gIhwO8i2o : IhwO8i2o;
                 else
                     return status::unimplemented;
@@ -407,10 +415,7 @@ struct brg_blocking_t : public jit_brgemm_conv_conf_t {
     };
 
     brg_blocking_t() {
-        // TODO: This is a broken form of initialization for a base class.
-        // Either set default values in a base class, or provide a proper
-        // default ctor, or take a `jit_brgemm_conv_conf_t` object to initialize
-        // a base class object.
+        // TODO: base-class init is wrong here; use default values or a real ctor.
         jit_brgemm_conv_conf_t *base
                 = static_cast<jit_brgemm_conv_conf_t *>(this);
         *base = jit_brgemm_conv_conf_t();
@@ -593,6 +598,13 @@ status_t brg_blocking_t::estimate_brgemm_ur() {
     CHECK(brgemm_utils::init_brgemm_conf(&brg, isa, brgemm_addr, src_dt, wei_dt,
             brgemm_row_major, alpha, beta, LDA, LDB, LDC, vM, vN, vK, nullptr,
             is_bf32));
+    // Blocking dispatches on use_ace, so the attribute has to reach the
+    // descriptor before brgemm_blocking(), otherwise this simulation would
+    // estimate VMM/TMUL blocks for an ACE kernel.
+    brgemm_attr_t brgattr;
+    brgattr.use_ace = is_ace;
+    brgattr.use_uker = use_uker;
+    CHECK(brgemm_desc_set_attr(&brg, brgattr));
     CHECK(brgemm_utils::brgemm_blocking(&brg));
     // AMX kernel may fall back to VMM, in which case bd_block2 == 0
     ur = brg.bd_block * nstl::max<dim_t>(1, brg.bd_block2);
@@ -603,6 +615,7 @@ status_t brg_blocking_t::estimate_brgemm_ur() {
         CHECK(brgemm_utils::init_brgemm_conf(&brg_sp_tail, isa, brgemm_addr,
                 src_dt, wei_dt, brgemm_row_major, alpha, beta, LDA, LDB, LDC,
                 M_tail, vN, vK, nullptr, is_bf32));
+        CHECK(brgemm_desc_set_attr(&brg_sp_tail, brgattr));
         CHECK(brgemm_utils::brgemm_blocking(&brg_sp_tail));
         ur_block_tail = brg_sp_tail.bd_block;
     } else {
@@ -650,9 +663,15 @@ status_t brg_blocking_t::get_brgemm_ur(
                     CHECK(brgemm_utils::init_brgemm_conf(&brg, isa, brg_type,
                             src_dt, wei_dt, brgemm_row_major, alpha, vbeta, LDA,
                             LDB, LDC, vM, vN, vK, strides_ptr, is_bf32));
-                    CHECK(brgemm_utils::brgemm_blocking(&brg));
 
                     brgemm_attr_t brgattr;
+                    // Blocking dispatches on use_ace, so this pair has to be
+                    // applied before brgemm_blocking() rather than after it.
+                    brgattr.use_ace = is_ace;
+                    brgattr.use_uker = use_uker;
+                    CHECK(brgemm_desc_set_attr(&brg, brgattr));
+                    CHECK(brgemm_utils::brgemm_blocking(&brg));
+
                     brgattr.max_bs = max_batch;
                     const int max_vpad = (exec_type == exec_vpad)
                             ? static_cast<int>(nstl::max(l_pad, r_pad))
@@ -1546,15 +1565,22 @@ status_t init_jcp(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
             = everyone_is(f32, jcp.src_dt, jcp.dst_dt) && jcp.wei_dt == bf16;
     jcp.is_f32_f16
             = everyone_is(f32, jcp.src_dt, jcp.dst_dt) && jcp.wei_dt == f16;
+    jcp.is_fp8 = one_of(jcp.src_dt, f8_e5m2, f8_e4m3)
+            && one_of(jcp.wei_dt, f8_e4m3, f8_e5m2);
+    jcp.req_fp8_convert_wsp = jcp.is_fp8 && isa == avx10_2;
 
     VDISPATCH_CONV_IC(!jcp.is_bf32, VERBOSE_UNSUPPORTED_DT);
 
     const auto wei_dt
             = jcp.is_f32_f16 || jcp.is_f32_bf16 ? jcp.src_dt : jcp.wei_dt;
+    const bool req_emulation = one_of(isa, avx512_core_fp16, avx10_2);
     const data_type_t last_oc_block_dt
-            = get_mac_emu_data_type(wei_dt, isa, isa == avx512_core_fp16);
+            = get_mac_emu_data_type(wei_dt, isa, req_emulation);
     jcp.vnni_block
             = static_cast<int>(data_type_vnni_granularity(last_oc_block_dt));
+
+    jcp.is_ace = is_superset(isa, avx10_2_ace)
+            && brgemm_utils::ace_dt_ok(jcp.src_dt, jcp.wei_dt);
 
     // TODO: optimize grouped convolutions with small oc
     const bool is_grouped_small_oc
@@ -1715,8 +1741,15 @@ status_t init_jcp(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
     jcp.use_M_mask = 0;
     jcp.is_is_blocking = false;
     jcp.oskip = 0;
-    jcp.use_uker = is_amx(isa) && !jcp.is_1x1;
-    jcp.use_interleave_stores = jcp.use_uker;
+    if (jcp.is_ace) {
+        jcp.use_uker = brgemm_utils::ace_prefer_uker();
+        // The unrolled kernel already disables interleaved stores on ACE,
+        // setting it here keeps the blocking search on the same value.
+        jcp.use_interleave_stores = false;
+    } else {
+        jcp.use_uker = is_amx(isa) && !jcp.is_1x1;
+        jcp.use_interleave_stores = jcp.use_uker;
+    }
     jcp.hint_prefetching = brgemm_kernel_prefetching_t::brgemm_prf_default;
     jcp.brgemm_bd_loop_innermost = false;
 
@@ -2149,6 +2182,10 @@ status_t init_conf(jit_brgemm_conv_conf_t &jcp, cpu_isa_t isa,
         jcp.s8s8_comp_buffer_size = jcp.comp_a_buffer_size;
     }
 
+    jcp.fp8_convert_wsp_size = static_cast<dim_t>(sizeof(float16_t))
+            * isa_max_vlen(jcp.isa)
+            * nstl::max(
+                    static_cast<dim_t>(isa_num_vregs(jcp.isa)), jcp.iw_block);
     return status::success;
 }
 
@@ -2196,6 +2233,12 @@ void init_scratchpad(memory_tracking::registrar_t &scratchpad,
         // See brgemm_types.hpp comment for `with_dst_scales`.
         scratchpad.book(key_conv_dst_scales,
                 static_cast<size_t>(jcp.nthr) * sizeof(float), P4K);
+    }
+
+    if (jcp.req_fp8_convert_wsp) {
+        scratchpad.book(key_brgemm_primitive_fp8_convert_wsp,
+                static_cast<size_t>(jcp.nthr) * jcp.fp8_convert_wsp_size,
+                sizeof(float16_t), 0, P4K);
     }
 }
 

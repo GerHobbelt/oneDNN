@@ -80,6 +80,14 @@ static Xbyak_riscv::LMUL pool_lmul_to_enum(int lmul) {
     }
 }
 
+// The strategies the pool kernels can position themselves (the injector runs
+// in host-positioned byte-offset mode): scalar / per-oc(-spatial) / full-dst.
+static bcast_set_t get_supported_postops_bcast_strategies() {
+    return {broadcasting_strategy_t::scalar, broadcasting_strategy_t::per_oc,
+            broadcasting_strategy_t::per_oc_spatial,
+            broadcasting_strategy_t::no_broadcast};
+}
+
 // Fill the shape/stride/kernel/padding fields shared verbatim by all three
 // init_conf paths (baked, native forward, native backward). Channel bookkeeping
 // (c / c_block / c_without_padding) differs per path and stays with the caller.
@@ -186,22 +194,28 @@ bool jit_uni_pool_kernel_t<isa>::post_ops_ok(jit_pool_conf_t &jpp,
 
     if (jpp.is_backward) return post_ops.len() == 0;
 
-    // Accept an injector-supported chain: any number of forward eltwise ops plus
-    // any number of binaries. Binaries fuse at f32 (for f16 the accumulator is
-    // already widened to f32 at the inject point, and the rhs is loaded as f32).
-    // The rv64 injector positions every binary in a chain at ONE shared byte
-    // offset, so all binaries must share the same broadcast category (scalar /
-    // per-oc / full-dst); a mixed chain would need per-entry offsets and is left
-    // to the reference. src1 must be f32.
+    // Injector-level acceptance (x64 pattern): any number of forward eltwise
+    // ops plus any number of binaries, no sum; the kernels supply 4 eltwise
+    // aux groups.
+    if (!injector::post_ops_ok(injector::post_ops_ok_args_t(isa,
+                {injector::eltwise, injector::binary}, post_ops, &dst_d,
+                false /*sum_at_pos_0_only*/, false /*sum_requires_scale_one*/,
+                true /*sum_requires_zp_zero*/,
+                true /*sum_requires_same_params*/,
+                get_supported_postops_bcast_strategies(), /*n_vaux=*/4)))
+        return false;
+
+    // Pool-specific residue. Binaries fuse at f32 (for f16 the accumulator is
+    // already widened to f32 at the inject point, and the rhs is loaded as
+    // f32 -- no narrow staging group is reserved). The kernels position every
+    // binary in a chain at ONE shared byte offset, so all binaries must share
+    // the same broadcast category (scalar / per-oc / full-dst); a mixed chain
+    // would need per-entry offsets and is left to the reference.
     pool_binary_bcast_t bcast = pool_binary_bcast_t::none;
     for (const auto &e : post_ops.entry_) {
         if (e.is_eltwise()) {
-            if (!eltwise_injector::is_alg_supported(e.eltwise.alg)
-                    && !eltwise_injector::needs_extra_aux(e.eltwise.alg))
-                return false;
             jpp.with_eltwise = true;
         } else if (e.is_binary()) {
-            if (!binary_injector::is_alg_supported(e.binary.alg)) return false;
             if (e.binary.src1_desc.data_type != data_type::f32) return false;
             const memory_desc_wrapper s1(e.binary.src1_desc);
             const pool_binary_bcast_t k = classify_binary_src1(s1, dst_d);
@@ -274,8 +288,18 @@ status_t jit_uni_pool_kernel_t<isa>::init_conf(jit_pool_conf_t &jpp,
     jpp.src_dt = ppd->is_fwd() ? src_d.data_type() : dst_d.data_type();
     jpp.dst_dt = ppd->is_fwd() ? dst_d.data_type() : src_d.data_type();
     jpp.is_f16 = (src_d.data_type() == data_type::f16);
+    jpp.is_bf16 = (src_d.data_type() == data_type::bf16);
     jpp.dt_size = types::data_type_size(src_d.data_type());
     jpp.isa = isa;
+
+    // This kernel accumulates diff_src in memory: one load-modify-store per
+    // covering output window, so the running sum is rounded to the storage
+    // dtype at every window. With bf16's 8-bit significand that drifts by 1 ulp
+    // from the f32-accumulated reference, which pooling's exact-match check
+    // rejects (seen on 3D blocked shapes, where the depth window forces one
+    // round-trip per kd). Decline; the plain layouts already take the native
+    // gather kernel, which keeps one f32 accumulator per input and stores once.
+    if (jpp.is_bf16 && jpp.is_backward) return status::unimplemented;
 
     // Blocked with padded channels (is_c_padded) is left to the reference: the
     // RVV tail is a vl reduction, which cleanly covers nspc but not the padded
@@ -327,7 +351,7 @@ status_t jit_uni_pool_kernel_t<isa>::init_conf(jit_pool_conf_t &jpp,
     // Widen the channel vector for f32 nspc forward inference to amortise the
     // per-channel-block call count, the cost that made the plain baked kernel
     // slower than the native full-C kernel.
-    if (jpp.tag_kind == jit_pool_tag_kind_t::nspc && !jpp.is_f16
+    if (jpp.tag_kind == jit_pool_tag_kind_t::nspc && !jpp.is_f16 && !jpp.is_bf16
             && !jpp.is_backward && !jpp.is_training && !jpp.with_postops) {
         const int base = (int)(vlen / 32);
         int lmul = (base > 0) ? 16 / base : 1;
@@ -410,12 +434,16 @@ void jit_uni_pool_kernel_t<isa>::set_vl_e32() {
 template <cpu_isa_t isa>
 void jit_uni_pool_kernel_t<isa>::load(int idx, const Reg &reg_ptr, int offset) {
     addr_off(t1, reg_ptr, offset);
-    if (jpp.is_f16) {
-        // vfwcvt.f.f.v takes the NARROW (source) vtype: run it under e16/mf2 so
-        // it widens f16->f32 (dest e32/m1), not f32->f64. Restore e32 after.
+    if (jpp.is_f16 || jpp.is_bf16) {
+        // The widening convert takes the NARROW (source) vtype: run it under
+        // e16/mf2 so it widens xf16->f32 (dest e32/m1), not f32->f64. Restore
+        // e32 after. bf16 uses the Zvfbfmin convert, f16 the Zvfh one.
         vsetvli(t0, reg_vl, SEW::e16, LMUL::mf2, VTA::ta, VMA::ma);
         vle16_v(v_tmp, t1);
-        vfwcvt_f_f_v(vreg(idx), v_tmp);
+        if (jpp.is_bf16)
+            vfwcvtbf16_f_f_v(vreg(idx), v_tmp);
+        else
+            vfwcvt_f_f_v(vreg(idx), v_tmp);
         set_vl_e32();
     } else {
         vle32_v(vreg(idx), t1);
@@ -426,9 +454,12 @@ template <cpu_isa_t isa>
 void jit_uni_pool_kernel_t<isa>::store(
         int idx, const Reg &reg_ptr, int offset) {
     addr_off(t1, reg_ptr, offset);
-    if (jpp.is_f16) {
+    if (jpp.is_f16 || jpp.is_bf16) {
         vsetvli(t0, reg_vl, SEW::e16, LMUL::mf2, VTA::ta, VMA::ma);
-        vfncvt_f_f_w(v_tmp, vreg(idx));
+        if (jpp.is_bf16)
+            vfncvtbf16_f_f_w(v_tmp, vreg(idx));
+        else
+            vfncvt_f_f_w(v_tmp, vreg(idx));
         vse16_v(v_tmp, t1);
         set_vl_e32();
     } else {
@@ -580,10 +611,12 @@ void jit_uni_pool_kernel_t<isa>::max_step_fwd(int ur_w, int pad_l, int pad_r) {
             = (jpp.tag_kind == jit_pool_tag_kind_t::nspc) ? jpp.c : jpp.c_block;
     const int dt = jpp.dt_size;
 
-    // Init accumulators to the dtype lowest (f16 lowest for f16 so an all-pad
-    // window narrows exactly); zero the index accumulators for training.
-    const float init_val
-            = jpp.is_f16 ? -65504.0f : nstl::numeric_limits<float>::lowest();
+    // Init accumulators to the dtype lowest (the xf16 lowest for f16/bf16 so an
+    // all-pad window narrows exactly); zero the index accumulators for training.
+    const float init_val = jpp.is_f16
+            ? -65504.0f
+            : (jpp.is_bf16 ? (float)nstl::numeric_limits<bfloat16_t>::lowest()
+                           : nstl::numeric_limits<float>::lowest());
     load_f32_const(f_tmp, init_val, t2);
     for (int jj = 0; jj < ur_w; jj++) {
         vfmv_v_f(vreg(reg_ind(0, jj, ur_w)), f_tmp);
@@ -735,7 +768,7 @@ void jit_uni_pool_kernel_t<isa>::zero_diff_src() {
     const Reg aux_ptr = t3;
     const Reg aux_ih = t4;
 
-    vmv_v_x(v_tmp, x0); // zero vector (f32) / f16 store narrows zero anyway
+    vmv_v_x(v_tmp, x0); // zero vector (f32); an xf16 store narrows zero anyway
 
     ld(reg_zero_ptr, reg_param, GET_OFF(zero_ptr));
     ld(reg_zero_id, reg_param, GET_OFF(zero_id));
@@ -751,7 +784,7 @@ void jit_uni_pool_kernel_t<isa>::zero_diff_src() {
     // C apart and each stores c_block (=vl) channels; for blocked c_off==c_block
     // (contiguous). Either way this zeroes iw columns * c_block channels.
     for (int i = 0; i < width; i += c_off) {
-        if (jpp.is_f16) {
+        if (jpp.is_f16 || jpp.is_bf16) {
             vsetvli(t0, reg_vl, SEW::e16, LMUL::mf2, VTA::ta, VMA::ma);
             vmv_v_x(v_tmp, x0);
             addr_off(t1, aux_ptr, dt * i);
@@ -807,11 +840,11 @@ void jit_uni_pool_kernel_t<isa>::apply_postops(int ur_w, int c_off) {
             addr_off(t2, t5, jj * c_off); // element index of output column jj
             slli(t2, t2, 2); // * sizeof(f32)
         }
-        // dynamic-params: t2 is the (byte) rhs offset for this column, exactly
-        // what the legacy static path read from bsp.off.
+        // dynamic-params: t2 is the (byte) rhs offset for this column. The
+        // baked kernel computes at e32/m1 (group_stride 1).
         binary_injector::rhs_arg_dynamic_params_t rd;
-        rd.vmm_idx_to_out_off[acc] = t2;
-        postops_injector_->compute_vector(acc, rd);
+        rd.vmm_idx_to_out_reg.emplace(acc, t2);
+        postops_injector_->compute_vector(acc, rd, 1 /*group_stride*/);
     }
 }
 
@@ -842,8 +875,6 @@ void jit_uni_pool_kernel_t<isa>::generate() {
     ld(reg_k_shift, reg_param, GET_OFF(kh_padding_shift));
     flw(f_area, reg_param, GET_OFF(ker_area_h));
     ld(reg_bc, reg_param, GET_OFF(b_c));
-    if (jpp.with_binary)
-        ld(reg_rhs, reg_param, GET_OFF(post_ops_binary_rhs_arg_vec));
 
     // Channel AVL for this block: c_block, or c_tail for the nspc last block.
     li(reg_vl, jpp.c_block);
@@ -866,12 +897,22 @@ void jit_uni_pool_kernel_t<isa>::generate() {
         // eltwise aux at the post-op inject point.
         eltwise_injector::static_params_t esp(v_eltw0, v_eltw1, v_eltw2, v_tmp,
                 v_tmp, f_eltw0, f_eltw1, t4, /*is_fwd=*/true);
-        binary_injector::static_params_t bsp(v_bin_rhs, f_bin, reg_rhs, t2, t3);
-        bsp.off_is_bytes = true; // t2 is the per-column byte offset
+        // Host-positioned injector mode (null dst_d): the kernel computes the
+        // per-column byte offset itself, so the rhs classifies as scalar /
+        // no_broadcast from the rhs element count. rhs is f32 (no gather/narrow).
+        // The rhs pointer array is read through the args pointer (x64 model);
+        // preserve_gpr shields the injector's fixed X_TMP scratch (t4 is this
+        // kernel's aux_ih and t5 the bcast==3 base).
+        binary_injector::rhs_arg_static_params_t rhs_arg_bsp(v_bin_rhs.getIdx(),
+                t3, t2, t2, true /*preserve gpr*/, false /*preserve vmm*/,
+                GET_OFF(post_ops_binary_rhs_arg_vec),
+                memory_desc_wrapper(nullptr));
+        rhs_arg_bsp.rhs_dt_helper_freg = f_bin;
+        rhs_arg_bsp.off_is_bytes = true; // t2 is the per-column byte offset
+        const binary_injector::static_params_t bsp(reg_param, rhs_arg_bsp);
         postops_injector_
                 = utils::make_unique<injector::jit_uni_postops_injector_t<isa>>(
-                        this, jpp.post_ops, esp,
-                        jpp.with_binary ? &bsp : nullptr);
+                        this, jpp.post_ops, bsp, esp);
     }
 
     prev_kw = 0;
@@ -942,6 +983,7 @@ void jit_uni_pool_kernel_t<isa>::generate() {
 
 template struct jit_uni_pool_kernel_t<v>;
 template struct jit_uni_pool_kernel_t<zvfh>;
+template struct jit_uni_pool_kernel_t<zvfbfwma>;
 
 // ================== native VLA forward kernel (nspc/ncsp) ==================
 
@@ -983,6 +1025,7 @@ status_t jit_uni_pool_ncsp_kernel_t<isa, d_type>::init_conf(
     jpp.dst_dt = dst_d.data_type();
     jpp.dt_size = types::data_type_size(jpp.src_dt);
     jpp.is_f16 = d_type == data_type::f16;
+    jpp.is_bf16 = d_type == data_type::bf16;
     jpp.isa = isa;
     jpp.nthr = dnnl_get_max_threads();
     jpp.ur_w = 4;
@@ -1036,7 +1079,7 @@ status_t jit_uni_pool_ncsp_kernel_t<isa, d_type>::init_conf(
     // the (never-hit-by-real-pooling) window volume that would overflow a signed
     // 16-bit index.
     if (jpp.alg == alg_kind::pooling_max && jpp.is_training
-            && d_type == data_type::f16
+            && utils::one_of(d_type, data_type::f16, data_type::bf16)
             && (int64_t)jpp.kd * jpp.kh * jpp.kw > 32768)
         return status::unimplemented;
     jpp.with_relu = false;
@@ -1060,8 +1103,11 @@ status_t jit_uni_pool_ncsp_kernel_t<isa, d_type>::init_conf(
     // contains the binary is routed by the driver through the channel-vectorized
     // single-position path so the rhs broadcast is uniform; the injector loads
     // the rhs (f32) per channel chunk. post_ops_ok already gated the chain.
-    const bool inj_ok = injector::jit_uni_postops_injector_t<isa>::post_ops_ok(
-            po, /*n_vaux=*/4);
+    const bool inj_ok = injector::post_ops_ok(injector::post_ops_ok_args_t(isa,
+            {injector::eltwise, injector::binary}, po, &dst_d,
+            false /*sum_at_pos_0_only*/, false /*sum_requires_scale_one*/,
+            true /*sum_requires_zp_zero*/, true /*sum_requires_same_params*/,
+            get_supported_postops_bcast_strategies(), /*n_vaux=*/4));
     bool po_has_binary = false;
     for (int i = 0; i < po.len(); i++)
         if (po.entry_[i].is_binary()) po_has_binary = true;
@@ -1099,8 +1145,8 @@ status_t jit_uni_pool_ncsp_kernel_t<isa, d_type>::init_conf(
 
 template <cpu_isa_t isa, data_type_t d_type>
 void jit_uni_pool_ncsp_kernel_t<isa, d_type>::generate() {
-    if (d_type == data_type::f16)
-        generate_f16();
+    if (utils::one_of(d_type, data_type::f16, data_type::bf16))
+        generate_xf16();
     else
         generate_f32();
 }
@@ -1174,9 +1220,8 @@ void jit_uni_pool_ncsp_kernel_t<isa, d_type>::generate_f32() {
     ld(s8, reg_param, GET_OFF_P(src_vec_byte_stride));
     ld(s9, reg_param, GET_OFF_P(dst_vec_byte_stride));
     if (jpp_.fuse_binary && !max_train) {
-        // s10 = rhs origin pointer array; s11 = shared byte offset (advanced per
-        // channel chunk). The injector runs in indirect mode.
-        ld(s10, reg_param, GET_OFF_P(post_op_rhs));
+        // s11 = shared byte offset (advanced per channel chunk); the injector
+        // reads the rhs pointer array through the args pointer (x64 model).
         ld(s11, reg_param, GET_OFF_P(post_op_off0));
     }
     if (max_train) {
@@ -1302,27 +1347,34 @@ void jit_uni_pool_ncsp_kernel_t<isa, d_type>::generate_f32() {
         // so it is free as the fourth eltwise aux during an eltwise entry.
         eltwise_injector::static_params_t esp(VReg(12), VReg(16), VReg(20),
                 VReg(24), VReg(24), fa3, fa4, t2, /*is_fwd=*/true);
-        // Indirect injector mode (any number of binaries): rhs origin array in
-        // s10 (or a4 when max-training, since s10 is then the ws pointer), s11 =
-        // shared byte offset, a3 = per-binary scratch. Binary rhs scratch v24/fa5
-        // (clear of v_ind = v28). full-dst uses a strided (vlse) load keyed on the
-        // dst channel stride (s9 == the f32 rhs channel stride); per-oc/scalar the
-        // contiguous form.
-        const Reg reg_rhs = mt_bin ? a4 : s10;
-        if (mt_bin) ld(a4, reg_param, GET_OFF_P(post_op_rhs));
-        binary_injector::static_params_t bsp_contig(
-                VReg(24), fa5, reg_rhs, s11, a3);
-        binary_injector::static_params_t bsp_strided(
-                VReg(24), fa5, reg_rhs, s11, a3, s9);
-        bsp_contig.off_is_bytes = bsp_strided.off_is_bytes = true;
-        injector::jit_uni_postops_injector_t<isa> po_inj(this, jpp_.post_ops,
-                esp,
-                jpp_.fuse_binary ? (bin_strided ? &bsp_strided : &bsp_contig)
-                                 : nullptr);
+        // Indirect injector mode (any number of binaries): the rhs pointer
+        // array is read through the args pointer (x64 model; max-training
+        // needs no dedicated array-base register anymore), s11 = shared byte
+        // offset, a3 = per-binary scratch. Binary rhs scratch v24/fa5 (clear
+        // of v_ind = v28). full-dst uses a strided (vlse) load keyed on the
+        // dst channel stride (s9 == the f32 rhs channel stride);
+        // per-oc/scalar the contiguous form.
+        // Host-positioned injector mode (null dst_d): the kernel maintains
+        // the shared byte offset itself; preserve_gpr shields the injector's
+        // fixed X_TMP scratch (t4 holds the live unit-stride comparison
+        // constant here).
+        binary_injector::rhs_arg_static_params_t rhs_arg_bsp(24, a3, s11, s11,
+                true /*preserve gpr*/, false /*preserve vmm*/,
+                GET_OFF_P(post_op_rhs), memory_desc_wrapper(nullptr));
+        rhs_arg_bsp.rhs_dt_helper_freg = fa5;
+        rhs_arg_bsp.off_is_bytes = true;
+        if (bin_strided) {
+            rhs_arg_bsp.is_strided = true;
+            rhs_arg_bsp.rhs_stride = s9;
+        }
+        const binary_injector::static_params_t bsp(reg_param, rhs_arg_bsp);
+        injector::jit_uni_postops_injector_t<isa> po_inj(
+                this, jpp_.post_ops, bsp, esp);
         // dynamic-params: s11 is the per-chunk byte offset (off_is_bytes).
         binary_injector::rhs_arg_dynamic_params_t rhs_dyn;
-        rhs_dyn.vmm_idx_to_out_off[v_acc.getIdx()] = s11;
-        po_inj.compute_vector(v_acc.getIdx(), rhs_dyn);
+        rhs_dyn.vmm_idx_to_out_reg.emplace(v_acc.getIdx(), s11);
+        // ncsp channel-vec computes at e32/m1 (group_stride 1).
+        po_inj.compute_vector(v_acc.getIdx(), rhs_dyn, 1 /*group_stride*/);
     }
     // Store result — use vse32_v for unit stride
     {
@@ -1423,14 +1475,22 @@ void jit_uni_pool_ncsp_kernel_t<isa, d_type>::generate_f32() {
 }
 
 template <cpu_isa_t isa, data_type_t d_type>
-void jit_uni_pool_ncsp_kernel_t<isa, d_type>::generate_f16() {
+void jit_uni_pool_ncsp_kernel_t<isa, d_type>::generate_xf16() {
 #if defined(XBYAK_RISCV_V) && XBYAK_RISCV_V == 1
     const Reg reg_param = a0;
     const VReg v_mask(0);
-    // max: v_acc(f16m1)=v4, v_tmp(f16m1)=v8.
-    // avg: v_acc(f32m2)=v4-v5, v_tmp(f16m1)=v8 (load buffer + narrowed result).
+    // f16 max: v_acc(f16m1)=v4, v_tmp(f16m1)=v8.
+    // avg (both dtypes) and bf16 max: v_acc(f32m2)=v4-v5, v_tmp(f16m1)=v8
+    // (load buffer + narrowed result).
     const VReg v_acc(4), v_tmp(8);
-    const VReg v_res = is_max_pool_ ? v_acc : v_tmp;
+    // bf16 has no e16 arithmetic, so its max compares at f32 like avg already
+    // does: every load is widened into v_wide and the accumulator stays f32/m2.
+    // v24 is otherwise only the f16-max post-op widen buffer, which the bf16
+    // path does not need (its accumulator is already f32), so it is free here.
+    constexpr bool is_bf16 = d_type == data_type::bf16;
+    const VReg v_wide(24);
+    const bool acc_is_f32 = !is_max_pool_ || is_bf16;
+    const VReg v_res = (is_max_pool_ && !is_bf16) ? v_acc : v_tmp;
     // Max forward-training tracks the per-channel argmax. The index fits e16 for
     // any realistic pooling window (< 32768), so v_ind stays e16/m1 — the same
     // vtype as the f16 data, avoiding a per-window-element vtype switch. It is
@@ -1496,11 +1556,11 @@ void jit_uni_pool_ncsp_kernel_t<isa, d_type>::generate_f16() {
     } else if (jpp_.fuse_binary) {
         // fuse_binary => the driver routes each output column through the
         // single-position path (n_pos == 1), so no position loop is needed.
-        // Indirect injector mode: s10 = rhs origin array, s11 = shared byte
-        // offset, t3 = f32 rhs channel stride for full-dst (= 2 * the f16 dst
-        // channel stride s9; the rhs is f32 while the dst is f16). t3 held
-        // inD_stride only until s5 was derived above, so it is free here.
-        ld(s10, reg_param, GET_OFF_P(post_op_rhs));
+        // Indirect injector mode: the rhs pointer array is read through the
+        // args pointer (x64 model), s11 = shared byte offset, t3 = f32 rhs
+        // channel stride for full-dst (= 2 * the f16 dst channel stride s9;
+        // the rhs is f32 while the dst is f16). t3 held inD_stride only until
+        // s5 was derived above, so it is free here.
         ld(s11, reg_param, GET_OFF_P(post_op_off0));
         slli(t3, s9, 1);
     } else {
@@ -1517,27 +1577,33 @@ void jit_uni_pool_ncsp_kernel_t<isa, d_type>::generate_f16() {
     // v28 is the binary rhs scratch and is temporally free for eltwise entries.
     eltwise_injector::static_params_t esp(VReg(12), VReg(16), VReg(20),
             VReg(28), VReg(28), fa3, fa4, t1, /*is_fwd=*/true);
-    // Indirect mode (any number of binaries): rhs origin array in s10 (or a4 when
-    // max-training, since s10 is then the ws pointer), s11 = shared byte offset,
-    // a3 = per-binary scratch. full-dst uses a strided (vlse) f32 load keyed on
-    // the f32 rhs channel stride (t3, or a6 when max-training); per-oc/scalar vle.
-    const Reg reg_rhs = mt_bin ? a4 : s10;
+    // Indirect mode (any number of binaries): the rhs pointer array is read
+    // through the args pointer (x64 model; max-training needs no dedicated
+    // array-base register anymore), s11 = shared byte offset, a3 = per-binary
+    // scratch. full-dst uses a strided (vlse) f32 load keyed on the f32 rhs
+    // channel stride (t3, or a6 when max-training); per-oc/scalar vle.
     const Reg reg_stride = mt_bin ? a6 : t3;
-    binary_injector::static_params_t bsp_contig(
-            VReg(28), fa5, reg_rhs, s11, a3);
-    binary_injector::static_params_t bsp_strided(
-            VReg(28), fa5, reg_rhs, s11, a3, reg_stride);
-    bsp_contig.off_is_bytes = bsp_strided.off_is_bytes = true;
+    // Host-positioned injector mode (null dst_d): the kernel maintains the
+    // shared byte offset itself; preserve_gpr shields the injector's fixed
+    // X_TMP scratch (t4 holds the live unit-stride comparison constant here).
+    binary_injector::rhs_arg_static_params_t rhs_arg_bsp(28, a3, s11, s11,
+            true /*preserve gpr*/, false /*preserve vmm*/,
+            GET_OFF_P(post_op_rhs), memory_desc_wrapper(nullptr));
+    rhs_arg_bsp.rhs_dt_helper_freg = fa5;
+    rhs_arg_bsp.off_is_bytes = true;
+    if (bin_strided) {
+        rhs_arg_bsp.is_strided = true;
+        rhs_arg_bsp.rhs_stride = reg_stride;
+    }
+    const binary_injector::static_params_t bsp(reg_param, rhs_arg_bsp);
     injector::jit_uni_postops_injector_t<isa> po_inj(this,
             (jpp_.fuse_eltwise || jpp_.fuse_binary) ? jpp_.post_ops : no_po,
-            esp,
-            jpp_.fuse_binary ? (bin_strided ? &bsp_strided : &bsp_contig)
-                             : nullptr);
+            bsp, esp);
     // dynamic-params: s11 is the per-chunk byte offset (off_is_bytes). Both the
     // avg (v_acc) and max (v24) post-op registers use the same offset.
     binary_injector::rhs_arg_dynamic_params_t rhs_dyn;
-    rhs_dyn.vmm_idx_to_out_off[v_acc.getIdx()] = s11;
-    rhs_dyn.vmm_idx_to_out_off[24] = s11;
+    rhs_dyn.vmm_idx_to_out_reg.emplace(v_acc.getIdx(), s11);
+    rhs_dyn.vmm_idx_to_out_reg.emplace(24, s11);
 
     Label pos_loop, pos_done;
     if (!jpp_.fuse_binary && !max_train) {
@@ -1557,9 +1623,18 @@ void jit_uni_pool_ncsp_kernel_t<isa, d_type>::generate_f16() {
     // Initialize accumulator. Use vmv.v.x with the raw bit pattern to avoid
     // f16 scalar NaN-boxing concerns.
     if (is_max_pool_) {
-        vsetvli(t0, s2, SEW::e16, LMUL::m1, VTA::ta, VMA::ma);
-        li(t1, 0xFBFF); // f16 lowest (-65504.0)
-        vmv_v_x(v_acc, t1);
+        if (is_bf16) {
+            // f32 accumulator seeded with the lowest *bf16* value, so an
+            // all-padding window narrows back exactly.
+            vsetvli(t0, s2, SEW::e32, LMUL::m2, VTA::ta, VMA::ma);
+            li(t1, 0xFF7F0000); // (float)bf16 lowest (-3.3895314e38)
+            vmv_v_x(v_acc, t1);
+            vsetvli(t0, s2, SEW::e16, LMUL::m1, VTA::ta, VMA::ma);
+        } else {
+            vsetvli(t0, s2, SEW::e16, LMUL::m1, VTA::ta, VMA::ma);
+            li(t1, 0xFBFF); // f16 lowest (-65504.0)
+            vmv_v_x(v_acc, t1);
+        }
         if (max_train) {
             vmv_v_x(v_ind, x0); // argmax index accumulator = 0 (e16m1)
             if (mt_bin) {
@@ -1607,13 +1682,32 @@ void jit_uni_pool_ncsp_kernel_t<isa, d_type>::generate_f16() {
         vlse16_v(v_tmp, a7, s8);
         L(src_ld_done);
     }
-    if (is_max_pool_) {
+    if (is_max_pool_ && !is_bf16) {
         vmflt_vv(v_mask, v_acc, v_tmp);
         vmerge_vvm(v_acc, v_acc, v_tmp);
         if (max_train) {
             vmerge_vxm(v_ind, v_ind, t3); // ind = (acc < tmp) ? cur_idx : ind
             addi(t3, t3, 1); // advance window position (every iw)
         }
+    } else if (is_max_pool_) {
+        // bf16 max: widen then compare at f32. e16/m1 and e32/m2 share a vl, so
+        // the mask produced at e32 selects the same lanes when v_ind is merged
+        // back under the e16 vtype.
+        vfwcvtbf16_f_f_v(v_wide, v_tmp); // reads the e16 narrow vtype
+        vsetvli(t0, s2, SEW::e32, LMUL::m2, VTA::ta, VMA::ma);
+        vmflt_vv(v_mask, v_acc, v_wide);
+        vmerge_vvm(v_acc, v_acc, v_wide);
+        vsetvli(t0, s2, SEW::e16, LMUL::m1, VTA::ta, VMA::ma);
+        if (max_train) {
+            vmerge_vxm(v_ind, v_ind, t3);
+            addi(t3, t3, 1);
+        }
+    } else if (is_bf16) {
+        // bf16 avg: no widening add exists, so widen then add at f32.
+        vfwcvtbf16_f_f_v(v_wide, v_tmp); // reads the e16 narrow vtype
+        vsetvli(t0, s2, SEW::e32, LMUL::m2, VTA::ta, VMA::ma);
+        vfadd_vv(v_acc, v_acc, v_wide);
+        vsetvli(t0, s2, SEW::e16, LMUL::m1, VTA::ta, VMA::ma);
     } else {
         // f32m2 += widen(f16m1), evaluated under the e16 vtype.
         vfwadd_wv(v_acc, v_acc, v_tmp);
@@ -1644,29 +1738,42 @@ void jit_uni_pool_ncsp_kernel_t<isa, d_type>::generate_f16() {
     j_(id_loop);
     L(id_done);
 
-    // avg: scale (e32/m2), apply the fused eltwise post-op (at f32), then narrow
-    // to f16 (e16/m1).
-    if (!is_max_pool_) {
+    // f32 accumulator (avg for both dtypes, and bf16 max): scale for avg
+    // (e32/m2), apply the fused post-op chain at f32, then narrow to xf16
+    // (e16/m1). bf16 max needs no widen/narrow round trip here -- the compare
+    // already ran at f32 -- so the chain applies to v_acc directly.
+    if (acc_is_f32) {
         vsetvli(t0, s2, SEW::e32, LMUL::m2, VTA::ta, VMA::ma);
-        vfmul_vf(v_acc, v_acc, ft1);
-        if (jpp_.fuse_eltwise || jpp_.fuse_binary)
-            po_inj.compute_vector(v_acc.getIdx(), rhs_dyn);
+        if (!is_max_pool_) vfmul_vf(v_acc, v_acc, ft1);
+        if (jpp_.fuse_eltwise || jpp_.fuse_binary) {
+            if (is_max_pool_ && mt_bin) {
+                // Max-training positions the rhs origin array / f32 rhs stride
+                // at the inject point (s10 and t3 are the ws pointer and the
+                // argmax scratch until the window sweep ends).
+                ld(a4, reg_param, GET_OFF_P(post_op_rhs));
+                slli(a6, s9, 1);
+            }
+            po_inj.compute_vector(v_acc.getIdx(), rhs_dyn, 2 /*group_stride*/);
+        }
         vsetvli(t0, s2, SEW::e16, LMUL::m1, VTA::ta, VMA::ma);
-        vfncvt_f_f_w(v_tmp, v_acc);
+        if (is_bf16)
+            vfncvtbf16_f_f_w(v_tmp, v_acc);
+        else
+            vfncvt_f_f_w(v_tmp, v_acc);
     } else if (jpp_.fuse_eltwise || jpp_.fuse_binary) {
         // max: the accumulator is f16; widen to f32 (v24/m2), apply the post-op
         // chain (eltwise and/or binary, rhs in v28), then narrow back in place
-        // so the store path is unchanged. For max-training the rhs origin array
-        // (a4) and f32 rhs stride (a6) are positioned here (s10/t3 hold the ws
-        // pointer / argmax scratch), free after the window sweep.
+        // so the store path is unchanged. For max-training the f32 rhs stride
+        // (a6) is positioned here (t3 holds the argmax scratch), free after
+        // the window sweep.
         if (mt_bin) {
-            ld(a4, reg_param, GET_OFF_P(post_op_rhs));
             slli(a6, s9, 1); // f32 rhs channel stride (= 2 * f16 dst stride)
         }
         vsetvli(t0, s2, SEW::e16, LMUL::m1, VTA::ta, VMA::ma);
         vfwcvt_f_f_v(VReg(24), v_acc);
         vsetvli(t0, s2, SEW::e32, LMUL::m2, VTA::ta, VMA::ma);
-        po_inj.compute_vector(24, rhs_dyn);
+        // f16 max widened to f32 at e32/m2 (group_stride 2).
+        po_inj.compute_vector(24, rhs_dyn, 2 /*group_stride*/);
         vsetvli(t0, s2, SEW::e16, LMUL::m1, VTA::ta, VMA::ma);
         vfncvt_f_f_w(v_acc, VReg(24));
     }
@@ -1776,6 +1883,7 @@ void jit_uni_pool_ncsp_kernel_t<isa, d_type>::generate_f16() {
 
 template struct jit_uni_pool_ncsp_kernel_t<v, data_type::f32>;
 template struct jit_uni_pool_ncsp_kernel_t<zvfh, data_type::f16>;
+template struct jit_uni_pool_ncsp_kernel_t<zvfbfwma, data_type::bf16>;
 
 // === Shape-baked interior kernel (nspc, ur_w input reuse) ===
 
@@ -1862,8 +1970,15 @@ void jit_uni_pool_interior_kernel_t<isa, d_type>::generate_nspc() {
     post_ops_t no_po;
     eltwise_injector::static_params_t esp(VReg(12), VReg(16), VReg(20),
             VReg(24), VReg(24), fa4, fa5, t6, /*is_fwd=*/true);
+    // The chain here is eltwise-only, so the (mandatory) binary static params
+    // are never consumed; pass placeholder scratch.
+    binary_injector::rhs_arg_static_params_t rhs_arg_bsp(24, x0, x0, x0,
+            false /*preserve gpr*/, false /*preserve vmm*/,
+            0 /*abi_param_offset*/, memory_desc_wrapper(nullptr));
+    rhs_arg_bsp.rhs_dt_helper_freg = fa5;
+    const binary_injector::static_params_t bsp(x0, rhs_arg_bsp);
     injector::jit_uni_postops_injector_t<isa> po_inj(
-            this, jpp_.fuse_eltwise ? jpp_.post_ops : no_po, esp);
+            this, jpp_.fuse_eltwise ? jpp_.post_ops : no_po, bsp, esp);
     binary_injector::rhs_arg_dynamic_params_t rhs_dyn; // eltwise-only here
 
     Label block_loop, block_done;
@@ -1928,7 +2043,9 @@ void jit_uni_pool_interior_kernel_t<isa, d_type>::generate_nspc() {
     mv(a1, a5); // dst_ptr
     for (int j = 0; j < ur_w; j++) {
         if (!is_max) vfmul_vf(acc(j), acc(j), fa1);
-        if (jpp_.fuse_eltwise) po_inj.compute_vector(acc(j).getIdx(), rhs_dyn);
+        // nspc interior computes at e32/m1 (group_stride 1); eltwise-only here.
+        if (jpp_.fuse_eltwise)
+            po_inj.compute_vector(acc(j).getIdx(), rhs_dyn, 1 /*group_stride*/);
         vse32_v(acc(j), a1);
         if (j + 1 < ur_w) add(a1, a1, s5); // dst column stride == w_stride
     }
@@ -1999,6 +2116,7 @@ status_t jit_uni_pool_bwd_kernel_t<isa, d_type>::init_conf(
     jpp.dst_dt = dst_d.data_type();
     jpp.dt_size = types::data_type_size(jpp.src_dt);
     jpp.is_f16 = d_type == data_type::f16;
+    jpp.is_bf16 = d_type == data_type::bf16;
     jpp.isa = isa;
     jpp.nthr = dnnl_get_max_threads();
 
@@ -2034,8 +2152,8 @@ status_t jit_uni_pool_bwd_kernel_t<isa, d_type>::init_conf(
 
 template <cpu_isa_t isa, data_type_t d_type>
 void jit_uni_pool_bwd_kernel_t<isa, d_type>::generate() {
-    if (d_type == data_type::f16)
-        generate_f16();
+    if (utils::one_of(d_type, data_type::f16, data_type::bf16))
+        generate_xf16();
     else
         generate_f32();
 }
@@ -2160,13 +2278,16 @@ void jit_uni_pool_bwd_kernel_t<isa, d_type>::generate_f32() {
 }
 
 template <cpu_isa_t isa, data_type_t d_type>
-void jit_uni_pool_bwd_kernel_t<isa, d_type>::generate_f16() {
+void jit_uni_pool_bwd_kernel_t<isa, d_type>::generate_xf16() {
 #if defined(XBYAK_RISCV_V) && XBYAK_RISCV_V == 1
     using a_t = jit_uni_pool_bwd_args_t;
     using c_t = jit_uni_pool_bwd_contrib_t;
     const Reg reg_param = a0;
-    // acc/wide/ws/zero are f32/e32m2 (v4,v12,v16,v24); the f16 load and the
+    // acc/wide/ws/zero are f32/e32m2 (v4,v12,v16,v24); the xf16 load and the
     // narrowed store result share v8 (e16m1); v_ws_raw (v20) is the raw u8 load.
+    // Everything is accumulated at f32, so f16 and bf16 differ only in the
+    // widen/narrow pair (Zvfh vfwcvt/vfncvt vs Zvfbfmin vfwcvtbf16/vfncvtbf16).
+    constexpr bool is_bf16 = d_type == data_type::bf16;
     const VReg v_mask(0), v_acc(4), v_ddst(8), v_wide(12), v_ws(16),
             v_ws_raw(20), v_zero(24);
     const bool ind_u8 = jpp_.ind_dt == data_type::u8;
@@ -2185,7 +2306,7 @@ void jit_uni_pool_bwd_kernel_t<isa, d_type>::generate_f16() {
     if (is_max_pool_) ld(s6, reg_param, GET_OFF_A(ws_vec_byte_stride));
     mv(s7, x0);
     if (is_max_pool_) mv(s8, x0);
-    li(t4, 2); // f16 unit-stride comparison constant
+    li(t4, 2); // xf16 unit-stride comparison constant
 
     Label ch_loop, ch_done;
     L(ch_loop);
@@ -2204,7 +2325,7 @@ void jit_uni_pool_bwd_kernel_t<isa, d_type>::generate_f16() {
     ld(a3, a1, GET_OFF_C(diff_dst));
     add(a3, a3, s7);
     vsetvli(t2, s3, SEW::e16, LMUL::m1, VTA::ta,
-            VMA::ma); // f16 load vtype (vl == t0)
+            VMA::ma); // xf16 load vtype (vl == t0)
     {
         Label str, done;
         bne(s5, t4, str);
@@ -2214,7 +2335,11 @@ void jit_uni_pool_bwd_kernel_t<isa, d_type>::generate_f16() {
         vlse16_v(v_ddst, a3, s5);
         L(done);
     }
-    vfwcvt_f_f_v(v_wide, v_ddst); // f16 -> f32m2 (reads the e16 narrow vtype)
+    // xf16 -> f32m2 (reads the e16 narrow vtype)
+    if (is_bf16)
+        vfwcvtbf16_f_f_v(v_wide, v_ddst);
+    else
+        vfwcvt_f_f_v(v_wide, v_ddst);
     if (is_max_pool_) {
         ld(a4, a1, GET_OFF_C(ws));
         add(a4, a4, s8);
@@ -2255,9 +2380,12 @@ void jit_uni_pool_bwd_kernel_t<isa, d_type>::generate_f16() {
     j_(c_loop);
     L(c_done);
 
-    // Narrow the f32 accumulator to f16 and store.
+    // Narrow the f32 accumulator back to xf16 and store.
     vsetvli(t2, s3, SEW::e16, LMUL::m1, VTA::ta, VMA::ma);
-    vfncvt_f_f_w(v_ddst, v_acc);
+    if (is_bf16)
+        vfncvtbf16_f_f_w(v_ddst, v_acc);
+    else
+        vfncvt_f_f_w(v_ddst, v_acc);
     {
         Label str, done;
         bne(s4, t4, str);
@@ -2289,6 +2417,7 @@ void jit_uni_pool_bwd_kernel_t<isa, d_type>::generate_f16() {
 
 template struct jit_uni_pool_bwd_kernel_t<v, data_type::f32>;
 template struct jit_uni_pool_bwd_kernel_t<zvfh, data_type::f16>;
+template struct jit_uni_pool_bwd_kernel_t<zvfbfwma, data_type::bf16>;
 
 } // namespace rv64
 } // namespace cpu

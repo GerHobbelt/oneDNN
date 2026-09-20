@@ -22,6 +22,7 @@
 #include "cpu/matmul/gemm_based_common.hpp"
 #include "cpu/matmul/matmul_utils.hpp"
 #include "cpu/platform.hpp"
+#include "cpu/x64/brgemm/brgemm_utils.hpp"
 #include "cpu/x64/injectors/jit_uni_postops_injector.hpp"
 #include "cpu/x64/matmul/amx_blocking_heuristics.hpp"
 #include "cpu/x64/matmul/brgemm_matmul_utils.hpp"
@@ -226,8 +227,7 @@ bool is_batch_layout_trivial(const memory_desc_wrapper &mdw) {
     dim_t expected_stride = strides[innermost_batch_idx];
     if (expected_stride == 0) return false;
     for (int d = innermost_batch_idx; d >= 0; --d) {
-        // Dimensions of size 1 do not contribute to the batch offset and
-        // their stride is irrelevant.
+        // Size-1 dims do not affect the batch offset; stride is irrelevant.
         if (dims[d] == 1) continue;
         if (strides[d] != expected_stride) return false;
         expected_stride *= dims[d];
@@ -254,7 +254,8 @@ status_t check_isa_with_datatype(
                     is_superset(isa, avx512_core)
                             || is_superset(isa, avx2_vnni))
             && IMPLICATION(bm_conf_utils.is_bf16(),
-                    one_of(isa, avx512_core_amx, avx512_core_bf16, avx2_vnni_2))
+                    one_of(isa, avx512_core_amx, avx512_core_bf16, avx2_vnni_2,
+                            avx10_2_ace))
             && IMPLICATION(bm_conf_utils.is_f16(),
                     one_of(isa, avx10_2, avx10_2_amx_2, avx512_core_amx_fp16,
                             avx512_core_fp16, avx2_vnni_2))
@@ -284,7 +285,8 @@ status_t check_isa_with_datatype(
                     is_superset(isa, avx512_core_amx_fp16)
                             || is_superset(isa, avx10_2))
             && IMPLICATION(bm_conf_utils.is_bf8(),
-                    is_superset(isa, avx512_core_amx_fp16))
+                    is_superset(isa, avx512_core_amx_fp16)
+                            || is_superset(isa, avx10_2))
             && IMPLICATION(
                     bm_conf_utils.is_f4_via_convert(), one_of(isa, avx10_2));
     return ok ? status::success : status::unimplemented;
@@ -842,8 +844,8 @@ format_tag_t brgemm_matmul_conf_utils_t::pick_blocked_B_layout(
 
     if (bgmmc.ndims > 3) return format_tag::undef;
 
-    if (is_int8() || is_f8() || is_bf16_fp8() || is_f16_fp8()
-            || with_int8_grouped_quantization()) {
+    if (is_int8() || (is_f8() && bgmmc.isa != avx10_2) || is_bf16_fp8()
+            || is_f16_fp8() || with_int8_grouped_quantization()) {
         switch (n_blk) {
             case 64: return bgmmc.ndims == 3 ? aCB16b64c4b : BA16a64b4a;
             case 48: return bgmmc.ndims == 3 ? aCB16b48c4b : BA16a48b4a;
@@ -859,7 +861,7 @@ format_tag_t brgemm_matmul_conf_utils_t::pick_blocked_B_layout(
             || is_f32_bf16() || is_f16_with_int_wei() || is_f32_with_int_wei();
 
     if ((prefer_amx_or_avx2_vnni_2 && is_amx_or_avx2_vnni_2) || is_bf16()
-            || is_bf16_with_int_wei()) {
+            || is_bf16_with_int_wei() || (is_f8() && bgmmc.isa == avx10_2)) {
         switch (n_blk) {
             case 64: return bgmmc.ndims == 3 ? aCB16b64c2b : BA16a64b2a;
             case 48: return bgmmc.ndims == 3 ? aCB16b48c2b : BA16a48b2a;
@@ -1847,6 +1849,9 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
 
     const bool is_wei_any = weights_d.format_kind() == format_kind::any
             || weights_d.is_sparse_packed_desc();
+    bgmmc.is_ace = is_superset(isa, avx10_2_ace)
+            && brgemm_utils::ace_dt_ok(bgmmc.src_dt, bgmmc.wei_dt);
+
     brgemm_matmul_conf_utils_t bm_conf_utils(bgmmc, isa, attr,
             src_d.format_kind() == format_kind::any, is_wei_any,
             dst_d.format_kind() == format_kind::any,
@@ -1876,7 +1881,13 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
             one_of(status::success, check_isa_dt_st, gemv_check_isa_dt_st),
             VERBOSE_ISA_DT_MISMATCH);
 
-    bgmmc.is_amx = is_superset(isa, avx512_core_amx);
+    // When the resolved ISA is ACE, TMUL is not reachable through it, so there
+    // is no fallback for data type combinations ACE cannot compute. Reject them
+    // here instead of generating an AMX kernel.
+    VCONDCHECK_BG(IMPLICATION(is_superset(isa, avx10_2_ace), bgmmc.is_ace),
+            VERBOSE_ISA_DT_MISMATCH);
+
+    bgmmc.is_amx = isa_has_tile_accumulators(isa);
     bgmmc.a_dt_sz = bgmmc.tr_a_dt_sz = types::data_type_size(bgmmc.src_dt);
     bgmmc.b_dt_sz = bgmmc.tr_b_dt_sz = types::data_type_size(bgmmc.wei_dt);
 
@@ -1885,6 +1896,7 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
         VCONDCHECK_BG(bgmmc.is_amx, VERBOSE_ISA_SPARSE_ENCODING_MISMATCH);
         VCONDCHECK_BG(bgmmc.wei_dt == s8, VERBOSE_UNSUPPORTED_DT);
     }
+    bgmmc.is_f8 = bm_conf_utils.is_f8();
     bgmmc.is_bf32 = bm_conf_utils.is_bf32();
     bgmmc.is_bf16_with_int_wei = bm_conf_utils.is_bf16_with_int_wei();
     bgmmc.is_f16_with_int_wei = bm_conf_utils.is_f16_with_int_wei();
@@ -1933,7 +1945,8 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
         // Note 3: Since `use_buffer_b()` depends on `bgmmc.wei_tag`, which is
         // set later in the code due to its dependencies, the update of data
         // types to f32 happens below in ANCHOR: `CONVERT_F32_XF16_DATA_TYPES`.
-    } else if (bgmmc.is_f16_with_int_wei && bgmmc.isa != avx512_core_fp16) {
+    } else if ((bgmmc.is_f16_with_int_wei && bgmmc.isa != avx512_core_fp16)
+            || (bgmmc.is_f8 && bgmmc.isa == avx10_2)) {
         bgmmc.src_dt = f16;
         bgmmc.wei_dt = f16;
         bgmmc.tr_a_dt_sz = types::data_type_size(f16);
@@ -2405,6 +2418,7 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
                     || ((bm_conf_utils.is_f16()
                                 || bm_conf_utils.is_f16_with_int_wei())
                             && isa == avx512_core_fp16)
+                    || (bm_conf_utils.is_f8() && isa == avx10_2)
                     || (bgmmc.wei_zp_type != brgemm_broadcast_t::none
                             && !bm_conf_utils.with_weights_decompression())
                     || bgmmc.transposed_A);
@@ -2570,8 +2584,8 @@ status_t init_brgemm_matmul_conf(cpu_isa_t isa, brgemm_matmul_conf_t &bgmmc,
 
     // Disable 'small_shape' heuristic for amx_fp16 until it is validated with
     // performance measurements.
-    allow_small_shape_fallback
-            = allow_small_shape_fallback && (bgmmc.isa != avx512_core_amx_fp16);
+    allow_small_shape_fallback = allow_small_shape_fallback
+            && (bgmmc.isa != avx512_core_amx_fp16) && !bgmmc.is_ace;
     // This is the only implementation that support the packed_sparse_weights
     // case therefore there is no fallback for it.
     allow_small_shape_fallback
@@ -2997,7 +3011,7 @@ void init_scratchpad(memory_tracking::registrar_t &scratchpad,
                 types::data_type_size(f32));
     }
 
-    if (is_superset(bgmmc.isa, avx512_core_amx))
+    if (isa_has_tile_accumulators(bgmmc.isa))
         scratchpad.book(key_conv_amx_tile_buffer,
                 static_cast<size_t>(bgmmc.nthr) * bgmmc.wsp_tile_per_thr_bytes,
                 default_data_align);

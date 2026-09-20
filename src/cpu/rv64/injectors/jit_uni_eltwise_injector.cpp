@@ -77,6 +77,12 @@ template <cpu_isa_t isa>
 void jit_uni_eltwise_injector_t<isa>::load_f32_const(const FReg &f, float val) {
     uint32_t bits;
     std::memcpy(&bits, &val, sizeof(bits));
+    // +0.0 (all-zero bit pattern) moves straight from x0, skipping the
+    // immediate load.
+    if (bits == 0) {
+        h_->fmv_w_x(f, x0);
+        return;
+    }
     h_->li(gpr_aux0_, bits);
     h_->fmv_w_x(f, gpr_aux0_);
 }
@@ -939,6 +945,12 @@ template <cpu_isa_t isa>
 void jit_uni_eltwise_injector_t<isa>::compute_body(const Vmm &vmm_src) {
     using namespace alg_kind;
 
+    // v0 (vmm_mask_) is this injector's reserved mask scratch: nearly every alg
+    // computes a compare mask into it and then merges into vmm_src, so a vmm_src
+    // of v0 would alias the mask and corrupt the result. An illegal host choice
+    // fails kernel creation rather than emitting corrupt code.
+    JIT_ASSERT(vmm_src.getIdx() != vmm_mask_.getIdx());
+
     if (is_fwd_) {
         // The *_use_dst_for_bwd variants share the forward math of their base
         // algorithm (the forward companion of a use-dst backward training
@@ -1037,20 +1049,31 @@ void jit_uni_eltwise_injector_t<isa>::compute_body(const Vmm &vmm_src) {
 
 template <cpu_isa_t isa>
 void jit_uni_eltwise_injector_t<isa>::compute_vector_range(
-        size_t start_idx, size_t end_idx) {
-    for (size_t i = start_idx; i < end_idx; i++)
-        compute_body(Vmm(i));
+        size_t start_idx, size_t end_idx, size_t group_stride) {
+    // [start_idx, end_idx) is the half-open physical register span;
+    // group_stride is the registers per accumulator (LMUL/EMUL), stepped so an
+    // m>1 run maps to its true group bases rather than x64's consecutive
+    // indices (see make_vmm_group_set).
+    for (size_t idx : injector_utils::make_vmm_group_set<isa>(
+                 start_idx, end_idx, group_stride))
+        compute_body(Vmm(idx));
 }
 
 template <cpu_isa_t isa>
 void jit_uni_eltwise_injector_t<isa>::compute_vector_range(
-        const injector_utils::vmm_index_set_t &vmm_idxs) {
+        const injector_utils::vmm_index_set_t &vmm_idxs, size_t group_stride) {
+    // Reject an illegal set (m8 / misaligned / overlapping / out-of-range) at
+    // the interface even though the injector itself is LMUL-agnostic, so a
+    // future non-m1/m2/m4 consumer fails kernel creation rather than silently
+    // relying on the host vtype.
+    injector_utils::validate_vmm_group_set<isa>(vmm_idxs, group_stride);
     for (size_t idx : vmm_idxs)
         compute_body(Vmm(idx));
 }
 
 template struct jit_uni_eltwise_injector_t<v>;
 template struct jit_uni_eltwise_injector_t<zvfh>;
+template struct jit_uni_eltwise_injector_t<zvfbfwma>;
 
 } // namespace rv64
 } // namespace cpu

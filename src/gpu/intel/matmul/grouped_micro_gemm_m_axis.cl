@@ -114,7 +114,7 @@ DECLARE_2D_TILE(binary_group_chunk_in_type, BINARY_SCALE_GROUPED_TILE_DATA_T,
 #endif
 
 #if WITH_BINARY_DENSE_SCALE
-#define binary_dense_scale_br MAX(SUBGROUP_SIZE, ugemm_grouped_sg_tile_n)
+#define binary_dense_scale_br MAX(SUBGROUP_SIZE, ugemm_grouped_sg_tile_m)
 #define binary_dense_scale_bc 1
 #define binary_dense_scale_nbr 1
 #define binary_dense_scale_nbc 1
@@ -362,7 +362,7 @@ void load_wei_attr_scales(wei_attr_scales_tile_type *tile,
 __attribute__((intel_reqd_sub_group_size(SUBGROUP_SIZE)))
 __attribute__((reqd_work_group_size(ugemm_grouped_sg_per_wg_m * SUBGROUP_SIZE,
         ugemm_grouped_sg_per_wg_n, ugemm_grouped_sg_per_wg_k))) kernel void
-grouped_micro_gemm(const global SRC_DATA_T *src, long ldsrc,
+grouped_micro_gemm_m_axis(const global SRC_DATA_T *src, long ldsrc,
         const global WEI_DATA_T *wei, long4 wei_strides, global DST_DATA_T *dst,
         long lddst, const global int *src_offsets,
         const global int *dst_offsets,

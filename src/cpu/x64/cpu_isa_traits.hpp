@@ -517,8 +517,8 @@ inline bool mayiuse(const cpu_isa_t cpu_isa, bool soft = false) {
                     && mayiuse(amx_fp16, soft));
         case avx10_2_amx_2:
             REG_AMX_ISA(return mayiuse(avx10_2, soft) && mayiuse(amx_tile, soft)
-                    && cpu().has(Cpu::tAMX_TF32) && cpu().has(Cpu::tAMX_AVX512)
-                    && cpu().has(Cpu::tAMX_MOVRS) && cpu().has(Cpu::tAMX_FP8));
+                    && cpu().has(Cpu::tAMX_AVX512) && cpu().has(Cpu::tAMX_MOVRS)
+                    && cpu().has(Cpu::tAMX_FP8));
         case avx10_2_ace:
             // ACE v1 detection:
             //   1. AVX10.2
@@ -644,6 +644,10 @@ inline data_type_t get_mac_emu_data_type(const data_type_t data_type,
             if (utils::one_of(
                         isa, avx2, avx2_vnni_2, avx512_core, avx512_core_fp16))
                 return f32;
+            break;
+        case f8_e4m3:
+        case f8_e5m2:
+            if (isa == avx10_2) return f16;
             break;
         default: return data_type;
     }
