@@ -662,7 +662,7 @@ void skip_unimplemented_prb(const prb_t *prb, res_t *res) {
                 "NVIDIA and AMD GPUs.\n",
                 __FILE__, __LINE__);
         res->state = SKIPPED;
-        res->reason = skip_reason::case_not_supported;
+        res->reason = reason_t::skip_not_supported;
         return;
     }
 
@@ -678,7 +678,7 @@ void skip_unimplemented_prb(const prb_t *prb, res_t *res) {
                 "for source.\n",
                 __FILE__, __LINE__);
         res->state = SKIPPED;
-        res->reason = skip_reason::case_not_supported;
+        res->reason = reason_t::skip_not_supported;
         return;
     }
 
@@ -703,7 +703,7 @@ void skip_unimplemented_prb(const prb_t *prb, res_t *res) {
                     "dense weights on CPU.\n",
                     __FILE__, __LINE__);
             res->state = SKIPPED;
-            res->reason = skip_reason::case_not_supported;
+            res->reason = reason_t::skip_not_supported;
             return;
         }
     }
@@ -714,7 +714,7 @@ void skip_unimplemented_prb(const prb_t *prb, res_t *res) {
                 "encoding.\n",
                 __FILE__, __LINE__);
         res->state = SKIPPED;
-        res->reason = skip_reason::case_not_supported;
+        res->reason = reason_t::skip_not_supported;
         return;
     }
 
@@ -725,7 +725,7 @@ void skip_unimplemented_prb(const prb_t *prb, res_t *res) {
             BENCHDNN_PRINT(2, "[SKIP][%s:%d]: CPU doesn't support x8s8f16.\n",
                     __FILE__, __LINE__);
             res->state = SKIPPED;
-            res->reason = skip_reason::case_not_supported;
+            res->reason = reason_t::skip_not_supported;
             return;
         }
 
@@ -751,7 +751,7 @@ void skip_unimplemented_prb(const prb_t *prb, res_t *res) {
                     "floating point source and weights.\n",
                     __FILE__, __LINE__);
             res->state = SKIPPED;
-            res->reason = skip_reason::case_not_supported;
+            res->reason = reason_t::skip_not_supported;
         }
 
         if (!is_int(prb->src_dt()) && !is_int(prb->wei_dt())
@@ -761,7 +761,7 @@ void skip_unimplemented_prb(const prb_t *prb, res_t *res) {
                     "with  floating point source and weights.\n",
                     __FILE__, __LINE__);
             res->state = SKIPPED;
-            res->reason = skip_reason::case_not_supported;
+            res->reason = reason_t::skip_not_supported;
         }
 
         if (!prb->attr.scales.is_def(DNNL_ARG_DST)
@@ -772,7 +772,7 @@ void skip_unimplemented_prb(const prb_t *prb, res_t *res) {
                     "are supported on CPU.\n",
                     __FILE__, __LINE__);
             res->state = SKIPPED;
-            res->reason = skip_reason::case_not_supported;
+            res->reason = reason_t::skip_not_supported;
             return;
         }
     }
@@ -785,7 +785,7 @@ void skip_unimplemented_prb(const prb_t *prb, res_t *res) {
                     "supported.\n",
                     __FILE__, __LINE__);
             res->state = SKIPPED;
-            res->reason = skip_reason::case_not_supported;
+            res->reason = reason_t::skip_not_supported;
             return;
         }
 
@@ -796,7 +796,7 @@ void skip_unimplemented_prb(const prb_t *prb, res_t *res) {
                     "argument.\n",
                     __FILE__, __LINE__);
             res->state = SKIPPED;
-            res->reason = skip_reason::case_not_supported;
+            res->reason = reason_t::skip_not_supported;
             return;
         }
 
@@ -818,7 +818,7 @@ void skip_unimplemented_prb(const prb_t *prb, res_t *res) {
                     "support certain features.\n",
                     __FILE__, __LINE__);
             res->state = SKIPPED;
-            res->reason = skip_reason::case_not_supported;
+            res->reason = reason_t::skip_not_supported;
             return;
         }
 
@@ -833,7 +833,7 @@ void skip_unimplemented_prb(const prb_t *prb, res_t *res) {
                     "configuration and 2D-matmul.\n",
                     __FILE__, __LINE__);
             res->state = SKIPPED;
-            res->reason = skip_reason::case_not_supported;
+            res->reason = reason_t::skip_not_supported;
             return;
         }
 
@@ -847,21 +847,19 @@ void skip_unimplemented_prb(const prb_t *prb, res_t *res) {
                     "pre-XeHPC platforms with limited post-op support.\n",
                     __FILE__, __LINE__);
             res->state = SKIPPED;
-            res->reason = skip_reason::case_not_supported;
+            res->reason = reason_t::skip_not_supported;
             return;
         }
 
-        if ((dnnl::impl::utils::one_of(
-                     dnnl_f4_e3m0, prb->src_dt(), prb->wei_dt(), prb->dst_dt())
-                    || dnnl::impl::utils::one_of(dnnl_f4_e2m1, prb->src_dt(),
-                            prb->wei_dt(), prb->dst_dt()))
+        if (dnnl::impl::utils::one_of(
+                    dnnl_f4_e2m1, prb->src_dt(), prb->wei_dt(), prb->dst_dt())
                 && (!po.is_def() || !prb->attr.scales.is_def())) {
             BENCHDNN_PRINT(2,
                     "[SKIP][%s:%d]: GPU supports fp4 through ref only on "
                     "pre-XeHPC platforms with limited post-op support.\n",
                     __FILE__, __LINE__);
             res->state = SKIPPED;
-            res->reason = skip_reason::case_not_supported;
+            res->reason = reason_t::skip_not_supported;
             return;
         }
         if (is_nvidia_gpu() || is_amd_gpu()) {
@@ -871,7 +869,7 @@ void skip_unimplemented_prb(const prb_t *prb, res_t *res) {
                         "supported on NVIDIA and AMD GPUs.\n",
                         __FILE__, __LINE__);
                 res->state = SKIPPED;
-                res->reason = skip_reason::case_not_supported;
+                res->reason = reason_t::skip_not_supported;
                 return;
             }
             if (prb->attr.zero_points.has_host_scalars()) {
@@ -881,7 +879,7 @@ void skip_unimplemented_prb(const prb_t *prb, res_t *res) {
                         "supported on NVIDIA and AMD GPUs.\n",
                         __FILE__, __LINE__);
                 res->state = SKIPPED;
-                res->reason = skip_reason::case_not_supported;
+                res->reason = reason_t::skip_not_supported;
                 return;
             }
         }
@@ -897,7 +895,7 @@ void skip_invalid_prb(const prb_t *prb, res_t *res) {
                 "type.\n",
                 __FILE__, __LINE__);
         res->state = SKIPPED;
-        res->reason = skip_reason::invalid_case;
+        res->reason = reason_t::invalid;
         return;
     }
 
@@ -910,7 +908,7 @@ void skip_invalid_prb(const prb_t *prb, res_t *res) {
                         "require IC ('%d') to be divisible by groups ('%d')\n",
                         __FILE__, __LINE__, (int)prb->k, (int)groups[0]);
                 res->state = SKIPPED;
-                res->reason = skip_reason::invalid_case;
+                res->reason = reason_t::invalid;
                 return;
             } else if (groups.size() > 2) {
                 BENCHDNN_PRINT(2,
@@ -919,7 +917,7 @@ void skip_invalid_prb(const prb_t *prb, res_t *res) {
                         "support only two dimensions\n",
                         __FILE__, __LINE__);
                 res->state = SKIPPED;
-                res->reason = skip_reason::invalid_case;
+                res->reason = reason_t::invalid;
                 return;
             }
         }
@@ -935,7 +933,7 @@ void skip_invalid_prb(const prb_t *prb, res_t *res) {
                         "require IC ('%d') to be divisible by groups ('%d')\n",
                         __FILE__, __LINE__, (int)prb->k, (int)groups[0]);
                 res->state = SKIPPED;
-                res->reason = skip_reason::invalid_case;
+                res->reason = reason_t::invalid;
                 return;
             } else if (groups.size() > 2) {
                 BENCHDNN_PRINT(2,
@@ -944,7 +942,7 @@ void skip_invalid_prb(const prb_t *prb, res_t *res) {
                         "groups support only two dimensions\n",
                         __FILE__, __LINE__);
                 res->state = SKIPPED;
-                res->reason = skip_reason::invalid_case;
+                res->reason = reason_t::invalid;
                 return;
             }
         }
@@ -971,7 +969,7 @@ void skip_invalid_prb(const prb_t *prb, res_t *res) {
                             "requires byte alignment for the tensor.\n",
                             __FILE__, __LINE__);
                     res->state = SKIPPED;
-                    res->reason = skip_reason::invalid_case;
+                    res->reason = reason_t::invalid;
                     return;
                 }
             }
@@ -982,7 +980,7 @@ void skip_invalid_prb(const prb_t *prb, res_t *res) {
                         "byte alignment for the tensor.\n",
                         __FILE__, __LINE__);
                 res->state = SKIPPED;
-                res->reason = skip_reason::invalid_case;
+                res->reason = reason_t::invalid;
                 return;
             }
         }
@@ -1003,7 +1001,7 @@ void skip_invalid_prb(const prb_t *prb, res_t *res) {
                 "`--stag`, `--wtag`, and/or `--dtag`.\n",
                 __FILE__, __LINE__);
         res->state = SKIPPED;
-        res->reason = skip_reason::invalid_case;
+        res->reason = reason_t::invalid;
         return;
     }
 
@@ -1019,7 +1017,7 @@ void skip_invalid_prb(const prb_t *prb, res_t *res) {
                 "dimensions must be consistent.\n",
                 __FILE__, __LINE__);
         res->state = SKIPPED;
-        res->reason = skip_reason::invalid_case;
+        res->reason = reason_t::invalid;
         return;
     }
 
@@ -1036,7 +1034,7 @@ void skip_invalid_prb(const prb_t *prb, res_t *res) {
                     "be consistent.\n",
                     __FILE__, __LINE__);
             res->state = SKIPPED;
-            res->reason = skip_reason::invalid_case;
+            res->reason = reason_t::invalid;
             return;
         }
     }
