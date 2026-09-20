@@ -349,7 +349,7 @@ status_t brgemm_desc_set_postops(brgemm_desc_t *brg,
     brg->dt_bias = dt_bias;
     brg->typesize_bias = (dt_bias == data_type::undef)
             ? 0
-            : types::data_type_size(brg->dt_bias);
+            : static_cast<int>(types::data_type_size(brg->dt_bias));
 
     brg->LDD = LDD;
     brg->is_runtime_ldd = is_runtime_value(LDD);
@@ -428,7 +428,7 @@ status_t brgemm_desc_set_postops(brgemm_desc_t *brg,
         return status::unimplemented;
 
     brg->dt_d = dt_d;
-    brg->typesize_D = types::data_type_size(brg->dt_d);
+    brg->typesize_D = static_cast<int>(types::data_type_size(brg->dt_d));
 
     if (!IMPLICATION(brg->is_int8 && brg->dt_d == bf16,
                 is_superset(brg->isa_impl, avx512_core)
@@ -666,6 +666,13 @@ status_t brgemm_desc_finalize(brgemm_desc_t *brg) {
     // Tile paths take unsigned B (TMUL under AMX-INT8, TOP4BUUD/TOP4BSUD
     // under ACE); vector kernels read B as signed. is_tmm is final here.
     if (!IMPLICATION(brg->dt_b == u8, brg->is_tmm))
+        return status::unimplemented;
+
+    // Per-K (block-wise) scales and per-(M,N) compensation are applied to the
+    // partial result of every brgemm call. Only the AMX uker implements that
+    // for tile accumulators; the base kernel would silently drop them.
+    if (brg->is_tmm && !brg->can_dispatch_uker()
+            && (brg->has_per_k_scales() || brg->with_per_mn_compensation))
         return status::unimplemented;
 
     // Required for EVEX encoding for offsets

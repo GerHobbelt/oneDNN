@@ -158,7 +158,16 @@ constexpr Xbyak::Operand::Code abi_not_param_reg =
 
 #endif
 
-class jit_generator_t : public Xbyak::MmapAllocator,
+// Clear Xbyak's sticky thread-local error before CodeGenerator is
+// constructed so that we detect any new error thrown by its constructor.
+// Clearing any prior thread-local error now is safe because any such error
+// should already have been acted on and therefore is now stale.
+struct jit_error_reset_t {
+    jit_error_reset_t() { Xbyak::ClearError(); }
+};
+
+class jit_generator_t : private jit_error_reset_t,
+                        public Xbyak::MmapAllocator,
                         public Xbyak::CodeGenerator {
 private:
     const int xmm_len = 16;
@@ -413,7 +422,7 @@ public:
             mov(reg_offt, raw_offt);
             add(base, reg_offt);
         } else {
-            add(base, raw_offt);
+            add(base, static_cast<uint32_t>(raw_offt));
         }
     }
 
@@ -423,7 +432,7 @@ public:
             mov(reg_offt, raw_offt);
             sub(base, reg_offt);
         } else {
-            sub(base, raw_offt);
+            sub(base, static_cast<uint32_t>(raw_offt));
         }
     }
 
@@ -2755,8 +2764,8 @@ public:
             const Xbyak::Reg64 &reg_tmp,
             const std::function<void(int)> &tail_process,
             const data_type_t data_type = data_type::f32) {
-        const auto simd_w
-                = vreg_traits_t<Vmm>::vlen / types::data_type_size(data_type);
+        const int simd_w = vreg_traits_t<Vmm>::vlen
+                / static_cast<int>(types::data_type_size(data_type));
 
         Xbyak::Label label_tbl, label_tbl_end;
         std::vector<Xbyak::Label> l_case(simd_w);
@@ -2768,13 +2777,13 @@ public:
 
         // create jump table
         L(label_tbl);
-        for (size_t i = 0; i < simd_w; i++)
+        for (int i = 0; i < simd_w; i++)
             putL(l_case[i]);
 
         // cases for each tail size - from 0 to 3/7
         L(l_case[0]);
         jmp(label_tbl_end, T_NEAR);
-        for (size_t i = 1; i < simd_w; i++) {
+        for (int i = 1; i < simd_w; i++) {
             L(l_case[i]);
             tail_process(i);
             jmp(label_tbl_end, T_NEAR);
