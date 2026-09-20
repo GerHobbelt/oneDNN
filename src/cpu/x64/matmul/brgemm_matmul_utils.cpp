@@ -587,25 +587,14 @@ status_t brgemm_matmul_conf_utils_t::set_or_check_B_tag(memory_desc_t &B_md,
                     : memory_desc_matches_one_of_tag(B_md,
                               plain_tensor_layout_tag,
                               transposed_tensor_layout_tag, acbd, adbc);
-            const bool plain_transposed_matched
-                    = memory_desc_matches_tag(B_md, plain_tensor_layout_tag)
-                    && memory_desc_matches_tag(
-                            B_md, transposed_tensor_layout_tag);
-            if (bgmmc.wei_tag == format_tag::undef
-                    || plain_transposed_matched) {
+            // Plain copy-B kernel does not support odd sizes for subbyte types.
+            // Using transposed version for these cases.
+            if (bgmmc.is_int4_weights && bgmmc.N % 2 != 0) {
+                bgmmc.wei_tag = transposed_tensor_layout_tag;
+            }
+            if (bgmmc.wei_tag == format_tag::undef) {
                 if (gemm_based::check_gemm_input_format(B_md)) {
-                    // Note: Here we batch layout may not be accurately represented
-                    // by the wei_tag string, due to all the permutations of the
-                    // batch. Only the gemm dimensions "n, k" are accurately
-                    // represented in the string representing transposed or not
-                    // TODO: update helper.transB() to handle the case that
-                    // wei tag can be represented in both plain and transposed
                     bgmmc.wei_tag = helper.transB() == 'N'
-                                    || (plain_transposed_matched
-                                            && B_d.blocking_desc()
-                                                            .strides[bgmmc.ndims
-                                                                    - 1]
-                                                    == 1)
                             ? plain_tensor_layout_tag
                             : transposed_tensor_layout_tag;
                 }
@@ -2172,9 +2161,12 @@ void init_aux_values(brgemm_matmul_conf_t &bgmmc,
         bgmmc.buffer_c_chunk_sz = rnd_up(bgmmc.N_blk, bgmmc.LDC) * bgmmc.M_blk
                 * bgmmc.acc_dt_sz;
     } else {
+        const dim_t c_buf_rows = bgmmc.gemv_swap_a_b ? bgmmc.N : bgmmc.M;
+        const dim_t c_buf_rows_blk
+                = bgmmc.gemv_swap_a_b ? bgmmc.N_blk : bgmmc.M_blk;
         bgmmc.buffer_c_chunk_sz = bgmmc.acc_dt_sz
                 * (bgmmc.is_runtime_N ? bgmmc.N_blk : bgmmc.LDC)
-                * (bgmmc.nthr_k > 1 ? bgmmc.M : bgmmc.M_blk);
+                * (bgmmc.nthr_k > 1 ? c_buf_rows : c_buf_rows_blk);
     }
 
     if (!bgmmc.use_buffer_c) {
@@ -2327,8 +2319,8 @@ void init_aux_values(brgemm_matmul_conf_t &bgmmc,
     bgmmc.has_zero_point_b = bgmmc.wei_zp_type != brgemm_broadcast_t::none;
     bgmmc.has_zero_point_c = bgmmc.dst_zp_type != brgemm_broadcast_t::none;
     bgmmc.post_ops_applicable = one_of(true, bgmmc.with_sum, bgmmc.with_bias,
-            (bgmmc.with_src_scales || bgmmc.with_wei_scales)
-                    && !bgmmc.apply_scales_in_buffer_b,
+            bgmmc.with_src_scales,
+            bgmmc.with_wei_scales && !bgmmc.apply_scales_in_buffer_b,
             bgmmc.with_eltwise, bgmmc.with_binary, bgmmc.acc_dt != bgmmc.dst_dt,
             bgmmc.s8s8_compensation_required, bgmmc.has_zero_point_a,
             bgmmc.has_zero_point_b && !bgmmc.with_wei_decompression,

@@ -644,12 +644,16 @@ status_t dnnl_primitive_attr_set_scales_v3(primitive_attr_t *attr, int arg,
                         quantization_mode::dynamic_mx,
                         quantization_mode::dynamic_fp),
             VERBOSE_BAD_PARAM, "qmode");
-    VCHECK_ATTR(
-            utils::one_of(data_type, f32, bf16, f16, e8m0, f8_e5m2, f8_e4m3),
+    VCHECK_ATTR(utils::one_of(data_type, f32, bf16, f16, e8m0, f8_e4m3),
+            VERBOSE_INVALID_DATATYPE, "scales");
+    // A single low-precision scale is not expected as they work per group.
+    VCHECK_ATTR(IMPLICATION(utils::one_of(data_type, e8m0, f8_e4m3), mask > 0),
             VERBOSE_INVALID_DATATYPE, "scales");
     VCHECK_ATTR(
             IMPLICATION(group_ndims, validate_dims(group_ndims, group_dims)),
             VERBOSE_BAD_PARAM, "group_dims");
+    VCHECK_ATTR(utils::one_of(group_ndims, 0, 2), VERBOSE_BAD_PARAM,
+            "group_ndims must be 0 or 2");
     if (is_on_host) { // only single value host-side scale is supported
         VCHECK_ATTR(mask == 0, VERBOSE_BAD_PARAM, "mask");
         VCHECK_ATTR(group_ndims == 0, VERBOSE_BAD_PARAM, "group_ndims");
@@ -695,6 +699,8 @@ status_t dnnl_primitive_attr_set_zero_points_v2(dnnl_primitive_attr_t attr,
     VCHECK_ATTR(
             IMPLICATION(group_ndims, validate_dims(group_ndims, group_dims)),
             VERBOSE_BAD_PARAM, "group_dims");
+    VCHECK_ATTR(utils::one_of(group_ndims, 0, 2), VERBOSE_BAD_PARAM,
+            "group_ndims must be 0 or 2");
 
     if (is_on_host) { // host-side zero point is only supported as single scalar value
         VCHECK_ATTR(mask == 0, VERBOSE_BAD_PARAM, "mask");
@@ -703,6 +709,8 @@ status_t dnnl_primitive_attr_set_zero_points_v2(dnnl_primitive_attr_t attr,
     } else {
         VCHECK_ATTR(mask >= 0, VERBOSE_BAD_PARAM, "mask");
         VCHECK_ATTR(group_ndims >= 0, VERBOSE_BAD_PARAM, "group_ndims");
+        VCHECK_ATTR(IMPLICATION(group_ndims > 0, mask > 0), VERBOSE_BAD_PARAM,
+                "mask incompatible with group_dims");
         return attr->zero_points_.set(
                 arg, mask, data_type, group_ndims, group_dims);
     }
@@ -722,6 +730,10 @@ status_t dnnl_primitive_attr_set_precomputed_reductions(
     VCHECK_ATTR(
             IMPLICATION(group_ndims, validate_dims(group_ndims, group_dims)),
             VERBOSE_BAD_PARAM, "group_dims");
+    VCHECK_ATTR(utils::one_of(group_ndims, 0, 2), VERBOSE_BAD_PARAM,
+            "group_ndims must be 0 or 2");
+    VCHECK_ATTR(IMPLICATION(group_ndims > 0, mask > 0), VERBOSE_BAD_PARAM,
+            "mask incompatible with group_dims");
 
     return attr->precomputed_reductions_.set(
             arg, mask, data_type, group_ndims, group_dims);

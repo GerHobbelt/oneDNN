@@ -159,28 +159,14 @@ The following attributes and post-ops are supported:
 | Post-op   | [Binary](@ref dnnl::post_ops::append_binary)                   | Applies a @ref dnnl_api_binary operation to the result                        | General binary post-op restrictions |
 | Post-op   | [Prelu](@ref dnnl::post_ops::append_prelu)                     | Applies an @ref dnnl_api_prelu operation to the result                        |                                     |
 
-The following masks are supported by the primitive:
-- 0, which applies one scale / zero point value to an entire tensor
-- 1, which applies a scale / zero point values along `k`-dimension
-  for #DNNL_ARG_WEIGHTS. Values could be grouped along this dimension
-  via specifying scales / zero points shapes for the attribute
-  (see the code example @ref matmul_with_weight_only_quantization_cpp).
-- 2, which applies a scale / zero point values per column along the
-  `n`-dimension for #DNNL_ARG_WEIGHTS.
+The `mask` and `groups` parameters for scales and zero-points follow the
+conventions described in the
+[quantization guide](@ref dgaq_constructing_mask_and_groups).
 
-When scales and/or zero-points masks are specified, the user must
-provide the corresponding scales and/or zero-points as additional
-input memory objects with argument `DNNL_ARG_ATTR_SCALES |
-DNNL_ARG_${MEMORY_INDEX}` or `DNNL_ARG_ATTR_ZERO_POINTS |
-DNNL_ARG_${MEMORY_INDEX}` during the execution stage. For instance, a
-source tensor zero points memory argument would be passed with index
-(`DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_SRC`).
-
-When Dropout is specified, at the execution stage the user must provide 2 input
-memory objects with #DNNL_ARG_ATTR_DROPOUT_PROBABILITY (1x1x...x1 f32 value
-from 0.f to 1.f) and #DNNL_ARG_ATTR_DROPOUT_SEED (1x1x...x1 s32 value from INT_MIN
-to INT_MAX), and 1 output memory object with #DNNL_ARG_ATTR_DROPOUT_MASK (u8
-memory buffer that shares its shape with the destination buffer).
+Scales, zero-points, and dropout require additional memory arguments at
+execution time. See the
+[quantization guide](@ref dgaq_execution) and the
+[dropout guide](@ref dev_guide_attributes_dropout) for details.
 
 @note Check the [list of examples and tutorials](#examples) below to see
 run-time attributes in use.
@@ -409,6 +395,15 @@ Per-expert-column weight scales:
 attr.set_scales_mask(DNNL_ARG_WEIGHTS, (1 << 0) | (1 << 2));
 // Scale tensor: [num_groups, N] - dense 2D tensor
 // Layout: standard ab layout
+~~~
+
+K-grouped weight scales (e.g., MXFP8 with block size 32):
+~~~cpp
+attr.set_scales(DNNL_ARG_WEIGHTS, (1 << 0) | (1 << 1) | (1 << 2),
+    {32, 1}, memory::data_type::e8m0);
+// Groups are 2D {gK, gN} and are applied to two last dimensions of the tensor
+// Scale tensor: [num_groups, K/32, N] - dense 3D tensor
+// Layout: standard abc layout
 ~~~
 
 Bias per expert:

@@ -91,6 +91,11 @@ struct gen_t : public primitive_t {
             // weights-only compression cases, since A/B have different data types
             swap_ab_ &= !wei_decomp_;
 
+            // No kernels with transposed C, if swap_ab is disabled (e.g. due
+            // to wei_decomp_) - this case cannot be handled.
+            VDISPATCH_GEMM(IMPLICATION(d->transc() == dnnl_trans, swap_ab_),
+                    VERBOSE_UNSUPPORTED_TAG);
+
             if (swap_ab_) {
                 // Do not use transposed B when it is unnecessary
                 if (!transa_ && m == 1) {
@@ -367,9 +372,8 @@ struct gen_t : public primitive_t {
 
         status_t query(query_t what, int idx, void *result) const override {
             switch ((int)what) {
-                case (int)query::preferred_gpu_threads_per_eu: {
-                    int grfs = kernel_desc_.driver_info()->grfCount;
-                    *(int *)result = (grfs > 128) ? 4 : 8;
+                case (int)query::preferred_gpu_grf_per_thread: {
+                    *(int *)result = kernel_desc_.driver_info()->grfCount;
                     break;
                 }
                 default: return gemm::pd_t::query(what, idx, result);
