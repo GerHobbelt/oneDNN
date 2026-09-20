@@ -631,14 +631,14 @@ struct jit_uni_pooling_args_t {
 struct jit_resampling_conf_t {
     unsigned ndims = 0;
 
-    unsigned c = 0;
-    unsigned id = 0, ih = 0, iw = 0;
-    unsigned od = 0, oh = 0, ow = 0;
+    dim_t c = 0;
+    dim_t id = 0, ih = 0, iw = 0;
+    dim_t od = 0, oh = 0, ow = 0;
 
-    unsigned stride_d = 0;
-    unsigned stride_h = 0;
-    unsigned stride_w = 0;
-    unsigned inner_stride = 0;
+    dim_t stride_d = 0;
+    dim_t stride_h = 0;
+    dim_t stride_w = 0;
+    dim_t inner_stride = 0;
 
     // The linear algorithm is an approximation of the point
     // value based on the limit values. For one dimension,
@@ -652,10 +652,10 @@ struct jit_resampling_conf_t {
     bool is_saturation_needed = false;
     data_type_t src_data_type = data_type::undef;
     data_type_t dst_data_type = data_type::undef;
-    size_t src_dt_size = 0;
-    size_t dst_dt_size = 0;
+    int src_dt_size = 0;
+    int dst_dt_size = 0;
     size_t output_data_size = 0;
-    size_t el_size_of_indices = 0;
+    int el_size_of_indices = 0;
 
     bool is_blocked_8_format = false;
     format_tag_t src_tag = format_tag::undef;
@@ -916,14 +916,14 @@ struct jit_shuffle_conf_t {
     dim_t group_size = 0;
     dim_t axis = 0;
     dim_t axis_size = 0;
-    dim_t simd_tail = 0;
+    int simd_tail = 0;
 
-    unsigned simd_w = 0;
+    int simd_w = 0;
 
     jit_memory_tag_kind_t tag_kind = jit_memory_tag_kind_t::undef;
     data_type_t data_type = data_type::undef;
-    size_t dt_size = 0;
-    unsigned el_size_of_indices = 0;
+    int dt_size = 0;
+    int el_size_of_indices = 0;
     dim_t c_split_size = 0;
     dim_t sp_split_size = 0;
 
@@ -971,7 +971,7 @@ struct jit_binary_conf_t {
     bool is_ternary_op = false;
     bool is_src_different_layouts = false;
     dim_t outer_dims = 1;
-    int src1_stride = 1;
+    dim_t src1_stride = 1;
     int not_bcasted_sp_dims = 0;
     cpu_isa_t isa = isa_undef;
 
@@ -1001,9 +1001,9 @@ struct jit_reduction_conf_t {
     data_type_t dst_type = data_type::undef;
     data_type_t acc_type = data_type::undef;
 
-    std::size_t src_dt_size = 0;
-    std::size_t dst_dt_size = 0;
-    std::size_t acc_dt_size = 0;
+    int src_dt_size = 0;
+    int dst_dt_size = 0;
+    int acc_dt_size = 0;
 
     alg_kind_t alg = alg_kind::undef;
     cpu_isa_t isa = isa_undef;
