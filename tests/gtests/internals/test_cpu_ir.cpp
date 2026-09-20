@@ -271,7 +271,7 @@ private:
 // the system would incorrectly think a value is no longer needed even though it
 // is still in use.
 TEST(IRBuilderTests, OperationOrderMetadataAndDefUse) {
-    ir_t ir {};
+    ir_t ir;
     const vreg_t ptr = ir.new_gpr();
     ir.load_param(ptr, 0);
 
@@ -285,7 +285,7 @@ TEST(IRBuilderTests, OperationOrderMetadataAndDefUse) {
     // AVX2 only.
     ir.vload(b, ptr, simd_w * (dim_t)sizeof(float));
 
-    ir.vfma(acc, a, b);
+    ir.vdot(acc, a, b);
 
     // Instructions appear in the exact order they were built.
     ASSERT_EQ(ir.n_ops(), 5);
@@ -293,7 +293,7 @@ TEST(IRBuilderTests, OperationOrderMetadataAndDefUse) {
     EXPECT_EQ(ir.ops()[1].kind, op_kind_t::vzero);
     EXPECT_EQ(ir.ops()[2].kind, op_kind_t::vload);
     EXPECT_EQ(ir.ops()[3].kind, op_kind_t::vload);
-    EXPECT_EQ(ir.ops()[4].kind, op_kind_t::vfma);
+    EXPECT_EQ(ir.ops()[4].kind, op_kind_t::vdot);
 
     // Register kinds and data type are recorded for the allocator and emitter.
     EXPECT_EQ(ir.vreg_info()[(int)ptr].kind, reg_kind_t::gpr);
@@ -320,7 +320,7 @@ TEST(IRBuilderTests, OperationOrderMetadataAndDefUse) {
     EXPECT_EQ(defs, std::vector<int>({(int)a}));
     EXPECT_EQ(uses, std::vector<int>({(int)ptr}));
 
-    // vfma accumulates in place so the destination is read and written, both
+    // vdot accumulates in place so the destination is read and written, both
     // sources are read.
     ir.def_use(ir.ops()[4], defs, uses);
     EXPECT_EQ(defs, std::vector<int>({(int)acc}));
@@ -335,7 +335,7 @@ TEST(IRBuilderTests, OperationOrderMetadataAndDefUse) {
 // rather than emitted as a branch that is never taken.
 TEST(IRBuilderTests, LoopLinkageAndSingleIterationInlining) {
     {
-        ir_t ir {};
+        ir_t ir;
         const vreg_t acc = ir.new_gpr();
         ir.mov_imm(acc, 0);
         emit_loop_imm(ir, 4, [&]() { ir.add_imm(acc, 1); });
@@ -357,7 +357,7 @@ TEST(IRBuilderTests, LoopLinkageAndSingleIterationInlining) {
 
     {
         // A single-iteration loop is inlined so no loop markers are emitted.
-        ir_t ir {};
+        ir_t ir;
         const vreg_t acc = ir.new_gpr();
         ir.mov_imm(acc, 0);
         emit_loop_imm(ir, 1, [&]() { ir.add_imm(acc, 1); });
@@ -372,7 +372,7 @@ TEST(IRBuilderTests, LoopLinkageAndSingleIterationInlining) {
 // each jump targets the right label. This proves the forward-edge control flow
 // is constructed correctly.
 TEST(IRBuilderTests, ForwardEdgeControlFlow) {
-    ir_t ir {};
+    ir_t ir;
 
     const vreg_t cond = ir.new_gpr();
     ir.load_param(cond, 0);
@@ -407,7 +407,7 @@ TEST(IRBuilderTests, ForwardEdgeControlFlow) {
 
     // then:
     ir.vzero(acc);
-    ir.vfma(acc, a, a); // arbitrary work, just to populate the block
+    ir.vdot(acc, a, a); // arbitrary work, just to populate the block
     ir.jmp(lbl_end);
 
     // else:
@@ -486,7 +486,7 @@ TEST(AllocatorTests, DoesNotDoubleAllocateSimultaneouslyLiveValues) {
 // needed gives up its register, which is then used by a later temporary.
 // A value that is still in use keeps its own register.
 TEST(AllocatorTests, ReusesRegisterOfExpiredTemporary) {
-    ir_t ir {};
+    ir_t ir;
 
     const vreg_t acc = ir.new_gpr();
     ir.mov_imm(acc, 0);
@@ -584,7 +584,7 @@ TEST(AllocatorTests, AllocatesDeterministically) {
 // Builds a small reduction IR (dot product of one vector pair) used by the
 // emitter and integration tests.
 ir_t build_dot_ir() {
-    ir_t ir {};
+    ir_t ir;
 
     // Load pointers for a, b, c.
     const vreg_t a_ptr = ir.new_gpr();
@@ -605,7 +605,7 @@ ir_t build_dot_ir() {
     const vreg_t b = ir.new_vec(data_type::f32);
     ir.vload(b, b_ptr, 0);
 
-    ir.vfma(acc, a, b);
+    ir.vdot(acc, a, b);
 
     const vreg_t ws = ir.new_vec(data_type::f32);
     ir.vhreduce(acc, ws);
@@ -640,7 +640,7 @@ TEST(EmitterTests, EmitsValidCodeForSpilledAllocation) {
 
     // Six independent accumulators plus temporaries exceed a four-register
     // vector file, so the allocator must spill.
-    ir_t ir {};
+    ir_t ir;
 
     const vreg_t a_ptr = ir.new_gpr();
     ir.load_param(a_ptr, 0);
@@ -660,7 +660,7 @@ TEST(EmitterTests, EmitsValidCodeForSpilledAllocation) {
     for (int r = 0; r < 6; r++) {
         const vreg_t a = ir.new_vec(data_type::f32);
         ir.vload(a, a_ptr, r * simd_w * (dim_t)sizeof(float));
-        ir.vfma(acc[r], a, b);
+        ir.vdot(acc[r], a, b);
     }
 
     ir_kernel_t k(ir, /*vec_regs_limit=*/4);
@@ -689,7 +689,7 @@ TEST(IntegrationTests, BuildsLoopReduction) {
     constexpr int k_blocks = 2;
     constexpr int k = k_blocks * simd_w; // 16 elements
 
-    ir_t ir {};
+    ir_t ir;
 
     const vreg_t a_ptr = ir.new_gpr();
     ir.load_param(a_ptr, offsetof(dot_args_t, a));
@@ -709,7 +709,7 @@ TEST(IntegrationTests, BuildsLoopReduction) {
         ir.vload(a, a_ptr, 0);
         const vreg_t b = ir.new_vec(data_type::f32);
         ir.vload(b, b_ptr, 0);
-        ir.vfma(acc, a, b);
+        ir.vdot(acc, a, b);
     }, [&]() {
         ir.add_imm(a_ptr, simd_w * (dim_t)sizeof(float));
         ir.add_imm(b_ptr, simd_w * (dim_t)sizeof(float));
@@ -738,7 +738,7 @@ TEST(IntegrationTests, BuildsLoopReduction) {
 // Computes a dot product where one vector is multiplied by n vectors into
 // n independent accumulators, each of which is reduced and stored.
 ir_t build_shared_vector_dot_ir(int n) {
-    ir_t ir {};
+    ir_t ir;
 
     const vreg_t a_ptr = ir.new_gpr();
     ir.load_param(a_ptr, offsetof(dot_args_t, a));
@@ -761,7 +761,7 @@ ir_t build_shared_vector_dot_ir(int n) {
         const vreg_t a = ir.new_vec(data_type::f32);
         ir.vload(a, a_ptr, r * simd_w * (dim_t)sizeof(float));
 
-        ir.vfma(acc[r], a, b);
+        ir.vdot(acc[r], a, b);
     }
 
     const vreg_t ws = ir.new_vec(data_type::f32);
@@ -831,7 +831,7 @@ struct select_args_t {
 TEST(IntegrationTests, BranchSelectsCorrectValue) {
     SKIP_IF_NO_AVX2();
 
-    ir_t ir {};
+    ir_t ir;
 
     const vreg_t cond = ir.new_gpr();
     ir.load_param(cond, offsetof(select_args_t, cond));

@@ -1,5 +1,6 @@
 #===============================================================================
 # Copyright 2018 Intel Corporation
+# Copyright 2026 Advanced Micro Devices, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -357,6 +358,11 @@ onednn_option(ENABLE_GEMM_KERNELS_ISA "ALL"
 onednn_option(SAFE_RBP OFF
     "Prohibits RBP register clobbering in JIT kernels. Use this option to enable
     runtime profiling with tools like Flame Graph.")
+
+onednn_option(X64_USE_ZEN OFF
+    "Enable ZenDNN integration. When ON, configuration requires a discoverable
+    ZenDNN package (>= 6.0.0) and ONEDNN_CPU_RUNTIME=OMP, and fails otherwise.")
+set(ZENDNNROOT "" CACHE STRING "Path to ZenDNN installation root")
 
 # -------------------
 # AArch64 CPU options

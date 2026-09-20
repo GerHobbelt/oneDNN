@@ -97,9 +97,9 @@ void ir_t::vload(vreg_t dst, vreg_t base, dim_t disp) {
     ops_.push_back(op);
 }
 
-void ir_t::vfma(vreg_t dst, vreg_t a, vreg_t b) {
+void ir_t::vdot(vreg_t dst, vreg_t a, vreg_t b) {
     op_t op;
-    op.kind = op_kind_t::vfma;
+    op.kind = op_kind_t::vdot;
     op.dst = dst;
     op.s0 = a;
     op.s1 = b;
@@ -143,6 +143,14 @@ void ir_t::vstore_masked(
     // `none` when no mask register is needed
     op.s1 = mask;
     op.imm = elems;
+    op.mem.base = base;
+    op.mem.disp = disp;
+    ops_.push_back(op);
+}
+
+void ir_t::prefetch(vreg_t base, dim_t disp) {
+    op_t op;
+    op.kind = op_kind_t::prefetch;
     op.mem.base = base;
     op.mem.disp = disp;
     ops_.push_back(op);
@@ -203,7 +211,7 @@ void ir_t::jz(vreg_t cond, label_t label_id) {
 //
 // Some tricky cases:
 // - Operations that both read and write the same register (like add_imm,
-//   vfma) count as both a use and a def, because they read the old value
+//   vdot) count as both a use and a def, because they read the old value
 //   and then overwrite it.
 // - vhreduce uses its temporary register (s0) as both read and written,
 //   so the register allocator keeps it separate from the accumulator.
@@ -246,7 +254,7 @@ void ir_t::def_use(
             u(op.mem.base);
             d(op.dst);
             break;
-        case op_kind_t::vfma:
+        case op_kind_t::vdot:
             u(op.dst);
             u(op.s0);
             u(op.s1);
@@ -269,6 +277,7 @@ void ir_t::def_use(
             u(op.s1); // mask (-1 -> not counted, dropped by u())
             u(op.mem.base);
             break;
+        case op_kind_t::prefetch: u(op.mem.base); break;
         case op_kind_t::loop_begin:
             if (op.init_is_reg) u(op.s0);
             d(op.dst);

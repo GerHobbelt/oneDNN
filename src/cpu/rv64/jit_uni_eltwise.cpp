@@ -35,25 +35,37 @@ using namespace Xbyak_riscv;
 namespace {
 
 // Emit one vector-length-agnostic pass: load `len` elements from a1 (and, for
-// backward, diff_dst from a3), convert to f32, run the injector, convert back
-// (with saturation for int types), store to a2. The injector always computes in
-// f32; non-f32 dtypes are converted (with saturation) at the load/store edge.
+// backward, diff_dst from a3), convert to f32, run the injector, convert back,
+// store to a2. The injector always computes in f32: f16 is converted at the
+// load/store edge, and the integer dtypes (s32/s8/u8, forward only) are
+// widened to f32 on load and saturated back to the dst range on store — the
+// reference also evaluates eltwise in float. RISC-V vfcvt.x.f saturates, so
+// the upper s32 clamp is max_value<f32>(s32) == 2147483520.f (2147483647.f is
+// not representable and rounds up to 2^31); the s8/u8 bounds are exact.
 //
-// Register layout (max LMUL = m4): a1=in, a2=out, a3=diff_dst, a4=len,
-// t0=vl, t1=bytes, t2=gpr scratch; v4 = f32 compute group, v2 = 8/16-bit
-// staging, v20 = diff_dst (bwd) reused as the i16 narrow temp, v8/v12/v16 =
-// injector aux, v0 = bwd mask, fa0/fa1 = injector FP scratch, fa2 = clamp const.
+// Register layout: a1=in, a2=out, a3=diff_dst, a4=len, t0=vl, t1=bytes,
+// t2=gpr scratch; v4 = f32 compute group, v2 = f16/int staging, v20 =
+// diff_dst (bwd), v8/v12/v16 = injector aux0..2, v0 = mask, fa0/fa1 =
+// injector FP scratch (fa0 is reused to materialize the integer saturation
+// bounds after the injector is done). The injector's 4th/5th aux (gelu_erf
+// fwd, gelu_tanh bwd) are v20/v24 in forward (diff_dst absent) and v24/v28 in
+// backward (v20 holds diff_dst). The compute LMUL is m1 for f32, m2 for f16
+// (e16/m1 widening pair), and m4 for s32 and s8/u8 (e8/m1 widening pair);
+// every group used (v4, v8, v12, v16, v20, v24) is 4-aligned, so the layout
+// is legal at each of these LMULs.
 void emit_eltwise_loop(jit_generator_t *h, alg_kind_t alg, float alpha,
         float beta, float scale, data_type_t dt, bool is_fwd) {
+    // Integer backward is rejected by the pd (matches x64, whose integer
+    // eltwise is forward-only).
+    assert(IMPLICATION(
+            !is_fwd, utils::one_of(dt, data_type::f32, data_type::f16)));
+
     const Reg p_in = a1, p_out = a2, p_dd = a3, len = a4, vl = t0, bytes = t1,
               gpr = t2;
-    const VReg vd(4), vt(2), vdd(20), vi16(20);
-    const FReg fc = fa2;
-
-    eltwise_injector::static_params_t sp(
-            VReg(8), VReg(12), VReg(16), fa0, fa1, gpr, is_fwd);
-    jit_uni_eltwise_injector_t<v> inj(h, alg, alpha, beta, scale, sp);
-
+    const VReg vd(4), vt(2), vdd(20);
+    const FReg fc = fa0;
+    // Materialize an f32 constant into fc (injector scratch, dead once
+    // compute_vector returns) for the integer saturation bounds.
     auto setf = [&](float val) {
         uint32_t bits;
         std::memcpy(&bits, &val, sizeof(bits));
@@ -61,7 +73,11 @@ void emit_eltwise_loop(jit_generator_t *h, alg_kind_t alg, float alpha,
         h->fmv_w_x(fc, gpr);
     };
 
-    const bool is_s8 = dt == data_type::s8;
+    const VReg v_aux3 = is_fwd ? VReg(20) : VReg(24);
+    const VReg v_aux4 = is_fwd ? VReg(24) : VReg(28);
+    eltwise_injector::static_params_t sp(
+            VReg(8), VReg(12), VReg(16), v_aux3, v_aux4, fa0, fa1, gpr, is_fwd);
+    jit_uni_eltwise_injector_t<v> inj(h, alg, alpha, beta, scale, sp);
 
     Label loop, done;
     h->L(loop);
@@ -72,14 +88,6 @@ void emit_eltwise_loop(jit_generator_t *h, alg_kind_t alg, float alpha,
         h->vsetvli(vl, len, SEW::e32, LMUL::m1, VTA::ta, VMA::ma);
         h->vle32_v(vd, p_in);
         if (!is_fwd) h->vle32_v(vdd, p_dd);
-    } else if (dt == data_type::s32) {
-        h->vsetvli(vl, len, SEW::e32, LMUL::m1, VTA::ta, VMA::ma);
-        h->vle32_v(vd, p_in);
-        h->vfcvt_f_x_v(vd, vd);
-        if (!is_fwd) {
-            h->vle32_v(vdd, p_dd);
-            h->vfcvt_f_x_v(vdd, vdd);
-        }
     } else if (dt == data_type::f16) {
         h->vsetvli(vl, len, SEW::e16, LMUL::m1, VTA::ta, VMA::ma);
         h->vle16_v(vt, p_in);
@@ -89,24 +97,22 @@ void emit_eltwise_loop(jit_generator_t *h, alg_kind_t alg, float alpha,
             h->vfwcvt_f_f_v(vdd, vt);
         }
         h->vsetvli(x0, vl, SEW::e32, LMUL::m2, VTA::ta, VMA::ma);
+    } else if (dt == data_type::s32) {
+        h->vsetvli(vl, len, SEW::e32, LMUL::m4, VTA::ta, VMA::ma);
+        h->vle32_v(vd, p_in);
+        h->vfcvt_f_x_v(vd, vd);
     } else { // s8 / u8
-        const VReg vt2(3); // second 8-bit staging reg (backward diff_dst)
         h->vsetvli(vl, len, SEW::e8, LMUL::m1, VTA::ta, VMA::ma);
         h->vle8_v(vt, p_in);
-        if (!is_fwd) h->vle8_v(vt2, p_dd);
-        // vsext/vzext.vf4 operate at the DESTINATION vtype (e32m4) and read the
-        // source group as 8-bit, so switch vtype before extending.
+        // vsext/vzext.vf4 operate at the destination vtype (e32/m4) and read
+        // the source group as 8-bit, so switch vtype before extending.
         h->vsetvli(x0, vl, SEW::e32, LMUL::m4, VTA::ta, VMA::ma);
-        if (is_s8) {
+        if (dt == data_type::s8) {
             h->vsext_vf4(vd, vt);
-            if (!is_fwd) h->vsext_vf4(vdd, vt2);
             h->vfcvt_f_x_v(vd, vd);
-            if (!is_fwd) h->vfcvt_f_x_v(vdd, vdd);
         } else {
             h->vzext_vf4(vd, vt);
-            if (!is_fwd) h->vzext_vf4(vdd, vt2);
             h->vfcvt_f_xu_v(vd, vd);
-            if (!is_fwd) h->vfcvt_f_xu_v(vdd, vdd);
         }
     }
 
@@ -117,18 +123,19 @@ void emit_eltwise_loop(jit_generator_t *h, alg_kind_t alg, float alpha,
     // ---- convert back + store (vtype currently e32 at the compute LMUL) ----
     if (dt == data_type::f32) {
         h->vse32_v(vd, p_out);
-    } else if (dt == data_type::s32) {
-        setf(-2147483648.0f);
-        h->vfmax_vf(vd, vd, fc);
-        setf(2147483647.0f);
-        h->vfmin_vf(vd, vd, fc);
-        h->vfcvt_x_f_v(vd, vd);
-        h->vse32_v(vd, p_out);
     } else if (dt == data_type::f16) {
         h->vsetvli(x0, vl, SEW::e16, LMUL::m1, VTA::ta, VMA::ma);
         h->vfncvt_f_f_w(vt, vd); // e32m2 -> e16m1
         h->vse16_v(vt, p_out);
+    } else if (dt == data_type::s32) {
+        setf(-2147483648.0f);
+        h->vfmax_vf(vd, vd, fc);
+        setf(2147483520.0f); // max_value<f32>(s32)
+        h->vfmin_vf(vd, vd, fc);
+        h->vfcvt_x_f_v(vd, vd);
+        h->vse32_v(vd, p_out);
     } else { // s8 / u8
+        const bool is_s8 = dt == data_type::s8;
         setf(is_s8 ? -128.0f : 0.0f);
         h->vfmax_vf(vd, vd, fc);
         setf(is_s8 ? 127.0f : 255.0f);
@@ -137,22 +144,23 @@ void emit_eltwise_loop(jit_generator_t *h, alg_kind_t alg, float alpha,
             h->vfcvt_x_f_v(vd, vd);
         else
             h->vfcvt_xu_f_v(vd, vd);
-        // narrow i32(m4) -> i16(m2) -> i8(m1); values pre-clamped so truncation
-        // via vnsrl by 0 is exact.
+        // Narrow i32(m4) -> i16(m2) -> i8(m1) through vt; the second vnsrl
+        // overlaps its source in the lowest-numbered part of the group, which
+        // the narrowing overlap rule allows. Values are pre-clamped so the
+        // vnsrl-by-0 truncation is exact.
         h->vsetvli(x0, vl, SEW::e16, LMUL::m2, VTA::ta, VMA::ma);
-        h->vnsrl_wi(vi16, vd, 0);
+        h->vnsrl_wi(vt, vd, 0);
         h->vsetvli(x0, vl, SEW::e8, LMUL::m1, VTA::ta, VMA::ma);
-        h->vnsrl_wi(vt, vi16, 0);
+        h->vnsrl_wi(vt, vt, 0);
         h->vse8_v(vt, p_out);
     }
 
     // ---- advance pointers by vl * sizeof(dtype) and loop ----
     const int dsz = static_cast<int>(types::data_type_size(dt));
-    const int sh = dsz == 4 ? 2 : (dsz == 2 ? 1 : 0);
-    if (sh)
-        h->slli(bytes, vl, sh);
-    else
+    if (dsz == 1) // s8 / u8
         h->mv(bytes, vl);
+    else
+        h->slli(bytes, vl, dsz == 4 ? 2 : 1); // f32/s32 -> 2, f16 -> 1
     h->add(p_in, p_in, bytes);
     h->add(p_out, p_out, bytes);
     if (!is_fwd) h->add(p_dd, p_dd, bytes);
@@ -179,9 +187,7 @@ struct jit_uni_eltwise_fwd_kernel_t : public jit_generator_t {
         , alpha_(alpha)
         , beta_(beta)
         , scale_(scale)
-        , dt_(dt) {
-        create_kernel();
-    }
+        , dt_(dt) {}
     void operator()(const call_params_t *p) const {
         jit_generator_t::operator()(p);
     }
@@ -212,9 +218,7 @@ struct jit_uni_eltwise_bwd_kernel_t : public jit_generator_t {
         , alg_(alg)
         , alpha_(alpha)
         , beta_(beta)
-        , dt_(dt) {
-        create_kernel();
-    }
+        , dt_(dt) {}
     void operator()(const call_params_t *p) const {
         jit_generator_t::operator()(p);
     }
@@ -244,7 +248,7 @@ status_t jit_uni_eltwise_fwd_t<isa>::init(engine_t *engine) {
     const auto &d = *pd()->desc();
     kernel_.reset(new jit_uni_eltwise_fwd_kernel_t(
             d.alg_kind, d.alpha, d.beta, 1.f, pd()->dst_md()->data_type));
-    return status::success;
+    return kernel_->create_kernel();
 }
 
 template <cpu_isa_t isa>
@@ -284,21 +288,23 @@ status_t jit_uni_eltwise_bwd_t<isa>::init(engine_t *engine) {
     UNUSED(engine);
     const auto &d = *pd()->desc();
     kernel_.reset(new jit_uni_eltwise_bwd_kernel_t(
-            d.alg_kind, d.alpha, d.beta, pd()->src_md()->data_type));
-    return status::success;
+            d.alg_kind, d.alpha, d.beta, pd()->data_md()->data_type));
+    return kernel_->create_kernel();
 }
 
 template <cpu_isa_t isa>
 status_t jit_uni_eltwise_bwd_t<isa>::execute(const exec_ctx_t &ctx) const {
-    const auto *src = CTX_IN_MEM(const void *, DNNL_ARG_SRC);
+    // *_use_dst_for_bwd algs read the forward output; the rest read src.
+    const auto *data = pd()->use_dst() ? CTX_IN_MEM(const void *, DNNL_ARG_DST)
+                                       : CTX_IN_MEM(const void *, DNNL_ARG_SRC);
     const auto *diff_dst = CTX_IN_MEM(const void *, DNNL_ARG_DIFF_DST);
     auto *diff_src = CTX_OUT_MEM(void *, DNNL_ARG_DIFF_SRC);
+    const memory_desc_wrapper data_d(pd()->data_md());
     const dim_t len = memory_desc_wrapper(pd()->diff_dst_md()).nelems(true);
-    const size_t es = types::data_type_size(pd()->src_md()->data_type);
+    const size_t es = types::data_type_size(data_d.data_type());
     // Honor non-zero md offsets (dense submemory views); each operand may carry
     // its own offset0.
-    const size_t src_base
-            = (size_t)memory_desc_wrapper(pd()->src_md()).offset0() * es;
+    const size_t data_base = (size_t)data_d.offset0() * es;
     const size_t ddst_base
             = (size_t)memory_desc_wrapper(pd()->diff_dst_md()).offset0() * es;
     const size_t dsrc_base
@@ -310,7 +316,7 @@ status_t jit_uni_eltwise_bwd_t<isa>::execute(const exec_ctx_t &ctx) const {
         balance211(len, nthr, ithr, start, end);
         if (start >= end) return;
         jit_uni_eltwise_bwd_kernel_t::call_params_t p;
-        p.src = static_cast<const char *>(src) + src_base + start * es;
+        p.src = static_cast<const char *>(data) + data_base + start * es;
         p.diff_dst
                 = static_cast<const char *>(diff_dst) + ddst_base + start * es;
         p.diff_src = static_cast<char *>(diff_src) + dsrc_base + start * es;

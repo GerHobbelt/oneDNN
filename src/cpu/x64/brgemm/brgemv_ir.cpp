@@ -30,6 +30,7 @@
 #include "common/c_types_map.hpp"
 #include "common/nstl.hpp"
 #include "common/utils.hpp"
+#include "common/verbose.hpp"
 
 #include "cpu/x64/brgemm/brgemv_ir.hpp"
 #include "cpu/x64/cpu_isa_traits.hpp"
@@ -40,6 +41,10 @@
 
 #define GET_OFF(field) offsetof(brgemm_kernel_params_t, field)
 #define GET_OFF_BATCH_ELEMENT(field) offsetof(brgemm_batch_element_t, field)
+
+#define VCONDCHECK_BRGEMV_IR(cond, msg, ...) \
+    VCONDCHECK(primitive, create, dispatch, brgemv_ir, (cond), \
+            status::unimplemented, msg, ##__VA_ARGS__)
 
 namespace dnnl {
 namespace impl {
@@ -189,12 +194,19 @@ namespace nontrans {
 void emit_microkernel(ir::ir_t &ir, const brgemv_ir_conf_t &cfg,
         const std::vector<ir::vreg_t> &acc, ir::vreg_t a_ptr,
         ir::vreg_t x_ptr) {
+    // GEMV is bandwidth-bound, so SW-prefetch ahead of each load: the x vector
+    // once and every A row. The distance is empirically tuned.
+    constexpr dim_t gemv_pf_dist = 512; // bytes = 8 cache lines
+
     const ir::vreg_t x = ir.new_vec(cfg.dt_x);
     const ir::vreg_t a = ir.new_vec(cfg.dt_a);
+    ir.prefetch(x_ptr, gemv_pf_dist);
     ir.vload(x, x_ptr, 0);
     for (int i = 0; i < (int)acc.size(); i++) {
-        ir.vload(a, a_ptr, cfg.dt_sz_a * (dim_t)i * cfg.lda);
-        ir.vfma(acc[i], a, x);
+        const dim_t a_off = cfg.dt_sz_a * (dim_t)i * cfg.lda;
+        ir.prefetch(a_ptr, a_off + gemv_pf_dist);
+        ir.vload(a, a_ptr, a_off);
+        ir.vdot(acc[i], a, x);
     }
 }
 
@@ -210,7 +222,7 @@ void emit_microkernel_tail(ir::ir_t &ir, const brgemv_ir_conf_t &cfg,
     for (int i = 0; i < (int)acc.size(); i++) {
         ir.vload_masked(a, a_ptr, cfg.dt_sz_a * (dim_t)i * cfg.lda, mask,
                 (int)cfg.k_tail);
-        ir.vfma(acc[i], a, x);
+        ir.vdot(acc[i], a, x);
     }
 }
 
@@ -344,7 +356,7 @@ struct jit_brgemv_ir_kernel_t : public jit_base_brgemm_kernel_t {
 
     void generate() override {
         // Build IR for non-transposed GEMV kernel
-        ir::ir_t ir {};
+        ir::ir_t ir;
         nontrans::build_gemv(brg_, ir);
 
         // Scratch registers (2 gpr + 3 vec) reserved for spill code.
@@ -413,19 +425,28 @@ private:
     DNNL_DISALLOW_COPY_AND_ASSIGN(brgemv_ir_kernel_t);
 };
 
-// Returns true if the descriptor is supported by the GEMV IR kernel.
-bool brgemv_ir_supported(const brgemm_desc_t &brg) {
+// Returns `status::success` if the descriptor is supported by the GEMV IR
+// kernel, otherwise `status::unimplemented`.
+status_t brgemv_ir_supported(const brgemm_desc_t &brg) {
     using namespace data_type;
 
-    if (!utils::everyone_is(f32, brg.dt_a, brg.dt_b, brg.dt_c)) return false;
-    if (brg.isa_impl != avx2) return false;
-    if (brg.transA) return false;
+    VCONDCHECK_BRGEMV_IR(utils::everyone_is(f32, brg.dt_a, brg.dt_b, brg.dt_c),
+            VERBOSE_UNSUPPORTED_DT);
+    VCONDCHECK_BRGEMV_IR(brg.isa_impl == avx2, VERBOSE_UNSUPPORTED_ISA);
+    VCONDCHECK_BRGEMV_IR(
+            !brg.transA, VERBOSE_UNSUPPORTED_FEATURE, "transposed A");
 
-    if (brg.are_post_ops_applicable()) return false;
-    if (brg.alpha != 1.0f) return false;
-    if (brg.beta != 0.0f) return false;
+    VCONDCHECK_BRGEMV_IR(
+            !brg.are_post_ops_applicable(), VERBOSE_UNSUPPORTED_POSTOP);
+    VCONDCHECK_BRGEMV_IR(
+            brg.alpha == 1.0f, VERBOSE_UNSUPPORTED_FEATURE, "alpha != 1");
+    VCONDCHECK_BRGEMV_IR(
+            brg.beta == 0.0f, VERBOSE_UNSUPPORTED_FEATURE, "beta != 0");
 
-    if (brg.is_runtime_lda || brg.is_runtime_ldc) return false;
+    VCONDCHECK_BRGEMV_IR(
+            !brg.is_runtime_lda, VERBOSE_UNSUPPORTED_FEATURE, "runtime lda");
+    VCONDCHECK_BRGEMV_IR(
+            !brg.is_runtime_ldc, VERBOSE_UNSUPPORTED_FEATURE, "runtime ldc");
 
     const int m_block = brg.gemv_bd_block();
     const int dt_sz_a = brg.typesize_A;
@@ -435,14 +456,16 @@ bool brgemv_ir_supported(const brgemm_desc_t &brg) {
     // Ensure indexed displacements fit in 32-bit
     auto fits = [](dim_t v) { return v <= INT32_MAX && v >= INT32_MIN; };
 
-    if (!fits(dt_sz_a * (dim_t)m_block * brg.LDA)) return false;
-    if (!fits(dt_sz_y * (dim_t)m_block * incy)) return false;
+    VCONDCHECK_BRGEMV_IR(fits(dt_sz_a * (dim_t)m_block * brg.LDA),
+            VERBOSE_UNSUPPORTED_FEATURE, "A block offset overflows int32");
+    VCONDCHECK_BRGEMV_IR(fits(dt_sz_y * (dim_t)m_block * incy),
+            VERBOSE_UNSUPPORTED_FEATURE, "y block offset overflows int32");
 
-    return true;
+    return status::success;
 }
 
 brgemm_kernel_t *create_brgemv_ir_kernel(const brgemm_desc_t &brg) {
-    if (!brgemv_ir_supported(brg)) return nullptr;
+    if (brgemv_ir_supported(brg) != status::success) return nullptr;
     return new brgemv_ir_kernel_t(brg);
 }
 

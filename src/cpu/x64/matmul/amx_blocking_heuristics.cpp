@@ -1159,10 +1159,18 @@ bool matmul_amx_blocking_params_macro_t::set_blocking_parameters(
                 && (n_blk_ >= n_decomposition * 3)
                 && ((size_t)k_blk_ >= (64 / gemm_dt_sz) * 4);
 
+        // extendable_k reads A's K dimension rounded up to the tile
+        // granularity directly from memory, so it is only valid when A is
+        // contiguous along K (leading dimension equal to K). A padded LDA
+        // would make the kernel stride rows by the padded value while reading
+        // the extended K, corrupting the result.
         extendable_k_ = K % wei_k_blk != 0 && !skip_extendable_k()
-                && !use_fused_copy_a_;
+                && !use_fused_copy_a_ && get_actual_lda() == K;
 
     } else {
+        is_a_nt_ = true;
+        is_b_nt_ = false;
+
         if (is_postops_bound(k_blk_v)) {
             // Give up on the L1 blocking
             best_score_v = 0;
@@ -1180,13 +1188,13 @@ bool matmul_amx_blocking_params_macro_t::set_blocking_parameters(
         n_chunk_size_ = div_up(n_per_thread, n_blk_);
         m_blk_ = nstl::min(best_m_v * m_decomposition, M);
         m_chunk_size_ = 1;
-        is_a_nt_ = true;
-        is_b_nt_ = false;
         need_prefetch_a_ = false;
         need_prefetch_b_ = ((n_per_thread / n_blk_) >= 2) && !use_buffer_b;
         use_fused_copy_a_ = false;
 
-        extendable_k_ = K % wei_k_blk != 0 && !skip_extendable_k();
+        // extendable_k requires A to be contiguous along K.
+        extendable_k_ = K % wei_k_blk != 0 && !skip_extendable_k()
+                && get_actual_lda() == K;
     }
 
     brgemm_batch_size_ = 1;

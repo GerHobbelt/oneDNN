@@ -328,10 +328,12 @@ of GEMM operations. The following options are supported:
 | [ONEDNN_ENABLE_GEMM_KERNELS_ISA]  | **ALL** | NONE, \<list\>   | Specifies a set of functionality to be available for GeMM kernels for CPU backend based on ISA |
 | ONEDNN_ENABLE_CPU_ISA_HINTS       | **ON**  | OFF              | Enables [CPU ISA hints](@ref dev_guide_cpu_isa_hints)                                          |
 | [ONEDNN_SAFE_RBP]                 | **OFF** | ON               | Enables restriction for JIT kernels to pollute RBP vector register content                     |
+| [ONEDNN_X64_USE_ZEN]              | **OFF** | ON               | Enables integration with the ZenDNN library for AMD (Zen) CPUs                                  |
 
 [ONEDNN_ENABLE_PRIMITIVE_CPU_ISA]: @ref opt_enable_primitive_cpu_isa
 [ONEDNN_ENABLE_GEMM_KERNELS_ISA]: @ref opt_enable_gemm_kernels_isa
 [ONEDNN_SAFE_RBP]: @ref opt_safe_rbp
+[ONEDNN_X64_USE_ZEN]: @ref opt_x64_use_zen
 
 @anchor opt_enable_primitive_cpu_isa
 #### ONEDNN_ENABLE_PRIMITIVE_CPU_ISA
@@ -373,6 +375,41 @@ the RBP register state, preventing corruption of frame pointers. This
 facilitates accurate stack unwinding and profiler trace collection from
 JIT-compiled code regions. Enabling this feature may introduce performance
 overhead due to additional register management.
+
+@anchor opt_x64_use_zen
+#### ONEDNN_X64_USE_ZEN
+
+This option enables integration with the [ZenDNN] library, which provides
+kernels tuned for AMD (Zen) CPUs. It is an opt-in CPU backend that engages at
+runtime only on AMD CPUs. The option is `OFF` by default.
+
+~~~sh
+$ cmake -DONEDNN_X64_USE_ZEN=ON -DZENDNNROOT=<path/to/zendnnl/install> ..
+~~~
+
+The build links against a user-provided, prebuilt ZenDNN install rather than
+building ZenDNN from source. The install is located through the `ZENDNNROOT`
+CMake variable or an environment variable of the same name; oneDNN consumes
+ZenDNN's own `zendnnl-config.cmake` package config from that location. If
+`ZENDNNROOT` is not set, CMake searches the default package paths; if no
+ZenDNN install is found, configuration fails with an error.
+
+When `ONEDNN_X64_USE_ZEN=ON`, the following additional requirements apply
+(they do not affect the default `OFF` build):
+* Targets Linux on x86_64; Windows builds are rejected at configure time.
+* Requires CMake 3.26 or later.
+* Requires GCC 11.2 or later, or Clang 14 or later; other compilers are
+  rejected.
+* Requires ZenDNN version 6.0.0 or later. Both static (archive) and shared
+  ZenDNN builds are supported.
+* Requires `ONEDNN_CPU_RUNTIME=OMP`; ZenDNN only supports the OpenMP threading
+  runtime, and other runtimes are rejected at configure time.
+
+Refer to the [ZenDNN repository](https://github.com/amd/ZenDNN) for
+instructions on building the ZenDNN binary (build it with
+`ZENDNNL_DEPENDS_ONEDNN=OFF` so ZenDNN does not pull in its own oneDNN).
+
+[ZenDNN]: https://github.com/amd/ZenDNN
 
 ### AArch64 CPU options
 

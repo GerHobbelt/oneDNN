@@ -100,8 +100,8 @@ enum class op_kind_t {
     vzero,
     // dst = [base + disp] (load full vector)
     vload,
-    // dst += s0 * s1 (fused multiply-add, e.g., vfmadd231ps)
-    vfma,
+    // dst += sum_{i=0}^{N-1} (s0[i] * s1[i]), where N is the dot length
+    vdot,
     // horizontal reduction of dst; result in element 0. s0 is scratch
     // (overwritten).
     vhreduce,
@@ -117,6 +117,9 @@ enum class op_kind_t {
     vload_masked,
     // stores `imm` elements. Mmask vreg = s1 or -1.
     vstore_masked,
+
+    // prefetch [base + disp] into cache. Reads base, writes nothing.
+    prefetch,
 
     // Control flow
     //
@@ -162,7 +165,7 @@ struct mem_t {
 //
 // kind - which operation this is. Determines how other fields are used.
 // dst  - virtual register that is written to, or `none` if none is written.
-//        Some ops (e.g. vfma/vadd) both read from and write to dst.
+//        Some ops (e.g. vdot/vadd) both read from and write to dst.
 // s0,s1 - source virtual registers (inputs), or `none` if not used.
 // imm   - immediate value whose meaning depends on the kind:
 //         * mov_imm        -> literal constant
@@ -214,10 +217,6 @@ struct DNNL_API ir_t {
     const std::vector<op_t> &ops() const { return ops_; }
     int n_labels() const { return n_labels_; }
 
-    // Add a vreg of kind `k` and, for a vec, element data type `dt`.
-    // Return its id.
-    vreg_t new_vreg(reg_kind_t k, data_type_t dt = data_type::undef);
-
     // Convenience wrappers around `new_vreg` for the specific kinds.
     vreg_t new_gpr() { return new_vreg(reg_kind_t::gpr); }
     vreg_t new_vec(data_type_t dt) { return new_vreg(reg_kind_t::vec, dt); }
@@ -228,37 +227,55 @@ struct DNNL_API ir_t {
     int n_vregs() const { return (int)vreg_info_.size(); }
     int n_ops() const { return (int)ops_.size(); }
 
-    // Each helper appends one operation and names registers by `id`. The ones
-    // returning `int` return the new operation's index.
+    // Each interface appends one operation and names registers by `id`. The
+    // ones returning `int` return the new operation's index.
     //
-    // Refer to documentation for `op_kind_t` for each helper.
+    // Refer to documentation for `op_kind_t` for each interface. The notes here
+    // add only the parameter-level details that are not obvious from the
+    // signature.
 
     // gpr
     int mov_imm(vreg_t dst, dim_t imm);
     void mov_reg(vreg_t dst, vreg_t src);
     void add_imm(vreg_t dst, dim_t imm);
     void add_reg(vreg_t dst, vreg_t src);
+    // Like `load`, but reads a field of the kernel-argument struct through the
+    // ABI parameter pointer instead of a virtual base register.
     void load_param(vreg_t dst, dim_t disp);
     void load(vreg_t dst, vreg_t base, dim_t disp);
 
     // vec
     void vzero(vreg_t dst);
     void vload(vreg_t dst, vreg_t base, dim_t disp);
-    void vfma(vreg_t dst, vreg_t a, vreg_t b);
+    void vdot(vreg_t dst, vreg_t a, vreg_t b);
+    // `workspace` is scratch. It is overwritten by this call, so pass a vreg
+    // whose value is not needed afterwards.
     void vhreduce(vreg_t dst, vreg_t workspace);
 
     // vec (masked)
+    // `elems` is the number of active elements. `mask` is the mask register
+    // holding that pattern (from `set_mask_imm`), or `vreg_t::none` for a
+    // single element or a full vector, where no mask register is needed.
     void vload_masked(
             vreg_t dst, vreg_t base, dim_t disp, vreg_t mask, int elems);
+    // Same shape as `vload_masked`, but stores `src` to [base + disp] instead
+    // of loading.
     void vstore_masked(
             vreg_t base, dim_t disp, vreg_t src, vreg_t mask, int elems);
+
+    void prefetch(vreg_t base, dim_t disp);
 
     // mask
     void set_mask_imm(vreg_t mask, int n_elems);
 
     // control flow
+    // Pass the returned op index to `loop_end` to close the loop.
     int loop_begin_imm(vreg_t counter, dim_t count);
+    // Like `loop_begin_imm`, but the iteration count is the runtime value in
+    // `init` rather than the compile-time `count`.
     int loop_begin_reg(vreg_t counter, vreg_t init);
+    // Close the loop opened by `loop_begin_imm` or `loop_begin_reg`, passing
+    // the op index it returned as `begin_idx`.
     void loop_end(vreg_t counter, int begin_idx);
     void label(label_t label_id);
     void jmp(label_t label_id);
@@ -270,6 +287,10 @@ struct DNNL_API ir_t {
             std::vector<int> &uses) const;
 
 private:
+    // Add a vreg of kind `k` and, for a vec, element data type `dt`.
+    // Return its id.
+    vreg_t new_vreg(reg_kind_t k, data_type_t dt = data_type::undef);
+
     // Info for each vreg, indexed by its id
     std::vector<vreg_info_t> vreg_info_;
     // All operations, in order
