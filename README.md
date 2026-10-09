@@ -2,24 +2,63 @@
 
 # oneAPI Deep Neural Network Library (oneDNN)
 
+<div align="center">
+
+[![Release](https://img.shields.io/github/v/release/uxlfoundation/oneDNN)](https://github.com/uxlfoundation/oneDNN/releases)
+[![conda-forge](https://img.shields.io/conda/vn/conda-forge/onednn)](https://anaconda.org/conda-forge/onednn)
+[![Documentation](https://img.shields.io/badge/docs-latest-blue)](https://uxlfoundation.github.io/oneDNN)
+[![Slack](https://img.shields.io/badge/slack-%23onednn-4A154B?logo=slack)](https://slack-invite.uxlfoundation.org/)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/8762/badge)](https://www.bestpractices.dev/projects/8762)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/uxlfoundation/oneDNN/badge)](https://securityscorecards.dev/viewer/?uri=github.com/uxlfoundation/oneDNN)
 
-oneAPI Deep Neural Network Library (oneDNN) is an open-source cross-platform
-performance library of basic building blocks for deep learning applications.
-oneDNN project is part of the [UXL Foundation] and is an implementation
-of the [oneAPI specification] for oneDNN component.
+[Highlights](#highlights) | [Used By](#used-by) | [Quick Start](#quick-start) |
+[Installation](#installation) | [Documentation](#documentation) |
+[System Requirements](#system-requirements)
+
+[Support](#support) | [Governance](#governance) | [Contributing](#contributing) |
+[License](#license) | [Security](#security)
+
+</div>
+
+**oneDNN is an open-source, cross-platform library of optimized deep learning
+operations for CPUs and GPUs.** It provides highly optimized
+implementations of matrix multiplication, convolution, attention,
+normalization, and other operations, and is the acceleration layer behind
+PyTorch, TensorFlow, OpenVINO, and many other AI frameworks.
 
 The library is optimized for Intel 64/AMD64 architecture based processors,
 Arm(R) 64-bit Architecture (AArch64)-based processors, and Intel Graphics.
 oneDNN has experimental support for the following architectures: NVIDIA\* GPU,
 AMD\* GPU, OpenPOWER\* Power ISA (PPC64), IBMz\* (s390x), and RISC-V.
 
-oneDNN is intended for deep learning applications and framework
-developers interested in improving application performance on CPUs and GPUs.
+oneDNN project is part of the [UXL Foundation].
 
-Deep learning practitioners should use one of the applications enabled with oneDNN:
+[UXL Foundation]: http://www.uxlfoundation.org
 
+## Highlights
+
+* **Single API, many devices:** The same code targets Intel64/AMD64, and AArch64,
+ RISC-V CPUs, and Intel GPUs.
+* **Hardware specialization:** oneDNN detects the hardware features at runtime
+ and JIT-generates kernels specialized for instruction set, number of cores,
+ and cache sizes.
+* **Low-precision inference:** Supports `f32`, `bf16`, `f16`, `fp8`, `fp4`, `u8`/`s8`, and
+  `u4`/`s4` data types with various quantization schemes including [OCP microscaling formats].
+* **Operation fusion:** Post-ops fuse activations, residual connections, and
+  quantization into matmul and convolution. The [Graph API] fuses larger
+  patterns such as scaled dot-product attention (SDPA) and grouped-query
+  attention (GQA).
+* **Interoperability:** Supports OpenMP, TBB, and custom threadpools on CPUs. SYCL, and OpenCL
+  on GPUs.
+
+[OCP microscaling formats]: https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
+[Graph API]: https://uxlfoundation.github.io/oneDNN/dev_guide_graph_basic_concepts.html
+
+## Used By
+
+oneDNN is intended for deep learning applications and framework developers
+interested in improving application performance on CPUs and GPUs. Deep
+learning practitioners should use one of the applications enabled with oneDNN:
 * [Apache SINGA](https://singa.apache.org)
 * [DeepLearning4J\*](https://deeplearning4j.konduit.ai)
 * [Flashlight\*](https://github.com/flashlight/flashlight)
@@ -31,21 +70,54 @@ Deep learning practitioners should use one of the applications enabled with oneD
 * [PyTorch\*](https://pytorch.org)
 * [Tensorflow\*](https://www.tensorflow.org)
 
-[UXL Foundation]: http://www.uxlfoundation.org
-[oneAPI specification]: https://oneapi-spec.uxlfoundation.org/specifications/oneapi/latest/elements/onednn/source/
+## Quick Start
 
-## Table of Contents
+Install pre-built oneDNN from [conda-forge]:
 
-- [Documentation](#documentation)
-- [System Requirements](#system-requirements)
-- [Installation](#installation)
-- [Validated Configurations](#validated-configurations)
-- [Governance](#governance)
-- [Support](#support)
-- [Contributing](#contributing)
-- [License](#license)
-- [Security](#security)
-- [Trademark Information](#trademark-information)
+```sh
+conda install -c conda-forge onednn
+```
+
+Build and run the [matrix multiplication performance example], which
+measures matmul throughput for `f32`, `f16`, `bf16`, and `s8`/`u8` data types:
+
+```sh
+wget https://raw.githubusercontent.com/uxlfoundation/oneDNN/main/examples/matmul_perf.cpp \
+     https://raw.githubusercontent.com/uxlfoundation/oneDNN/main/examples/example_utils.hpp
+g++ matmul_perf.cpp -I$CONDA_PREFIX/include -L$CONDA_PREFIX/lib \
+    -ldnnl -o matmul_perf
+LD_LIBRARY_PATH=$CONDA_PREFIX/lib ./matmul_perf cpu
+```
+
+Next steps:
+* [Examples and Tutorials] cover quantization, fusion, Graph API, GPU
+  execution, and more.
+* [Build from Source] to customize the build.
+
+If oneDNN is useful in your work, consider giving the project a star on
+GitHub. It helps others discover it.
+
+[matrix multiplication performance example]: examples/matmul_perf.cpp
+[Examples and Tutorials]: https://uxlfoundation.github.io/oneDNN/dev_guide_examples.html
+[Build from Source]: https://uxlfoundation.github.io/oneDNN/dev_guide_build.html
+
+## Installation
+
+You can download and install the oneDNN library using one of the following options:
+
+- Binary Distribution: You can download pre-built binary packages from
+  the following sources:
+    - [conda-forge]: If the configuration you need is not available on
+      the conda-forge channel, you can build the library using the
+      Source Distribution.
+    - Intel oneAPI:
+       - [Intel® oneAPI Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/oneapi-toolkit-download.html)
+       - [Intel® oneDNN package](https://www.intel.com/content/www/us/en/developer/tools/oneapi/onednn-download.html)
+- Source Distribution: You can build the library from source by
+  following the instructions on the [Build from Source] page.
+
+[conda-forge]: https://anaconda.org/conda-forge/onednn
+[System Requirements]: #system-requirements
 
 ## Documentation
 
@@ -312,76 +384,15 @@ Runtime-specific dependencies:
 | `ONEDNN_CPU_RUNTIME=OMP` | Intel C/C++ Compiler          | Intel OpenMP runtime (`libiomp5.dylib`)
 | `ONEDNN_CPU_RUNTIME=TBB` | any                           | TBB (`libtbb.dylib`)
 
-## Installation
-
-You can download and install the oneDNN library using one of the following options:
-
-- Binary Distribution: You can download pre-built binary packages from
-  the following sources:
-    - [conda-forge]: If the configuration you need is not available on
-      the conda-forge channel, you can build the library using the
-      Source Distribution.
-    - Intel oneAPI:
-       - [Intel® oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.htm)
-       - [Intel® oneDNN standalone package](https://www.intel.com/content/www/us/en/developer/tools/oneapi/onednn-download.html)
-
-- Source Distribution: You can build the library from source by
-  following the instructions on the [Build from Source] page.
-
-[conda-forge]: https://anaconda.org/conda-forge/onednn
-[System Requirements]: #system-requirements
-[Build Options]: https://uxlfoundation.github.io/oneDNN/dev_guide_build_options.html
-[Build from Source]: https://uxlfoundation.github.io/oneDNN/dev_guide_build.html
-
-## Validated Configurations
-
-x86-64 CPU engine was validated on RedHat\* Enterprise Linux 8 with
-* GNU Compiler Collection 8.5, 9.5, 11.1, 11.3
-* Clang\* 11.0, 14.0.6
-* [Intel oneAPI DPC++/C++ Compiler] 2025.1
-
-on Windows Server\* 2019 with
-* Microsoft Visual Studio 2022 with MSVC 19.43
-* [Intel oneAPI DPC++/C++ Compiler] 2025.1
-
-on macOS 14 (Sonoma) with
-* Apple LLVM version 15.0
-
-AArch64 CPU engine was validated on Ubuntu 22.04 with
-* GNU Compiler Collection 10.0, 13.0
-* Clang\* 17.0
-* [Arm Compiler for Linux] 24.04
-* [Arm Compute Library (ACL)] built for armv8-a arch, latest stable version
-available at the time of release
-
-on macOS 14 (Sonoma) with
-* Apple LLVM version 15.0
-
-GPU engine was validated on Ubuntu\* 22.04 with
-* GNU Compiler Collection 8.5, and 9.5
-* Clang\* 11.0
-* [Intel oneAPI DPC++/C++ Compiler] 2025.1
-* [Intel Software for General Purpose GPU capabilities] latest stable version
-available at the time of release
-
-on Windows Server\* 2019 with
-* Microsoft Visual Studio 2022 with MSVC 19.43
-* [Intel oneAPI DPC++/C++ Compiler] 2025.1
-* [Intel Arc & Iris Xe Graphics Driver] latest stable version available at the
-time of release
-
-[Intel Software for General Purpose GPU capabilities]: https://dgpu-docs.intel.com/index.html
-[Intel Arc & Iris Xe Graphics Driver]: https://www.intel.com/content/www/us/en/download/785597/intel-arc-iris-xe-graphics-windows.html
-[Arm Compiler for Linux]: https://developer.arm.com/Tools%20and%20Software/Arm%20Compiler%20for%20Linux
-
 ## Support
 
-Submit questions, feature requests, and bug reports on the
-[GitHub issues] page.
+Ask questions and share your projects in [GitHub Discussions]. Submit
+feature requests and bug reports on the [GitHub issues] page.
 
 You can also contact oneDNN developers via [UXL Foundation Slack] using
 [#onednn] channel.
 
+[GitHub Discussions]: https://github.com/uxlfoundation/oneDNN/discussions
 [Github issues]: https://github.com/uxlfoundation/oneDNN/issues
 [UXL Foundation Slack]: https://slack-invite.uxlfoundation.org/
 [#onednn]: https://uxlfoundation.slack.com/channels/onednn
