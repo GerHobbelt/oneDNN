@@ -91,7 +91,87 @@ void dispatch_jit_batch_normalization_bwd_apply_dt(
         dispatch_jit_batch_normalization_bwd_apply<data_type, false>(p);
 }
 
+template <bool calculate_variance>
+const jit_uni_batch_normalization_fwd_stat_kernel_t &
+get_jit_batch_normalization_fwd_stat_kernel() {
+    static const jit_uni_batch_normalization_fwd_stat_kernel_t kernel(
+            calculate_variance);
+    return kernel;
+}
+
 } // namespace
+
+jit_uni_batch_normalization_fwd_stat_kernel_t::
+        jit_uni_batch_normalization_fwd_stat_kernel_t(bool calculate_variance)
+    : jit_generator_t("jit_uni_batch_normalization_fwd_stat_kernel")
+    , calculate_variance_(calculate_variance) {
+    create_kernel();
+}
+
+const jit_uni_batch_normalization_fwd_stat_kernel_t &
+get_jit_uni_batch_normalization_fwd_stat_kernel(bool calculate_variance) {
+    if (calculate_variance)
+        return get_jit_batch_normalization_fwd_stat_kernel<true>();
+    return get_jit_batch_normalization_fwd_stat_kernel<false>();
+}
+
+void jit_uni_batch_normalization_fwd_stat_kernel_t::generate() {
+#if defined(XBYAK_RISCV_V) && XBYAK_RISCV_V == 1
+    const Reg reg_param = a0;
+    const Reg reg_src = a1;
+    const Reg reg_len = a2;
+    const Reg reg_result = a3;
+    const Reg reg_vl = t0;
+    const Reg reg_bytes = t1;
+
+    const FReg f_mean = fa0;
+    const FReg f_result = fa1;
+
+    const VReg v_src16(2);
+    const VReg v_src(4);
+    const VReg v_reduction(8);
+
+    ld(reg_src, reg_param, 0);
+    ld(reg_len, reg_param, 8);
+    ld(reg_result, reg_param, 16);
+    if (calculate_variance_) flw(f_mean, reg_param, 24);
+
+    // Seed the reduction from the caller-provided scalar. This permits an ncsp
+    // channel to be accumulated across its non-contiguous minibatch slices.
+    flw(f_result, reg_result, 0);
+
+    Label loop, done;
+    L(loop);
+    beqz(reg_len, done);
+
+    vsetvli(reg_vl, reg_len, SEW::e16, LMUL::m1, VTA::ta, VMA::ma);
+    vle16_v(v_src16, reg_src);
+    vfwcvt_f_f_v(v_src, v_src16);
+    vsetvli(reg_vl, reg_vl, SEW::e32, LMUL::m2, VTA::ta, VMA::ma);
+    if (calculate_variance_) {
+        vfsub_vf(v_src, v_src, f_mean);
+        vfmul_vv(v_src, v_src, v_src);
+    }
+
+    // Use an ordered reduction so each chunk is folded into the scalar seed in
+    // input order. Variance is a separate pass to avoid E[x^2] - E[x]^2
+    // cancellation for inputs with a large mean and small variance.
+    vfmv_v_f(v_reduction, f_result);
+    vfredosum_vs(v_reduction, v_src, v_reduction);
+    vfmv_f_s(f_result, v_reduction);
+
+    slli(reg_bytes, reg_vl, 1);
+    add(reg_src, reg_src, reg_bytes);
+    sub(reg_len, reg_len, reg_vl);
+    j_(loop);
+
+    L(done);
+    fsw(f_result, reg_result, 0);
+    ret();
+#else
+    ret();
+#endif
+}
 
 jit_uni_batch_normalization_fwd_kernel_t::
         jit_uni_batch_normalization_fwd_kernel_t(

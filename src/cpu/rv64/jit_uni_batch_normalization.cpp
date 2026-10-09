@@ -60,8 +60,6 @@ status_t jit_uni_batch_normalization_fwd_t<isa>::execute_forward(
 
     void *dst = CTX_OUT_MEM(void *, DNNL_ARG_DST);
     const void *src = CTX_IN_MEM(const void *, DNNL_ARG_SRC);
-    const float *mean = CTX_IN_MEM(const float *, DNNL_ARG_MEAN);
-    const float *var = CTX_IN_MEM(const float *, DNNL_ARG_VARIANCE);
     const float *scale = pd()->use_scale()
             ? CTX_IN_MEM(const float *, DNNL_ARG_SCALE)
             : nullptr;
@@ -82,6 +80,51 @@ status_t jit_uni_batch_normalization_fwd_t<isa>::execute_forward(
     };
 
     const bool channels_dense = data_d.blocking_desc().strides[1] == 1;
+
+    // Mean/variance: either supplied by the user or computed for training.
+    const float *mean, *var;
+    if (pd()->use_global_stats()) {
+        mean = CTX_IN_MEM(const float *, DNNL_ARG_MEAN);
+        var = CTX_IN_MEM(const float *, DNNL_ARG_VARIANCE);
+    } else {
+        assert(dtsrc == data_type::f16 && !channels_dense);
+        const dim_t SP = D * H * W;
+        const dim_t count = N * SP;
+        float *mean_out = CTX_OUT_MEM(float *, DNNL_ARG_MEAN);
+        float *var_out = CTX_OUT_MEM(float *, DNNL_ARG_VARIANCE);
+        const auto &mean_kernel
+                = get_jit_uni_batch_normalization_fwd_stat_kernel(
+                        /*calculate_variance=*/false);
+        const auto &variance_kernel
+                = get_jit_uni_batch_normalization_fwd_stat_kernel(
+                        /*calculate_variance=*/true);
+
+        parallel_nd(C, [&](dim_t c) {
+            auto reduce
+                    = [&](const jit_uni_batch_normalization_fwd_stat_kernel_t
+                                      &kernel,
+                              float reduction_mean, float &result) {
+                for (dim_t n = 0; n < N; ++n) {
+                    const size_t base = off(n, c, 0, 0, 0);
+                    const jit_uni_batch_normalization_fwd_stat_kernel_t::
+                            call_params_t p {static_cast<const char *>(src)
+                                            + base * data_size,
+                                    SP, &result, reduction_mean};
+                    kernel(&p);
+                }
+            };
+
+            float sum = 0.f;
+            reduce(mean_kernel, 0.f, sum);
+            mean_out[c] = sum / static_cast<float>(count);
+
+            float squared_difference_sum = 0.f;
+            reduce(variance_kernel, mean_out[c], squared_difference_sum);
+            var_out[c] = squared_difference_sum / static_cast<float>(count);
+        });
+        mean = mean_out;
+        var = var_out;
+    }
 
     if (!channels_dense) {
         // abx data tag: vectorize over W for fixed channel

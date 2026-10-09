@@ -112,6 +112,32 @@ private:
     bool per_elem_params_;
 };
 
+struct jit_uni_batch_normalization_fwd_stat_kernel_t : public jit_generator_t {
+    struct call_params_t {
+        const void *src;
+        dim_t len;
+        float *result;
+        float mean;
+    };
+
+    DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_uni_batch_normalization_fwd_stat_kernel_t)
+
+    jit_uni_batch_normalization_fwd_stat_kernel_t(bool calculate_variance);
+
+    void operator()(const call_params_t *p) const {
+        jit_generator_t::operator()(p);
+    }
+
+protected:
+    void generate() override;
+
+private:
+    bool calculate_variance_;
+};
+
+const jit_uni_batch_normalization_fwd_stat_kernel_t &
+get_jit_uni_batch_normalization_fwd_stat_kernel(bool calculate_variance);
+
 void jit_uni_batch_normalization_apply(const void *src, void *dst, dim_t len,
         const float *mean, const float *scale_mul, const float *scale_add,
         data_type_t data_type, bool per_elem_params, bool with_relu);
