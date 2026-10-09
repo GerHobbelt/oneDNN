@@ -32,9 +32,8 @@
 
 #include "cpu/x64/brgemm/brgemm_ir.hpp"
 #include "cpu/x64/cpu_isa_traits.hpp"
-#include "cpu/x64/ir/emitter/emitter.hpp"
+#include "cpu/x64/ir/codegen.hpp"
 #include "cpu/x64/ir/ir.hpp"
-#include "cpu/x64/ir/reg_alloc.hpp"
 #include "cpu/x64/jit_generator.hpp"
 
 #define GET_OFF(field) offsetof(brgemm_kernel_params_t, field)
@@ -632,27 +631,7 @@ void build_brgemm(const brgemm_desc_t &brg, ir::ir_t &ir) {
     }
 }
 
-#ifndef NDEBUG
-bool any_vector_spill(const ir::ir_t &ir, const ir::reg_alloc_result_t &alloc) {
-    for (int v = 0; v < ir.n_vregs(); v++) {
-        if (ir.vreg_info()[v].kind == ir::reg_kind_t::gpr) continue;
-        if (alloc.assignments[v].spilled) return true;
-    }
-    return false;
-}
-#endif
-
-// generate() runs the full IR pipeline:
-//
-// - Build IR for the given `brgemm_desc_t` descriptor
-// - Allocate registers
-// - Emit code
-// - Wrap in standard preamble, stack frame, and postamble
-//
-// TODO: Generalize the IR pipeline runner so it is shared across all kernels,
-// while allowing different builder implementations to plug into the same
-// fixed sequence:
-// IR build -> register allocation -> preamble -> codegen -> postamble).
+// IR-based BRGEMM kernel.
 struct jit_brgemm_ir_kernel_t : public brgemm_kernel_t {
     DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_brgemm_ir_kernel_t)
 
@@ -662,40 +641,7 @@ struct jit_brgemm_ir_kernel_t : public brgemm_kernel_t {
     void generate() override {
         ir::ir_t ir;
         build_brgemm(brg_, ir);
-
-        const int rsp_idx = Xbyak::Operand::RSP;
-        const int param_idx = abi_param1.getIdx();
-
-        // Build register configuration for code emission.
-        //
-        // The bias is applied by the IR, so no post-ops injector runs here and
-        // no opmask is reserved for one. The allocator gets the whole mask
-        // file.
-        const ir::reg_config_t reg_cfg = ir::make_reg_config(
-                brg_.isa_impl, param_idx, rsp_idx, /*reserved_masks=*/ {});
-
-        const ir::reg_alloc_result_t alloc
-                = allocate_registers(ir, reg_cfg.pools);
-
-        // `brgemm_ir_supported()` allows only a blocking that fits the vector
-        // pool, so a vector spill means that check and the builder disagree
-        // about how many registers the kernel needs. The code stays correct,
-        // but it is slower than the kernel it replaced.
-        assert(!any_vector_spill(ir, alloc)
-                && "brgemm_ir: unexpected vector spill");
-
-        preamble();
-
-        if (alloc.frame_bytes > 0) sub(rsp, (uint32_t)alloc.frame_bytes);
-
-        ir::data_section_t data;
-        ir::emit(*this, ir, alloc, reg_cfg, data, /*postops=*/nullptr);
-
-        if (alloc.frame_bytes > 0) add(rsp, (uint32_t)alloc.frame_bytes);
-
-        postamble();
-
-        ir::emit_data_section(*this, data);
+        ir::generate_kernel(*this, ir);
     }
 
 private:
@@ -771,33 +717,16 @@ status_t brgemm_ir_supported(const brgemm_desc_t &brg) {
     VCONDCHECK_BRGEMM_IR(!brg.embd_bcst, VERBOSE_UNSUPPORTED_FEATURE,
             "embedded broadcast microkernel");
 
-    // Below is a set of checks to check whether the problem fits the register
-    // budget.
     const brgemm_ir_conf_t cfg(brg);
-
-    // The builder holds every accumulator, every B vector, and the A broadcast
-    // in a register for the whole block. A blocking that needs more registers
-    // than the pool holds is still correct, because the allocator spills, but
-    // it is slower than the classic kernel, so refuse it instead.
-    //
-    // Only the widest block matters. A tail block is narrower or shorter than
-    // the block it follows, and every block frees its registers before the
-    // next one starts.
-    const int max_bd_block = cfg.bdb > 0 ? cfg.bd_block : cfg.bdb_tail;
-    const int max_ld_block2 = cfg.ldb2 > 0
-            ? cfg.ld_block2
-            : (cfg.ldb2_tail > 0 ? cfg.ldb2_tail : 1);
-    const int n_vregs = max_bd_block * max_ld_block2 + max_ld_block2 + 1;
-    const int vec_pool_size = isa_num_vregs(brg.isa_impl);
-
-    VCONDCHECK_BRGEMM_IR(n_vregs <= vec_pool_size, VERBOSE_UNSUPPORTED_FEATURE,
-            "blocking exceeds the vector register file");
 
     // Every address the builder emits is a base register plus a build-time
     // displacement encoded in the instruction, so each displacement has to fit
     // in int32. These are the largest of them.
     auto fits = [](dim_t v) { return v <= INT32_MAX && v >= INT32_MIN; };
     const int rd_last = (cfg.rdb > 0 ? cfg.rd_block : cfg.rdb_tail) - 1;
+
+    // Rows of the tallest M block. The M tail is shorter than a full block.
+    const int max_bd_block = cfg.bdb > 0 ? cfg.bd_block : cfg.bdb_tail;
 
     // Upper bound for the B and C displacements.
     const out_block_t last_col {
