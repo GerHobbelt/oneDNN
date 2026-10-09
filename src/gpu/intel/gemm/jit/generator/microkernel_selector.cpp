@@ -48,8 +48,8 @@ namespace microkernel {
 using namespace ngen;
 
 static inline bool getStrategyByHeuristics(HW hw, GEMMStrategy &strategy, bool localA, bool localB,
-                                           GEMMProblem &problem, HWInformation hwInfo, SizeParams sizes,
-                                           const std::vector<StrategyRequirement> &reqs);
+                                           GEMMProblem &problem, HWInformation hwInfo, HostPayload host,
+                                           SizeParams sizes, const std::vector<StrategyRequirement> &reqs);
 
 static constexpr int smallGRF = 128, largeGRF = 256;
 
@@ -299,7 +299,7 @@ Package selectGEMM(const GEMMOptions &options, HostPayload host, HWInformation h
         GEMMStrategy strategy(hw, stepping);
         strategy.unroll[LoopM] = e->driverInfo.unroll[LoopM];
         strategy.unroll[LoopN] = e->driverInfo.unroll[LoopN];
-        parseStrategy(e->strategy, hw, problem, strategy);
+        parseStrategy(e->strategy, problem, strategy);
         return (!kParallelLocal && strategy.kParallelLocal) ||
             // named barriers are not supported by generateShim
             (strategy.namedBarriers[LoopM] > 0 ||
@@ -317,7 +317,7 @@ Package selectGEMM(const GEMMOptions &options, HostPayload host, HWInformation h
                 strategy.unroll[LoopN] = e->driverInfo.unroll[LoopN];
                 problemVerbose.A.setAlignment(e->driverInfo.alignment[0]);
                 problemVerbose.B.setAlignment(e->driverInfo.alignment[1]);
-                parseStrategy(e->strategy, hw, problemVerbose, strategy);
+                parseStrategy(e->strategy, problemVerbose, strategy);
                 std::cout << "entry candidate: "
                           << gemmstone::evaluate(*e, evalParams, auxParams) << " "
                           << e->selector.hw << " "
@@ -398,7 +398,7 @@ Package selectGEMM(const GEMMOptions &options, HostPayload host, HWInformation h
             /* Prepare strategy parameters */
             strategy.unroll[LoopM] = entry->driverInfo.unroll[LoopM];
             strategy.unroll[LoopN] = entry->driverInfo.unroll[LoopN];
-            parseStrategy(entry->strategy, hw, problem, strategy);
+            parseStrategy(entry->strategy, problem, strategy);
             adjustStrategy(hw, problem, strategy);
             modifyStrategy(strategy, auxParams);
 
@@ -424,7 +424,7 @@ Package selectGEMM(const GEMMOptions &options, HostPayload host, HWInformation h
                 strategy.raHW = ngen::HW::XeHPC;
             }
         } else if (!reqs.empty() &&
-                   !getStrategyByHeuristics(hw, strategy, localA, localB, problem, hwInfo, sizes, reqs))
+                   !getStrategyByHeuristics(hw, strategy, localA, localB, problem, hwInfo, host, sizes, reqs))
             return false; /* No heuristic strategy found */
 
         strategy.systolicAvailable &= hwInfo.systolicAvailable;
@@ -478,15 +478,35 @@ Package selectGEMM(const GEMMOptions &options, HWInformation hwInfo, SizeParams 
 }
 
 static inline bool getStrategyByHeuristics(HW hw, GEMMStrategy &strategy, bool localA, bool localB,
-                                           GEMMProblem &problem, HWInformation hwInfo, SizeParams sizes,
-                                           const std::vector<StrategyRequirement> &reqs)
+                                           GEMMProblem &problem, HWInformation hwInfo, HostPayload host,
+                                           SizeParams sizes, const std::vector<StrategyRequirement> &reqs)
 {
     if (problem.C.layout == MatrixLayout::T) return false;
 
     int min2DAlignmentA = block2DMinAlignment(hw, problem.A, strategy.A, /* asIfBlock2D */ true);
     int min2DAlignmentB = block2DMinAlignment(hw, problem.B, strategy.B, /* asIfBlock2D */ true);
 
-    bool systolic = hwInfo.systolicAvailable;
+    auto &s = strategy;
+    s.unroll[LoopK] = 1;
+    s.wg[LoopK] = 1;
+    s.unroll[LoopM] = s.unroll[LoopN] = 0;
+    s.wg[LoopM] = s.wg[LoopN] = 0;
+
+    for (auto &req: reqs) switch (req.param) {
+        case StrategyRequirement::UnrollM: s.unroll[LoopM] = req.value; break;
+        case StrategyRequirement::UnrollN: s.unroll[LoopN] = req.value; break;
+        case StrategyRequirement::WGM:         s.wg[LoopM] = req.value; break;
+        case StrategyRequirement::WGN:         s.wg[LoopN] = req.value; break;
+        case StrategyRequirement::WGK:         s.wg[LoopK] = req.value; break;
+        default: break;
+    }
+
+    if (s.wgTile(LoopM) * s.wgTile(LoopN) == 0)
+        return false;
+
+    bool systolic = hwInfo.systolicAvailable &&
+                   (problem.Ta.paddedSize() <= 2 || problem.Ta == Type::tf32) &&
+                   (problem.Tb.paddedSize() <= 2 || problem.Tb == Type::tf32);
     // Non-systolic integer dot products require byte operands. Keep the
     // external int4 format and let the generator unpack it for computation.
     if (!systolic) {
@@ -499,7 +519,6 @@ static inline bool getStrategyByHeuristics(HW hw, GEMMStrategy &strategy, bool l
     bool block2DB = (hw >= HW::XeHPC) && systolic && (problem.B.alignment % min2DAlignmentB) == 0;
     bool useNewDP = (hw >= HW::XeHP);
 
-    auto &s = strategy;
     s.ka_load = s.kb_load = 16;
     if (!systolic) {
         // Keep eight bytes per integer operand without enlarging the other
@@ -508,6 +527,7 @@ static inline bool getStrategyByHeuristics(HW hw, GEMMStrategy &strategy, bool l
         s.kb_load = problem.Tb_ext.isInteger() ? 8 / problem.Tb_ext : 4;
     }
 
+    auto m_iter = s.unroll[LoopM] / host.simd;
     if (problem.A.layout == MatrixLayout::Pc) {
         s.A.accessType = AccessType::Block;
         s.A_copies = 2;
@@ -515,15 +535,14 @@ static inline bool getStrategyByHeuristics(HW hw, GEMMStrategy &strategy, bool l
     } else if (!block2DA) {
         s.A.accessType = AccessType::Block;
         if (systolic)
-            s.ka_load = (problem.A.layout == MatrixLayout::T) ? 64 / problem.Ta_ext : 16;
+            s.ka_load = (problem.A.layout == MatrixLayout::T) ? 64 / problem.Ta_ext / m_iter : 16;
         s.slmA = (hw >= HW::XeHP);
     } else if (problem.A.layout == MatrixLayout::T) {
         s.A.accessType = AccessType::Block2DTranspose;
-        s.ka_load = (int)(64.f / ceil(( 1.f * problem.Ta) +
-                                (problem.aOffset2D() ? (1.f * problem.Tao) : 0)));
-        s.ka_load = utils::roundup_pow2(s.ka_load);
+        s.ka_load = 64 / problem.Ta_ext / m_iter;
     } else if (problem.A.layout == MatrixLayout::N) {
         s.A.accessType = AccessType::Block2DVNNI;
+        s.ka_load =  s.unroll[LoopM] / m_iter;
         s.A_copies = 2;
     }
 
@@ -546,6 +565,18 @@ static inline bool getStrategyByHeuristics(HW hw, GEMMStrategy &strategy, bool l
     }
 
     s.C.accessType = AccessType::Block;
+
+    bool slmDequantize2DA = (problem.aOffset2D() || problem.aScale2D()) && s.slmA;
+    bool slmDequantize2DB = (problem.bOffset2D() || problem.bScale2D()) && s.slmB;
+    if (slmDequantize2DA && slmDequantize2DB) {
+        // A and B quantization parameters share one SLM load schedule, so each
+        // thread's SLM copy must cover the same k range for both. A k split
+        // divides unrollKSLM by the workgroup size, so split both in m/n.
+        if (s.unroll[LoopM] % s.wg[LoopN] || s.unroll[LoopN] % s.wg[LoopM])
+            return false;
+        s.ka_load = s.kb_load = std::min(64, std::max(s.ka_load, s.kb_load));
+        s.coopA = s.coopB = CoopSplit::MN;
+    }
 
     s.A.base = localA ? AddressBase::createSLM() : AddressBase::createA64(true);
     s.B.base = localB ? AddressBase::createSLM() : AddressBase::createA64(true);
@@ -573,20 +604,6 @@ static inline bool getStrategyByHeuristics(HW hw, GEMMStrategy &strategy, bool l
         s.kb_pfStride = s.kb_prefetch = s.kb_load;
     }
 
-    s.unroll[LoopK] = 1;
-    s.wg[LoopK] = 1;
-    s.unroll[LoopM] = s.unroll[LoopN] = 0;
-    s.wg[LoopM] = s.wg[LoopN] = 0;
-
-    for (auto &req: reqs) switch (req.param) {
-        case StrategyRequirement::UnrollM: s.unroll[LoopM] = req.value; break;
-        case StrategyRequirement::UnrollN: s.unroll[LoopN] = req.value; break;
-        case StrategyRequirement::WGM:         s.wg[LoopM] = req.value; break;
-        case StrategyRequirement::WGN:         s.wg[LoopN] = req.value; break;
-        case StrategyRequirement::WGK:         s.wg[LoopK] = req.value; break;
-        default: break;
-    }
-
     if(block2DA && !localA) {
         problem.A.alignment = std::min(problem.A.alignment,
                                         static_cast<uint8_t>(block2DMinAlignment(hw, problem.A, strategy.A)));
@@ -598,23 +615,6 @@ static inline bool getStrategyByHeuristics(HW hw, GEMMStrategy &strategy, bool l
                                         static_cast<uint8_t>(block2DMinAlignment(hw, problem.B, strategy.B)));
     } else {
         problem.B.alignment = std::min<uint8_t>(16, problem.B.alignment);
-    }
-
-    if (s.wgTile(LoopM) * s.wgTile(LoopN) == 0)
-        return false;
-
-    if(s.A.accessType == AccessType::Block2DVNNI) {
-        s.ka_load =  s.unroll[LoopN] / problem.Ta_ext;
-    } else if(s.A.accessType == AccessType::Block2DTranspose) {
-        s.ka_load = std::min(s.ka_load, s.unroll[LoopM] * 2);
-    }
-
-    bool slmDequantize2DA = (problem.aOffset2D() || problem.aScale2D()) && s.slmA;
-    bool slmDequantize2DB = (problem.bOffset2D() || problem.bScale2D()) && s.slmB;
-    if (slmDequantize2DA && slmDequantize2DB) {
-        // TODO: try max of ka_load/kb_load and see if it performs better
-        int min_load = std::min(s.ka_load, s.kb_load);
-        s.ka_load = s.kb_load = min_load;
     }
 
     s.systolic = systolic;
@@ -644,6 +644,16 @@ static inline bool getStrategyByHeuristics(HW hw, GEMMStrategy &strategy, bool l
         if (s.slmB && problem.Tb.isInteger())
             s.unrollKSLM = lcm(s.unrollKSLM,
                     std::get<1>(slmCP) * s.wg[LoopM]);
+
+        // Quantization parameters are loaded per unrollKSLM, or per group if
+        // unrollKSLM is not a multiple of the group size.
+        if (slmDequantize2DA && slmDequantize2DB) {
+            auto kqLoad = [&](int groupK) {
+                return (s.unrollKSLM % groupK == 0) ? s.unrollKSLM : groupK;
+            };
+            if (kqLoad(problem.aqGroupK) != kqLoad(problem.bqGroupK))
+                return false;
+        }
     }
 
     if (hw == HW::Xe2 || hw == HW::Xe3)
