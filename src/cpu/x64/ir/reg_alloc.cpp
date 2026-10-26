@@ -38,13 +38,18 @@
 // 2. The Control-Flow Graph
 //
 // To know what is read later we must know what runs after what. In this IR
-// that is nearly trivial. Each operation flows to the next, with three
+// that is nearly trivial. Each operation flows to the next, with five
 // exceptions:
 //   1. loop_end has two successors. It can fall through, or jump back to the
 //      body start (`back-edge`).
-//   2. jz has two successors. It can fall through, or jump to its label
+//   2. if_begin has two successors. It can fall through into the then body,
+//      or jump past it to the else body or out of the conditional
 //      (`forward-edge`).
-//   3. jmp has one successor. It redirects to its label (`forward edge`).
+//   3. _else has one successor. The end of the then body jumps over the else
+//      body to the matching if_end (`forward-edge`).
+//   4. jz has two successors. It can fall through, or jump to its label
+//      (`forward-edge`).
+//   5. jmp has one successor. It redirects to its label (`forward edge`).
 //
 //     Back-edge example:
 //
@@ -202,6 +207,15 @@ void compute_liveness(
         if (ir.ops()[i].kind == op_kind_t::label)
             label_to_op[(int)ir.ops()[i].label_id] = i;
 
+    // The _else and if_end of each if_begin, by op index. -1 for a conditional
+    // without an else, and at ops that are not an if_begin.
+    std::vector<int> else_of(n_ops, -1), end_of(n_ops, -1);
+    for (int i = 0; i < n_ops; i++) {
+        const op_t &op = ir.ops()[i];
+        if (op.kind == op_kind_t::_else) else_of[op.match] = i;
+        if (op.kind == op_kind_t::if_end) end_of[op.match] = i;
+    }
+
     for (int i = 0; i < n_ops; i++) {
         const op_t &op = ir.ops()[i];
         ir.def_use(op, def_vregs, use_vregs);
@@ -216,6 +230,14 @@ void compute_liveness(
         if (op.kind == op_kind_t::loop_end) {
             if (i + 1 < n_ops) successors[i].push_back(i + 1);
             successors[i].push_back(op.match + 1);
+        } else if (op.kind == op_kind_t::if_begin) {
+            assert(end_of[i] >= 0 && "if_begin without if_end");
+            // A false condition continues at the else body, or at if_end.
+            successors[i].push_back(i + 1);
+            successors[i].push_back(
+                    else_of[i] >= 0 ? else_of[i] + 1 : end_of[i]);
+        } else if (op.kind == op_kind_t::_else) {
+            successors[i].push_back(end_of[op.match]);
         } else if (op.kind == op_kind_t::jmp) {
             successors[i].push_back(label_to_op[(int)op.label_id]);
         } else if (op.kind == op_kind_t::jz) {
@@ -337,7 +359,7 @@ std::vector<int64_t> compute_spill_weights(
 //   3. Spill if necessary:
 //      While fewer registers are free than the demand, spill the lightest
 //      active interval that is not an operand of `i`, with ties broken on the
-//      latest end. A mask is never chosen, since its kind gets no temps.
+//      latest end. A file that is not `spillable` skips this step.
 //
 //   4. Hand out registers:
 //      Intervals that start at `i` take theirs and become active. An interval
@@ -351,9 +373,9 @@ std::vector<int64_t> compute_spill_weights(
 // is free at each earlier reference and becomes its temp there. At each later
 // reference, step 2 counts it as a spilled operand and step 4 hands it a temp.
 //
-// When every register holds an operand of `i` or a mask, step 3 has nothing to
-// spill. An operand left without a register then gets no temp, which the
-// emitter reports by failing the kernel.
+// When every register holds an operand of `i`, or the file is not `spillable`,
+// step 3 has nothing to spill. An operand left without a register then gets no
+// temp, which the emitter reports by failing the kernel.
 //
 // Spilled values are assigned stack slots starting at `frame`, increasing by
 // `slot_size` per spill.
@@ -421,11 +443,6 @@ void alloc_file(const ir_t &ir, int file_idx, const reg_pools_t &pools,
         if (end[cand] != end[best]) return end[cand] > end[best];
         return cand < best;
     };
-
-    // A spilled value of a kind without temps could not be used by any
-    // operation, so such a value is never spilled.
-    auto spillable
-            = [&](int v) { return max_temps_per_op[(int)kind_of(v)] > 0; };
 
     // Moves `v` to a new stack slot for its whole live range and resets its
     // `phys`. The caller releases the register `v` held, if any, and must read
@@ -497,13 +514,14 @@ void alloc_file(const ir_t &ir, int file_idx, const reg_pools_t &pools,
         }
 
         // 3. Spill until enough registers are free.
-        while (free_regs.size() < pending.size() + wanted.size()) {
+        while (file.spillable
+                && free_regs.size() < pending.size() + wanted.size()) {
             int victim = -1;
             for (int a : active) {
                 // Spilling an operand of `i` frees nothing, since it needs a
-                // temp at `i`. Masks are never spilled.
+                // temp at `i`.
                 const bool is_operand = last_ref[a] == i;
-                if (is_operand || !spillable(a)) continue;
+                if (is_operand) continue;
                 if (victim < 0 || better_victim(a, victim)) victim = a;
             }
             if (victim < 0) break; // nothing that frees a register at `i`

@@ -44,6 +44,32 @@ void emit(backend_t &be, const ir_t &ir, const reg_alloc_result_t &alloc,
     // One label per `label` id, for `label`/`jmp`/`jz`.
     std::vector<Xbyak::Label> label_id_to_label(ir.n_labels());
 
+    // Labels of one conditional, keyed by its `if_begin` instruction index.
+    //   skip     - where a false condition jumps. Bound by `_else`, or by
+    //              `if_end` when there is no else.
+    //   end      - where the then body jumps over the else body. Bound by
+    //              `if_end`.
+    //   has_else - `_else` was lowered, so `if_end` binds `end`
+    struct if_labels_t {
+        Xbyak::Label skip, end;
+        bool has_else = false;
+    };
+    std::unordered_map<int, if_labels_t> if_labels;
+
+    // Jump to `target` unless `cmp` is true, skipping the then body that
+    // follows. Each condition thus emits its inverse jump (`lt` -> `jge`).
+    auto jump_unless = [&](cmp_t cmp, const Xbyak::Label &target) {
+        const auto type = Xbyak::CodeGenerator::T_NEAR;
+        switch (cmp) {
+            case cmp_t::eq: gen.jne(target, type); break;
+            case cmp_t::ne: gen.je(target, type); break;
+            case cmp_t::lt: gen.jge(target, type); break;
+            case cmp_t::le: gen.jg(target, type); break;
+            case cmp_t::gt: gen.jle(target, type); break;
+            case cmp_t::ge: gen.jl(target, type); break;
+        }
+    };
+
     // if vreg needs to be spilled
     auto spilled
             = [&](vreg_t vr) { return alloc.assignments[(int)vr].spilled; };
@@ -86,6 +112,15 @@ void emit(backend_t &be, const ir_t &ir, const reg_alloc_result_t &alloc,
         be.vstore_raw(rsp_idx, slot_off(vr), p);
     };
 
+    // Same for a spilled mask. The mask type depends on the ISA, so the backend
+    // picks the appropriate instruction.
+    auto mask_spill_reload = [&](vreg_t vr, int p) {
+        be.load_mask_raw(p, rsp_idx, slot_off(vr));
+    };
+    auto mask_spill_store = [&](vreg_t vr, int p) {
+        be.store_mask_raw(rsp_idx, slot_off(vr), p);
+    };
+
     // Resolve a virtual register that an instruction READS (use) to a
     // concrete physical register, hiding whether the allocator spilled it:
     //   - not spilled: the value is already in a physical register, so just
@@ -99,9 +134,9 @@ void emit(backend_t &be, const ir_t &ir, const reg_alloc_result_t &alloc,
     // slot).
     //
     // gpr reloads are ISA-neutral (a plain `mov`), so `gpr_use` emits them
-    // directly. A spilled vec source is reloaded through the backend, since the
-    // reload instruction is ISA-specific. The `vec_use` returns a physical
-    // index rather than a typed register.
+    // directly. A spilled vec or mask source is reloaded through the backend,
+    // since the reload instruction is ISA-specific. The `vec_use` and
+    // `mask_use` return a physical index rather than a typed register.
     auto gpr_use = [&](vreg_t vr) -> Xbyak::Reg64 {
         const Xbyak::Reg64 r(reg_of(vr));
         // reload the spilled gpr from its stack slot
@@ -116,9 +151,17 @@ void emit(backend_t &be, const ir_t &ir, const reg_alloc_result_t &alloc,
         return r;
     };
 
+    auto mask_use = [&](vreg_t vr) -> int {
+        const int r = reg_of(vr);
+        // reload the spilled mask from its stack slot
+        if (spilled(vr)) mask_spill_reload(vr, r);
+        return r;
+    };
+
     // Lower each IR instruction. Spilled operands are handled as follows:
     //
-    // - Inputs that an instruction reads are accessed through gpr_use/vec_use.
+    // - Inputs that an instruction reads are accessed through
+    //   gpr_use/vec_use/mask_use.
     //   These return the register directly, or reload the value from its spill
     //   slot into its temp if needed.
     //
@@ -274,30 +317,30 @@ void emit(backend_t &be, const ir_t &ir, const reg_alloc_result_t &alloc,
                 break;
             }
 
-            // Mask ops. Emitting the instruction is the backend's job. The
-            // allocator does not spill masks to make room (see
-            // `max_temps_per_op`). A mask ends up spilled only when no register
-            // is left for it, which the asserts reject.
-            case op_kind_t::set_mask_imm: {
-                JIT_ASSERT(!spilled(op.dst) && "set_mask_imm: mask spilled");
-                be.set_mask_imm(phys(op.dst), (int)op.imm, data);
+            // Mask ops. Emitting the instruction is the backend's job,
+            // including the reload and store of a spilled mask. Only AVX2*
+            // spills masks. The AVX-512 backend rejects a spilled k-register.
+            case op_kind_t::set_mask_imm: { // overwrites dst
+                int d = reg_of(op.dst);
+                be.set_mask_imm(d, (int)op.imm, data);
+                if (spilled(op.dst)) mask_spill_store(op.dst, d);
                 break;
             }
             case op_kind_t::vload_masked: { // overwrites dst
                 int base = gpr_use(op.mem.base).getIdx();
                 int d = reg_of(op.dst);
-                JIT_ASSERT(!spilled(op.s1) && "vload_masked: mask spilled");
-                be.vload_masked(d, base, op.mem.disp, phys(op.s1), op.mem_dt,
-                        dt_of(op.dst));
+                int m = mask_use(op.s1);
+                be.vload_masked(
+                        d, base, op.mem.disp, m, op.mem_dt, dt_of(op.dst));
                 if (spilled(op.dst)) spill_store(op.dst, d);
                 break;
             }
             case op_kind_t::vstore_masked: {
                 int base = gpr_use(op.mem.base).getIdx();
                 int s = vec_use(op.s0);
-                JIT_ASSERT(!spilled(op.s1) && "vstore_masked: mask spilled");
-                be.vstore_masked(base, op.mem.disp, s, phys(op.s1), op.mem_dt,
-                        dt_of(op.s0));
+                int m = mask_use(op.s1);
+                be.vstore_masked(
+                        base, op.mem.disp, s, m, op.mem_dt, dt_of(op.s0));
                 break;
             }
 
@@ -328,6 +371,31 @@ void emit(backend_t &be, const ir_t &ir, const reg_alloc_result_t &alloc,
                 gen.dec(c);
                 if (spilled(op.dst)) gen.mov(slot(op.dst), c);
                 gen.jnz(labels[op.match]); // back-edge to the matching loop_begin
+                break;
+            }
+            case op_kind_t::if_begin: {
+                // `test lhs, lhs` sets the same flags as `cmp lhs, 0` with a
+                // shorter encoding.
+                const Xbyak::Reg64 lhs = gpr_use(op.s0);
+                if (op.s1 != vreg_t::none)
+                    gen.cmp(lhs, gpr_use(op.s1));
+                else if (op.imm == 0)
+                    gen.test(lhs, lhs);
+                else
+                    gen.cmp(lhs, (int)op.imm);
+                jump_unless(op.cmp, if_labels[i].skip);
+                break;
+            }
+            case op_kind_t::_else: {
+                if_labels_t &l = if_labels[op.match];
+                gen.jmp(l.end, Xbyak::CodeGenerator::T_NEAR);
+                gen.L(l.skip);
+                l.has_else = true;
+                break;
+            }
+            case op_kind_t::if_end: {
+                if_labels_t &l = if_labels[op.match];
+                gen.L(l.has_else ? l.end : l.skip);
                 break;
             }
             case op_kind_t::label: {

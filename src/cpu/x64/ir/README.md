@@ -72,10 +72,10 @@ step. They are omitted above for clarity.
   reduces each value to a single live interval and spills to the stack when the
   active set outgrows the register file. A spilled value still needs a register
   while an operation reads or writes it, so the scan also gives each operation a
-  temp register for every spilled operand. The temps per kind (2 gpr, 3 vector)
-  match the widest operation of that kind, so only `inject_postops`, which takes
-  any number of accumulators, can run out. Masks get no temps and are never
-  spilled.
+  temp register for every spilled operand. The temps per kind (2 gpr, 3 vector,
+  1 mask) match the widest operation of that kind, so only `inject_postops`,
+  which takes any number of accumulators, can run out. On AVX2\* a mask is a
+  vector register and spills like one. AVX-512 k-registers are never spilled.
 * **Emitter.** The only part aware of the ISA and data types, because it produces
   the code. It walks the allocated IR once and lowers each operation to
   instructions using the physical registers the allocator chose. Spilled values
@@ -125,7 +125,10 @@ output with `ir::print_kernel_dump()` (see Debug Output).
   only at run time is folded into the base pointer with an explicit `add`. Every
   memory operation then reads at most one pointer, which lowers register pressure
   and simplifies spilling.
-* **Structured loops.** Loops are explicit nodes with a runtime counter.
+* **Structured control flow.** Loops and conditionals are explicit nested
+  nodes. A loop (`loop_begin`/`loop_end`) has a runtime counter. A conditional
+  (`if_begin`/`_else`/`if_end`) compares a gpr with a gpr or a build-time
+  constant, and `else_if` chains nest one conditional inside another.
 * **Separation of concerns is the invariant to protect.** The builder is
   target-neutral, ISA and data-type knowledge lives only in the emitter and the
   register configuration, and the allocator knows only kinds and control flow.
@@ -235,9 +238,10 @@ summary of the kernel.
 The output is useful in these cases:
 
 * **Checking a builder.** The IR dump shows the loops with their counters and
-  iteration counts, the pointer increments (`add_imm`), the memory offsets, and
-  the data types that the builder produced. A developer can compare them with
-  what the builder code is supposed to produce.
+  iteration counts, the conditions of the conditionals, the pointer increments
+  (`add_imm`), the memory offsets, and the data types that the builder
+  produced. A developer can compare them with what the builder code is supposed
+  to produce.
 * **Finding spills.** The summary shows the virtual registers that the
   allocator keeps in stack slots, and the operations that access the slots.
   The IR dump shows the physical register or the stack slot of each virtual
@@ -344,11 +348,17 @@ destination comes first. Operands print as follows:
   converting access shows two types, for example, `vload f32:v3, bf16:[g0+0]`.
 * `L<id>` is an IR label, the target of `jmp` and `jz`.
 
-Two kinds of operations print in a special form:
+Loops, conditionals, and labels print in a special form, and the bodies of
+loops and conditionals are indented:
 
 * `loop g9 = 2 {` is `loop_begin` with the counter `g9` and the iteration count
   `2`. The count can also be a virtual register, as in `loop g30 = g2 {`.
   `} // g9 -= 1, repeat while > 0` is `loop_end`.
+* `if (g8 != 0) {` is `if_begin` with the condition `g8 != 0`. A conditional
+  reads like C++. The comparison is the C++ operator of its `cmp_t`, and the
+  right-hand side is an immediate or a virtual register. `} else {` is
+  `_else`, and `}` is `if_end`. An `else_if` prints as a conditional nested in
+  the else of the one before, which is how the IR records it.
 * `L0:` is the `label` operation for the label `L0`.
 
 ## References
