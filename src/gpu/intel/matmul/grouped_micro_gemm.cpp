@@ -24,6 +24,7 @@
 #include "gemmstone/strategy_parser.hpp"
 #include "gpu/intel/compute/ukernels.hpp"
 #include "gpu/intel/compute/utils.hpp"
+#include "gpu/intel/gemm/host_scalars.hpp"
 #include "gpu/intel/gemm/jit/gen_kernel.hpp"
 #include "gpu/intel/jit/ir/block_2d_utils.hpp"
 
@@ -42,7 +43,7 @@ namespace matmul {
 namespace {
 
 // grouped_micro_gemm cross-thread argument bytes, plus headroom.
-constexpr int host_argument_bytes = 256;
+constexpr int host_argument_bytes = 268;
 
 } // namespace
 
@@ -153,6 +154,8 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(
     GEMMOptions opts;
     opts.scaleA = wei_quant_.with_scale() && wei_group_sizes_[1] < K();
     opts.offsetA = wei_quant_.with_zp();
+    opts.offsetAHostScalar = opts.offsetA
+            && attr()->zero_points_.get(DNNL_ARG_WEIGHTS).is_host_scalar();
     opts.scaleB = src_quant_.with_scale() && src_group_sizes_[1] < K();
     opts.offsetB = src_quant_.with_zp();
     opts.slmPtr = true;
@@ -174,11 +177,16 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(
         problem.AO.setAlignment(
                 static_cast<int>(types::data_type_size(wei_zp_dt)));
         problem.AO.layout = MatrixLayout::N;
-        problem.aoPtrDims = (wei_quant_.zp_mask() == 5
-                                    && attr()->zero_points_.has_default_groups(
-                                            DNNL_ARG_WEIGHTS))
-                ? 1
-                : 2;
+        const int wei_zp_mask = wei_quant_.zp_mask();
+        problem.aoPtrDims = opts.offsetAHostScalar ? -1
+                : wei_zp_mask == 0
+                ? 0
+                : (wei_zp_mask == 5
+                                          && attr()->zero_points_
+                                                     .has_default_groups(
+                                                             DNNL_ARG_WEIGHTS)
+                                  ? 1
+                                  : 2);
         problem.aOffset = ABOffset::Calc;
     }
 
@@ -233,6 +241,7 @@ status_t grouped_micro_gemm_t::pd_t::init_microkernels(
         if (!s8s4_dpas_ok) problem.Tb = Type::s8;
     }
 
+    if (problem.Ta.is3()) problem.Ta = Type::u4;
     // When both A and B are integers and group sums are needed, we
     // can avoid using group sums by converting one of the inputs to
     // f16/bf16.
@@ -486,11 +495,13 @@ status_t grouped_micro_gemm_t::pd_t::init_m_axis(const impl::engine_t *engine) {
     VDISPATCH_MATMUL(utils::one_of(src_dt, f32, f16, bf16, u8, s8, f8_e5m2,
                              f8_e4m3, f4_e2m1),
             VERBOSE_UNSUPPORTED_DT_CFG);
-    VDISPATCH_MATMUL(utils::one_of(wei_dt, f32, f16, bf16, u8, s8, s4, u4,
+    VDISPATCH_MATMUL(utils::one_of(wei_dt, f32, f16, bf16, u8, s8, s4, u4, u3,
                              f8_e5m2, f8_e4m3, f4_e2m1),
             VERBOSE_UNSUPPORTED_DT_CFG);
     VDISPATCH_MATMUL(
             utils::one_of(dst_dt, f32, f16, bf16), VERBOSE_UNSUPPORTED_DT_CFG);
+    VDISPATCH_MATMUL(IMPLICATION(wei_dt == u3, src_dt == f16),
+            VERBOSE_UNSUPPORTED_DT_CFG);
 
     // WOQ (fp src + int wei) requires weight scales and fpmath apply_to_int
     VDISPATCH_MATMUL(
@@ -503,6 +514,10 @@ status_t grouped_micro_gemm_t::pd_t::init_m_axis(const impl::engine_t *engine) {
     VDISPATCH_MATMUL(IMPLICATION(wei_subbyte, (K() % 2) == 0), VERBOSE_BAD_DIM,
             "weights", 1);
     VDISPATCH_MATMUL(IMPLICATION(wei_subbyte, (N() % 2) == 0), VERBOSE_BAD_DIM,
+            "weights", 2);
+    VDISPATCH_MATMUL(IMPLICATION(wei_dt == u3, (K() % 8) == 0), VERBOSE_BAD_DIM,
+            "weights", 1);
+    VDISPATCH_MATMUL(IMPLICATION(wei_dt == u3, (N() % 8) == 0), VERBOSE_BAD_DIM,
             "weights", 2);
 
     // Check offsets are int32
@@ -565,11 +580,19 @@ status_t grouped_micro_gemm_t::pd_t::init_m_axis(const impl::engine_t *engine) {
 
     if (wei_quant_.with_zp()) {
         const int wei_zp_mask = wei_quant_.zp_mask();
-        // Only per-column zero points supported for weights
-        VDISPATCH_MATMUL(utils::one_of(wei_zp_mask, 7, 5),
+        // Common zero points are supported only for u3 weights.
+        VDISPATCH_MATMUL(utils::one_of(wei_zp_mask, 7, 5, 0),
                 VERBOSE_UNSUPPORTED_ZP_CFG ": wei zero points mask(%d)",
                 wei_zp_mask);
-        if (wei_zp_mask == 5) {
+        VDISPATCH_MATMUL(IMPLICATION(wei_zp_mask == 0, wei_dt == u3),
+                VERBOSE_UNSUPPORTED_ZP_CFG
+                ": common wei zero points require u3 weights");
+        if (attr()->zero_points_.get(DNNL_ARG_WEIGHTS).is_host_scalar()) {
+            VDISPATCH_MATMUL(utils::one_of(wei_quant_.zp_dt(), u8, s8),
+                    VERBOSE_UNSUPPORTED_ZP_CFG
+                    ": host scalar wei zero points dt(%s)",
+                    dnnl_dt2str(wei_quant_.zp_dt()));
+        } else if (wei_zp_mask == 5) {
             VDISPATCH_MATMUL(
                     utils::one_of(wei_quant_.zp_dt(), s32, u8, s8, u4, s4),
                     VERBOSE_UNSUPPORTED_ZP_CFG ": wei zero points dt(%s)",
@@ -584,7 +607,7 @@ status_t grouped_micro_gemm_t::pd_t::init_m_axis(const impl::engine_t *engine) {
     if (wei_quant_.with_scale() && wei_quant_.with_zp()) {
         const int wei_scale_mask = wei_quant_.scale_mask();
         const int wei_zp_mask = wei_quant_.zp_mask();
-        VDISPATCH_MATMUL(wei_scale_mask == wei_zp_mask,
+        VDISPATCH_MATMUL(wei_scale_mask == wei_zp_mask || wei_zp_mask == 0,
                 VERBOSE_UNSUPPORTED_SCALES_CFG
                 ": wei scale(%d) and zp(%d) mask must match",
                 wei_scale_mask, wei_zp_mask);
@@ -640,8 +663,22 @@ status_t grouped_micro_gemm_t::pd_t::init_kernel_ctx_m_axis() {
 
     kernel_ctx_.define_int(
             "SRC_ELEMS_PER_BYTE", types::bytes_to_elements(src_dt, 1));
-    kernel_ctx_.define_int(
-            "WEI_ELEMS_PER_BYTE", types::bytes_to_elements(wei_dt, 1));
+    switch (wei_dt) {
+        case data_type::f4_e2m1:
+        case data_type::s4:
+        case data_type::u4:
+        case data_type::u3:
+            kernel_ctx_.define_int("WEI_STRIDE0",
+                    types::elements_to_bytes(wei_dt,
+                            memory_desc_wrapper(weights_md(0)).strides()[0]));
+            break;
+        default:
+            kernel_ctx_.define_int("WEI_STRIDE0",
+                    memory_desc_wrapper(weights_md(0)).strides()[0]);
+    }
+    if (memory_desc_wrapper(weights_md(0)).strides()[0] * ngroups_
+            >= std::numeric_limits<int>::max())
+        kernel_ctx_.use_int32_offset(false);
 
     src_quant_.define_macros(kernel_ctx_, "SRC");
     wei_quant_.define_macros(kernel_ctx_, "WEI");
@@ -650,6 +687,12 @@ status_t grouped_micro_gemm_t::pd_t::init_kernel_ctx_m_axis() {
     kernel_ctx_.define_int("WITH_WEI_SCALES", wei_quant_.with_scale());
     kernel_ctx_.define_int("WITH_SRC_ZP", src_quant_.with_zp());
     kernel_ctx_.define_int("WITH_WEI_ZP", wei_quant_.with_zp());
+    kernel_ctx_.define_int(
+            "WEI_ZP_COMMON", wei_quant_.with_zp() && wei_quant_.zp_mask() == 0);
+    kernel_ctx_.define_int("WEI_ZP_HOST_SCALAR",
+            wei_quant_.with_zp()
+                    && attr()->zero_points_.get(DNNL_ARG_WEIGHTS)
+                               .is_host_scalar());
     if (src_quant_.with_scale() || src_quant_.with_zp()) {
         kernel_ctx_.define_int("SRC_GROUP_SIZE", src_group_sizes_[1]);
     }
@@ -925,7 +968,13 @@ status_t grouped_micro_gemm_t::execute_m_axis(const exec_ctx_t &ctx) const {
     arg_list.append(src_zero_points);
     arg_list.append(ldsrcq);
     arg_list.append(wei_scales);
-    arg_list.append(wei_zero_points);
+    if (pd()->attr()->zero_points_.get(DNNL_ARG_WEIGHTS).is_host_scalar()) {
+        int value = 0;
+        CHECK(gemm::maybe_get_host_scalar_value(wei_zero_points, value));
+        arg_list.append(static_cast<int16_t>(value));
+    } else {
+        arg_list.append(wei_zero_points);
+    }
     arg_list.append(ldweiq);
     arg_list.append(n);
     arg_list.append(k);

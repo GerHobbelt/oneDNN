@@ -20,8 +20,8 @@
 #define CPU_AARCH64_JIT_GENERATOR_HPP
 
 #include <array>
+#include <climits>
 #include <cstdint>
-#include <limits.h>
 #include <vector>
 
 #include "common/type_helpers.hpp"
@@ -78,7 +78,7 @@ private:
     static constexpr size_t vreg_bytes_preserve = 8;
     static constexpr size_t vreg_to_preserve = 8; // VREG8 - VREG15
 
-    static constexpr size_t num_abi_save_gpr_regs = 12;
+    static constexpr size_t num_abi_save_gpr_regs = 10;
 
     static constexpr size_t preserved_stack_bytes = xreg_size_in_bytes
                     * (num_abi_save_gpr_regs + /*frame pointer*/ 1
@@ -104,19 +104,7 @@ public:
     // Callee-saved registers
     const std::array<Xbyak_aarch64::XReg, num_abi_save_gpr_regs>
             abi_save_gpr_regs
-            = {x16, x17, x19, x20, x21, x22, x23, x24, x25, x26, x27, x28};
-
-    enum {
-        _cmp_eq_oq = 0u,
-        _cmp_lt_os = 1u,
-        _cmp_le_os = 2u,
-        _cmp_neq_uq = 4u,
-        _cmp_nlt_us = 5u,
-        _cmp_nle_us = 6u,
-
-        _op_floor = 1u,
-        _op_mxcsr = 4u,
-    };
+            = {x19, x20, x21, x22, x23, x24, x25, x26, x27, x28};
 
     static constexpr int MAX_CODE_SIZE = 256 * 1024;
 
@@ -141,9 +129,8 @@ public:
     const Xbyak_aarch64::PReg P_NOT_128 = p14;
     const Xbyak_aarch64::PReg P_ALL_ONE = p0;
 
-    const std::vector<Xbyak_aarch64::XReg> x_tmp_vec
+    const std::array<Xbyak_aarch64::XReg, 5> temp_xregs
             = {X_TMP_0, X_TMP_1, X_TMP_2, X_TMP_3, X_TMP_4};
-    const int x_tmp_vec_size = x_tmp_vec.size();
 
     const Xbyak_aarch64::XReg param1 = abi_param1;
     constexpr static uint32_t DUMMY_IDX = 99;

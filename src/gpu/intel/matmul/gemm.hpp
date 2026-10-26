@@ -54,6 +54,8 @@ struct gemm_t : public primitive_t {
             gemm_attr.zero_points_ = attr()->zero_points_;
             gemm_attr.post_ops_ = attr()->post_ops_;
             gemm_attr.dropout_ = attr()->dropout_;
+            if (attr()->gpu_attr_)
+                gemm_attr.gpu_attr_ = attr()->gpu_attr_->clone();
 
             auto a_md = src_md(), b_md = weights_md(), c_md = dst_md(),
                  bias_md = weights_md(1);
@@ -66,9 +68,6 @@ struct gemm_t : public primitive_t {
             // Check for grouped encoding early before reshape attempts
             VDISPATCH_MATMUL(
                     is_dense_format_kind(), VERBOSE_UNSUPPORTED_SPARSE_CFG);
-
-            // jit-gemm has no u3 kernel type; route u3 decompression to ref
-            VDISPATCH_MATMUL(b_md->data_type != u3, VERBOSE_UNSUPPORTED_DT);
 
             auto maybe_reshape = [&]() -> status_t {
                 // reduce output is not handled by the reshape logic.

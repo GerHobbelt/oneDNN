@@ -93,6 +93,15 @@ bool useAutoAtomic(HW hw, const GEMMProblem &problem, const GEMMStrategy &strate
             && !isBlock2D(strategy.C.accessType);
 }
 
+int GEMMStrategy::defaultBlockK(HW hw, const GEMMProblem &problem) const
+{
+    if (hw >= HW::XeHPG) return 16777216;
+    int points = 1;
+    if (slmA || (problem.A.layout != MatrixLayout::T)) points++;
+    if (slmB || (problem.B.layout != MatrixLayout::N)) points++;
+    return std::min(2048, (2048 * points) / problem.Ta);
+}
+
 // Validate a GEMM strategy, correcting settings as necessary.
 void GEMMStrategy::preflight(HW hw, const GEMMProblem &problem)
 {
@@ -352,6 +361,16 @@ void GEMMStrategy::preflight(HW hw, const GEMMProblem &problem)
     if (ka_load == 0 || kb_load == 0)
         stub("Zero k-load granularity is invalid");
 
+    // u3 Block2DTranspose loads address k in whole dwords (32 elements = 3 dwords),
+    //  so each k load must cover a whole number of dwords.
+    auto u3DwordAligned = [](int k) { return (k * 3) % 32 == 0; };
+    if (problem.Ta_ext.is3() && A.accessType == AccessType::Block2DTranspose
+            && !(u3DwordAligned(ka_load) && u3DwordAligned(ka_load_masked)))
+        stub("u3 Block2DTranspose A loads must be dword-aligned in k");
+    if (problem.Tb_ext.is3() && B.accessType == AccessType::Block2DTranspose
+            && !(u3DwordAligned(kb_load) && u3DwordAligned(kb_load_masked)))
+        stub("u3 Block2DTranspose B loads must be dword-aligned in k");
+
     // Systolic handling.
     if (systolic) {
         auto params = systolicParams(problem);
@@ -496,16 +515,7 @@ void GEMMStrategy::preflight(HW hw, const GEMMProblem &problem)
 
     if (blocking[LoopM] <= 0) blocking[LoopM] = defaultMBlock;
     if (blocking[LoopN] <= 0) blocking[LoopN] = defaultNBlock;
-    if (blocking[LoopK] <= 0) {
-        if (hw >= HW::XeHPG)
-            blocking[LoopK] = 16777216;
-        else {
-            int points = 1;
-            if (slmA || (problem.A.layout != MatrixLayout::T)) points++;
-            if (slmB || (problem.B.layout != MatrixLayout::N)) points++;
-            blocking[LoopK] = std::min(2048, (2048 * points) / problem.Ta);
-        }
-    }
+    if (blocking[LoopK] <= 0) blocking[LoopK] = defaultBlockK(hw, problem);
 
     /* Quantization groups must not straddle k blocks */
     int kqGroup = 1;
