@@ -1666,7 +1666,8 @@ void jit_brgemm_amx_uker_t::process_output_range(
         if (bi.skip_accumulation) {
             vpxord(vreg_acc, vreg_acc, vreg_acc);
         } else if (brg.is_ace()) {
-            tilemovrow(vreg_acc, Tmm(get_C_tensor(bi, bdb, ldb)), bd);
+            tilemovrow(vreg_acc, Tmm(get_C_tensor(bi, bdb, ldb)),
+                    static_cast<uint8_t>(bd));
         } else {
             vreg_acc = bi.ldi->is_tail(ldb) ? vreg_acc | ld_tail_mask | T_z
                                             : vreg_acc;
@@ -2708,7 +2709,7 @@ void jit_brgemm_amx_uker_t::ace_load_A_4x16bytes(
             mov(reg_tmp_gpr, cur_mask);
             kmovq(ace_load_A_mask, reg_tmp_gpr);
             vmovdqu8(xmm_tmp | ace_load_A_mask | T_z, ptr[reg_A + cur_offset]);
-            vinserti64x2(zmm, zmm, xmm_tmp, i);
+            vinserti64x2(zmm, zmm, xmm_tmp, static_cast<uint8_t>(i));
         } else {
             // Note: bind by value; assigning through a reference to
             // ace_load_A_mask would clobber the member used above.
@@ -3641,10 +3642,8 @@ void jit_brgemm_amx_uker_t::generate() {
     if (brg.with_eltwise || brg.with_sum)
         postops_injector_->prepare_table(/* generate = */ true);
 
-    if (brg.is_fp8_via_convert()) {
-        if (f8_e5m2_cvt_) f8_e5m2_cvt_->prepare_table();
-        if (f8_e4m3_cvt_) f8_e4m3_cvt_->prepare_table();
-    }
+    if (f8_e5m2_cvt_) f8_e5m2_cvt_->prepare_table();
+    if (f8_e4m3_cvt_) f8_e4m3_cvt_->prepare_table();
 
     if (brg.is_bf32) {
         align(64);
