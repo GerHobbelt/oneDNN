@@ -289,7 +289,6 @@ void CopyPlan::transform()
     optimizeWriteSpread();
 
     legalizeImmediateTypes();
-    legalizeDstStrides();
 
     sort(SortType::PhaseOnly);
 
@@ -569,7 +568,7 @@ void CopyPlan::copyThrough(CopyInstruction &i, DataType type, int stride, bool s
 {
     auto st = i.src0.type, dt = i.dst.type;
     auto sstride = i.src0.stride, dstride = i.dst.stride;
-    auto ssize = getBytes(st), dsize = getBytes(dt), isize = getBytes(type);
+    auto ssize = getBits(st), dsize = getBits(dt), isize = getBits(type);
 
     auto &i0 = i, &i1 = split(i);
 
@@ -615,19 +614,7 @@ void CopyPlan::copyThrough(CopyInstruction &i, DataType type, int stride, bool s
         // No space for in-place conversion -- create temporary.
         if (stride == 0)
             stride = std::max(1, ssize * sstride / isize);
-        int offset = 0;
-        auto tryOffset = [&](const CopyOperand &op) {
-            if (op.byteStride() == isize * stride) {
-                auto bo = op.byteOffset();
-                if (bo < GRF::bytes(hw) - stride * getBytes(type) * (i.simd - 1))
-                    offset = bo / isize;
-            }
-        };
-        if (isize <= dsize) tryOffset(i1.dst.byteOffset());
-        if (isize <= ssize) tryOffset(i0.src0.byteOffset());
-        if (type == DataType::hf)
-            offset &= ~1;
-        i0.dst = newTemp(type, i.simd, stride, 0, offset);
+        i0.dst = newTemp(type, i.simd, stride);
         i1.src0 = i0.dst;
         i1.src0.overwriteStride = true;
 
@@ -657,6 +644,7 @@ void CopyPlan::copyThrough(CopyInstruction &i, DataType type, int stride, bool s
     auto setNullDstRegioning = [](CopyOperand &dst, const CopyOperand &src) {
         if (!dst.isNull()) return;
         dst.stride = src.width == 1 ? src.vs : src.stride;
+        dst.offset = src.offset;
         dst.width = dst.vs = 0;
         dst.type = src.type;
     };
@@ -727,6 +715,7 @@ void CopyPlan::repositionSrc(CopyInstruction &i, int n, int stride, int offset)
 
     if (!i1.dst) {
         i1.dst.stride = i1.src0.width == 1 ? i1.src0.vs : i1.src0.stride;
+        i1.dst.offset = i1.src0.offset;
         i1.dst.width = i1.dst.vs = 0;
         i1.dst.type = i1.src0.type;
     }
@@ -1111,53 +1100,6 @@ void CopyPlan::legalizeShfl()
             i.src0.vs = 1;
         }
     }
-}
-
-// Example case requiring this transformation:
-// --matmul --engine=gpu --dt=f16:u2:f16 --wtag=ba --attr-zero-points=wei:per_oc:u2 --attr-fpmath=f16:true 1x5120:5120x7680
-void CopyPlan::legalizeDstStrides()
-{
-    for (auto &i: insns) {
-        bool disaggregate = false;
-        if (i.dst.type != DataType::uw)
-            continue;
-        // dst stride can only go up to 4. If 8, switch to ud
-        if (i.dst.stride > 4) {
-            if (i.dst.stride > 8) {
-                disaggregate = true;
-            }
-            if (i.dst.offset % 2 != 0) {
-                disaggregate = true;
-            }
-            if (!i.dst.overwriteStride) {
-                disaggregate = true;
-            }
-            if (!disaggregate) {
-                i.dst.offset /= 2;
-                i.dst.stride /= 2;
-                i.dst.type = DataType::ud;
-            } else {
-                for (int k = 0; k < i.simd; k++) {
-                    auto &i1 = split(i, false);
-                    i1.dst.offset += k * i.dst.stride;
-                    i1.dst.stride = 1;
-                    i1.src0.offset += k * i.src0.stride;
-                    i1.src0.stride = 1;
-                    if (!i1.src1.isNull()) {
-                        i1.src1.offset += k * i.src1.stride;
-                        i1.src1.stride = 1;
-                    }
-                    if (!i1.src2.isNull()) {
-                        i1.src2.offset += k * i.src2.stride;
-                        i1.src2.stride = 1;
-                    }
-                    i1.simd = 1;
-                }
-                i.invalidate();
-            }
-        }
-    }
-    mergeChanges();
 }
 
 // Unpack 4-bit src type into 16 bits (zero extended), used in many conversion sequences.
@@ -1889,11 +1831,11 @@ void CopyPlan::planInt2Downconversion(CopyInstruction &i)
         ie[9]->src0 = tmp;
         ie[9]->src0.stride = 1;
         ie[9]->src0.type = DataType::ub;
-    } else if (ddst.stride == 2 || ddst.stride == 4) {
+    } else if (ddst.stride >= 2) {
         // Use multiple bfn instructions to insert
         // values into the destination.
         auto offset = (ddst.offset % 8) * 2;
-        int simd_factor = 8 / ddst.stride;
+        int simd_factor = std::max(1, 8 / ddst.stride);
         int new_ins = std::min(simd, simd_factor);
 
         for (int j = 0; j < new_ins; ++j) {
@@ -1906,16 +1848,17 @@ void CopyPlan::planInt2Downconversion(CopyInstruction &i)
             ie[2*j + 1]->src0.stride *= simd_factor;
             ie[2*j + 1]->src1 = Immediate::uw((offset + 2*ddst.stride*j) % 16);
 
+            const auto stride = std::max(ddst.stride / 8, 1);
             ie[2*j + 2]->op = Opcode::bfn;
             ie[2*j + 2]->simd = std::max(simd/simd_factor, 1);
             ie[2*j + 2]->ctrl = 0xCA;
             ie[2*j + 2]->dst = ddst;
             ie[2*j + 2]->dst.type = DataType::uw;
-            ie[2*j + 2]->dst.stride = 1;
+            ie[2*j + 2]->dst.stride = stride;
             ie[2*j + 2]->dst.offset /= 8;
             ie[2*j + 2]->src0 = ddst;
             ie[2*j + 2]->src0.type = DataType::uw;
-            ie[2*j + 2]->src0.stride = 1;
+            ie[2*j + 2]->src0.stride = stride;
             ie[2*j + 2]->src0.offset /= 8;
             if (offset + 2*ddst.stride*j >= 16) {
                 ie[2*j + 2]->dst.offset += 1;
@@ -2506,6 +2449,7 @@ void CopyPlan::planEmulatedHFToHF8(CopyInstruction &i)
     ie[3]->dst = CopyOperand();
     ie[3]->dst.type = DataType::hf;
     ie[3]->dst.stride = x.stride;
+    ie[3]->dst.offset = x.offset;
     ie[3]->src0 = abs(x);
     ie[3]->src1 = Immediate::hf(0x5FC0);
     ie[3]->cmod = ConditionModifier::lt;
