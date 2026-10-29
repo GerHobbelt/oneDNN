@@ -126,6 +126,8 @@ std::vector<gemmstone::StrategyRequirement> fallback_reqs(
 
     const int sg_size = dev_info.min_subgroup_size();
     auto product = dev_info.product();
+    // u3 weights are computed as u4, so their unrolls follow u4
+    const Type ta_ext = problem.Ta_ext.is3() ? Type(Type::u4) : problem.Ta_ext;
 
     // TODO: These values should be based on the eu_count
     dim_t m_unroll = sg_size;
@@ -141,8 +143,7 @@ std::vector<gemmstone::StrategyRequirement> fallback_reqs(
         case compute::gpu_arch_t::xe_hp:
             max_n_unroll = (problem.aqGroupK > 64
                                    && problem.A.layout == MatrixLayout::T)
-                            || (problem.Ta_ext.isF8() && opts.scaleA
-                                    && opts.scaleB)
+                            || (ta_ext.isF8() && opts.scaleA && opts.scaleB)
                             || (problem.Ta_scale == Type::f8_e8m0
                                     || problem.Tb_scale == Type::f8_e8m0)
                     ? 8
@@ -151,21 +152,20 @@ std::vector<gemmstone::StrategyRequirement> fallback_reqs(
         case compute::gpu_arch_t::xe_hpg: {
             bool is_xelpg = (product.family == ngen::ProductFamily::ARL
                     || product.family == ngen::ProductFamily::MTL);
-            max_n_unroll
-                    = (problem.Ta_ext.bits() <= 8 && problem.Ta_ext.isInteger())
-                    ? sg_size * problem.Ta_ext
+            max_n_unroll = (ta_ext.bits() <= 8 && ta_ext.isInteger())
+                    ? sg_size * ta_ext
                     : 16;
             if (is_xelpg && !dev_info.mayiuse_systolic()
-                    && problem.Ta_ext.bits() <= 8) {
+                    && ta_ext.bits() <= 8) {
                 min_n_unroll = (opts.scaleA || opts.scaleB) ? sg_size : 4;
             }
             if (!dev_info.mayiuse_systolic()) max_wg_n = 2;
-            if (problem.Ta_ext.bits() <= 8) min_wg_n = 2;
+            if (ta_ext.bits() <= 8) min_wg_n = 2;
         } break;
         case compute::gpu_arch_t::xe_hpc: max_n_unroll = 32; break;
         default:
             if (problem.Tb != Type::f32) {
-                m_unroll = std::max<dim_t>(sg_size, sg_size / problem.Ta_ext);
+                m_unroll = std::max<dim_t>(sg_size, sg_size / ta_ext);
             }
             max_n_unroll = 32;
     }
@@ -468,6 +468,26 @@ status_t grouped_micro_gemm_t::pd_t::init_m_axis(const impl::engine_t *engine) {
             utils::one_of(dst_dt, f32, f16, bf16), VERBOSE_UNSUPPORTED_DT_CFG);
     VDISPATCH_MATMUL(IMPLICATION(wei_dt == u3, src_dt == f16),
             VERBOSE_UNSUPPORTED_DT_CFG);
+
+    // u3 weights are only loaded with transposing 2D block messages, which
+    // require K-contiguous weights with an aligned pitch
+    if (wei_dt == u3) {
+        const auto *dev_info = utils::downcast<const intel::engine_t *>(engine)
+                                       ->device_info();
+        VDISPATCH_MATMUL(dev_info->gpu_arch() >= compute::gpu_arch_t::xe_hpc,
+                VERBOSE_UNSUPPORTED_DEVICE_FEATURE,
+                "u3 weights requires 2d block loads");
+        VDISPATCH_MATMUL(wei_d.matches_tag(format_tag::acb),
+                VERBOSE_UNSUPPORTED_TAG_S, "u3 weights");
+        auto hw = getCore(dev_info->product().family);
+        const dim_t ld_bytes = types::elements_to_bytes(
+                wei_dt, gemm_desc_t::get_ld(*weights_md(0)));
+        const int pitch_alignment = jit::block_2d_pitch_alignment(hw);
+        VDISPATCH_MATMUL(ld_bytes % pitch_alignment == 0,
+                VERBOSE_UNSUPPORTED_MEM_STRIDE
+                ": u3 weights pitch (%d bytes) is not %d-byte aligned",
+                (int)ld_bytes, pitch_alignment);
+    }
 
     // WOQ (fp src + int wei) requires weight scales and fpmath apply_to_int
     VDISPATCH_MATMUL(
