@@ -229,7 +229,7 @@ struct advancing_regs_t {
 struct invariant_regs_t {
     // Base pointer of the batch-element array.
     ir::vreg_t batch = ir::vreg_t::none;
-    // Batch size loop count. `none` when max_bs == 1 (single batch element).
+    // Batch size (params.BS).
     ir::vreg_t bs = ir::vreg_t::none;
     // K-tail mask, shared by every masked tail load. `none` when `k_tail` is
     // zero, which is when there is no tail load to mask.
@@ -271,10 +271,8 @@ m_loop_input_regs_t init_m_loop_input_regs(
     regs.invariant.batch = ir.new_gpr();
     ir.load_param(regs.invariant.batch, GET_OFF(batch));
 
-    if (cfg.max_bs > 1) {
-        regs.invariant.bs = ir.new_gpr();
-        ir.load_param(regs.invariant.bs, GET_OFF(BS));
-    }
+    regs.invariant.bs = ir.new_gpr();
+    ir.load_param(regs.invariant.bs, GET_OFF(BS));
 
     regs.advancing.a_off = ir.new_gpr();
     ir.mov_imm(regs.advancing.a_off, 0);
@@ -429,10 +427,20 @@ void emit_batch_loop(ir::ir_t &ir, const brgemv_ir_conf_t &cfg,
         body(a_ptr, x_ptr);
     };
 
-    if (cfg.max_bs > 1)
+    // `BS` is in [0, max_bs]. Matmul passes `BS` = 0 after the K-split
+    // reduction to apply only the post-ops to C, which the beta = 1 kernel
+    // loads into the accumulators.
+    //
+    // With max_bs == 1 the batch loop runs at most once, so it is emitted as
+    // an `if`. Unlike `emit_loop_reg`, the `if` needs no counter and does not
+    // keep `batch_ptr` live across the reduction.
+    if (cfg.max_bs > 1) {
         ir::emit_loop_reg(ir, regs.invariant.bs, bs_body);
-    else
-        ir::emit_loop_imm(ir, 1, bs_body);
+    } else {
+        const int if_bs = ir.if_begin(regs.invariant.bs, ir::cmp_t::ne, 0);
+        bs_body();
+        ir.if_end(if_bs);
+    }
 }
 
 // Post-ops of an M block.
@@ -743,6 +751,14 @@ struct jit_brgemv_ir_kernel_t : public brgemm_kernel_t {
         if (brg_.with_eltwise || brg_.with_binary || brg_.with_sum) {
             postops.post_ops = &brg_.attr()->post_ops_;
             postops.dst_md = brg_.dst_md();
+            // The transA accumulators run along M, the channel dimension of 3D
+            // dst {B, M, 1}, so per_oc_spatial and per_mb_spatial don't apply.
+            if (brg_.transA && !brg_.treat_y_as_row
+                    && brg_.dst_md()->ndims == 3)
+                postops.bcast_set = {broadcasting_strategy_t::scalar,
+                        broadcasting_strategy_t::per_oc,
+                        broadcasting_strategy_t::per_mb,
+                        broadcasting_strategy_t::no_broadcast};
             postops.rhs_arg_offset = GET_OFF(post_ops_binary_rhs_arg_vec);
             postops.dst_orig_off = GET_OFF(data_C_ptr_);
         }
