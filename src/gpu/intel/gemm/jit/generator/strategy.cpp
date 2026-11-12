@@ -149,6 +149,17 @@ void GEMMStrategy::preflight(HW hw, const GEMMProblem &problem)
     if (bLateScale && problem.needsBSums() && !opSumB)
         stub("Late B scales unsupported with these B sums");
 
+    // Offsets applied after the scales are fused with early 2D scales into one mad.
+    for (bool isA: {true, false}) {
+        bool offsetAfterScale = isA ? problem.aOffsetAfterScale : problem.bOffsetAfterScale;
+        bool xo2D = isA ? problem.aOffset2D() : problem.bOffset2D();
+        bool xs2D = isA ? problem.aScale2D() : problem.bScale2D();
+        bool lateOffset = isA ? problem.needsBGroupSums() : problem.needsAGroupSums();
+        bool lateScale = isA ? aLateScale : bLateScale;
+        if (offsetAfterScale && (!xo2D || !xs2D || lateOffset || lateScale))
+            stub("Offsets after scales require early 2D offsets and scales");
+    }
+
     C.atomic |= useAutoAtomic(hw, problem, *this);
 
     if (C.atomic && !C.base.isStateless() && !C.newDP)
@@ -431,14 +442,23 @@ void GEMMStrategy::preflight(HW hw, const GEMMProblem &problem)
     B.address2D &= !isPacked(problem.B.layout);
 
     // SLM staging must cover the k-loads, on the main and the masked path.
+    // A k-split copy gives each thread unrollKSLM / wg of k, which must be whole
+    //  bytes of k-contiguous sub-byte data. Unpadded inputs can switch to a k
+    //  split in remainder handling.
+    auto kSplitAlign = [](Type T, bool kContiguous, const MatrixAddressingStrategy &astrategy, int threads) {
+        bool subByteK = kContiguous && T.isSubByte() && !astrategy.padded && !isBlock2D(astrategy.accessType);
+        return subByteK ? (8 / gcd(8, T.bits())) * std::max(1, threads) : 1;
+    };
     int minUnrollKSLM = 1, minUnrollKSLMMasked = 1;
     if (slmA) {
-        minUnrollKSLM = lcm(minUnrollKSLM, ka_load);
-        minUnrollKSLMMasked = lcm(minUnrollKSLMMasked, lcm(ka_load, ka_load_masked));
+        int kAlignA = kSplitAlign(problem.Ta_ext, problem.A.layout == MatrixLayout::T, A, wg[LoopN]);
+        minUnrollKSLM = lcm(minUnrollKSLM, lcm(ka_load, kAlignA));
+        minUnrollKSLMMasked = lcm(minUnrollKSLMMasked, lcm(lcm(ka_load, ka_load_masked), kAlignA));
     }
     if (slmB) {
-        minUnrollKSLM = lcm(minUnrollKSLM, kb_load);
-        minUnrollKSLMMasked = lcm(minUnrollKSLMMasked, lcm(kb_load, kb_load_masked));
+        int kAlignB = kSplitAlign(problem.Tb_ext, problem.B.layout == MatrixLayout::N, B, wg[LoopM]);
+        minUnrollKSLM = lcm(minUnrollKSLM, lcm(kb_load, kAlignB));
+        minUnrollKSLMMasked = lcm(minUnrollKSLMMasked, lcm(lcm(kb_load, kb_load_masked), kAlignB));
     }
 
     if (unrollKSLM > 0) minUnrollKSLM = unrollKSLM = lcm(unrollKSLM, minUnrollKSLM);
