@@ -153,6 +153,10 @@ if(DNNL_WITH_SYCL)
         PROPERTIES COMPILE_FLAGS "-O0")
 endif()
 
+if(DNNL_CPU_RUNTIME STREQUAL "THREADPOOL")
+    add_subdirectory(threadpool)
+endif()
+
 set(OBJ_LIB ${LIB_PACKAGE_NAME}_cpu)
 add_library(${OBJ_LIB} OBJECT ${SOURCES})
 if (DNNL_X64_USE_ZEN)

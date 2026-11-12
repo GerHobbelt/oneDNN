@@ -377,24 +377,8 @@ void parseStrategy(const std::string &str, const GEMMProblem &problem, GEMMStrat
         {"fp", [](ParserContext& ctx) { ctx.strategy.fusePostOps = true; }},
         {"zt", [](ParserContext& ctx) { ctx.strategy.zeroTempC = true; }},
         {"rx", [](ParserContext& ctx) { ctx.strategy.relaxedAccumulation = true; }},
-        {"kb", [](ParserContext& ctx) {
-            auto &strategy = ctx.strategy;
-            strategy.kParallel = true;
-            strategy.C.atomic = true;
-            strategy.CO.atomic = ctx.problem.sumA || ctx.problem.sumB;
-            if (strategy.CO.atomic)
-                strategy.CO.base = AddressBase::createA64(true);
-        }},
-        {"kv", [](ParserContext& ctx) {
-            auto &strategy = ctx.strategy;
-            strategy.kParallelVariable = true;
-            strategy.fuseBeta = true;
-            strategy.fusePostOps = true;
-            strategy.C.atomic = true;
-            strategy.CO.atomic = ctx.problem.sumA || ctx.problem.sumB;
-            if (strategy.CO.atomic)
-                strategy.CO.base = AddressBase::createA64(true);
-        }},
+        {"kb", [](ParserContext& ctx) { ctx.strategy.kParallel = true; }},
+        {"kv", [](ParserContext& ctx) { ctx.strategy.kParallelVariable = true; }},
 
         /* Systolic Settings */
         {"sys", [](ParserContext& ctx) { ctx.strategy.systolic = true; }},
@@ -671,6 +655,13 @@ void parseStrategy(const std::string &str, const GEMMProblem &problem, GEMMStrat
 
     if (strategy.persistentLoop() && !strategy.linearOrder()) strategy.cWalkOrder = WalkOrder::SimpleLinear;
 
+    if (strategy.kParallelLocal && strategy.wg[LoopK] < 2)
+        throw std::runtime_error("kr/akr/ikr need wg MxNxK with K > 1");
+    if (strategy.shrinkWGK && strategy.kInterleave)
+        throw std::runtime_error("akr and ikr are exclusive");
+    if (!strategy.kInterleave && strategy.kInterleaveChunk > 0)
+        throw std::runtime_error("ki needs ikr");
+
     size_t poCount = problem.postOps.len();
     strategy.binary.resize(poCount);
     for (auto &astrategy: strategy.binary) {
@@ -765,7 +756,9 @@ void adjustStrategy(HW hw, const GEMMProblem &problem, GEMMStrategy &strategy, c
         strategy.remHandling[LoopM] = strategy.remHandling[LoopN] = RemainderHandling::Split;
 
     // ... and always use split remainder handling on later GPUs when panel checks are active.
-    if (strategy.panelCheck && strategy.lateExit() && hw >= HW::XeHP && !strategy.fixedSystolic) {
+    // kv late-exits through the fused beta/post-ops preflight derives.
+    bool lateExit = strategy.lateExit() || strategy.kParallelVariable;
+    if (strategy.panelCheck && lateExit && hw >= HW::XeHP && !strategy.fixedSystolic) {
         if (isPacked(problem.A.layout)) strategy.remHandling[LoopM] = RemainderHandling::Split;
         if (isPacked(problem.B.layout)) strategy.remHandling[LoopN] = RemainderHandling::Split;
     }
@@ -835,7 +828,12 @@ const char *parsePrecisions(const char *s, Type &precision1, Type &precision2)
     return s;
 }
 
-std::string unparseStrategy(HW hw, const GEMMProblem &problem, const GEMMStrategy &strategy)
+static std::string unparseKParallel(const GEMMStrategy &s)      { return std::string(s.kParallel ? " kb" : "") + (s.kParallelVariable ? " kv" : ""); }
+static std::string unparseFuseBeta(const GEMMStrategy &s)       { return !s.fuseBeta ? "" : s.altFusedBeta ? " afb" : " fb"; }
+static std::string unparseFusePostOps(const GEMMStrategy &s)    { return s.fusePostOps ? " fp" : ""; }
+static std::string unparseKParallelLocal(const GEMMStrategy &s) { return !s.kParallelLocal ? "" : s.shrinkWGK ? " akr" : s.kInterleave ? " ikr" : " kr"; }
+
+std::string unparseStrategy(HW hw,const GEMMProblem &problem, const GEMMStrategy &strategy)
 {
     std::stringstream s;
     s.imbue(std::locale::classic());
@@ -941,9 +939,7 @@ std::string unparseStrategy(HW hw, const GEMMProblem &problem, const GEMMStrateg
     if (strategy.forceFixedWGK)             s << " ffk";
 
 
-    if (strategy.kParallelLocal)    s << (strategy.shrinkWGK   ? " akr" :
-                                          strategy.kInterleave ? " ikr" :
-                                                                 " kr");
+    s << unparseKParallelLocal(strategy);
     if (strategy.fillGoal)          s << " fg " << strategy.fillGoal * (1. / 16);
     if (strategy.kInterleave)       s << " ki" << strategy.kInterleaveChunk;
 
@@ -1031,10 +1027,7 @@ std::string unparseStrategy(HW hw, const GEMMProblem &problem, const GEMMStrateg
     if (strategy.mSplitThresh)          s << " ms" << strategy.mSplitThresh;
     if (strategy.nSplitThresh)          s << " ns" << strategy.nSplitThresh;
     if (strategy.cInterleave)           s << " cti";
-    if (strategy.kParallel)             s << " kb";
-    if (strategy.kParallelVariable)     s << " kv";
-    if (strategy.fuseBeta)              s << (strategy.altFusedBeta ? " afb" : " fb");
-    if (strategy.fusePostOps)           s << " fp";
+    s << unparseKParallel(strategy) << unparseFuseBeta(strategy) << unparseFusePostOps(strategy);
     if (strategy.zeroTempC)             s << " zt";
     if (strategy.relaxedAccumulation)   s << " rx";
     if (strategy.kPadding)              s << " pk" << strategy.kPadding;

@@ -22,13 +22,16 @@
 // An `ir_t` is a flat list of operations. Each operation reads and writes
 // virtual registers: integer-named placeholders for the values a kernel works
 // with, used instead of physical registers until the allocator assigns them.
-// Every virtual register belongs to one of three kinds (gpr/vec/mask), which
-// defines the kind of physical register it can later land in. Operations are
-// target-neutral. The concrete instructions are chosen later by the emitter.
+// Every virtual register belongs to one of four kinds (gpr/vec/mask/tile),
+// which defines the kind of physical register it can later land in. Operations
+// are target-neutral. The concrete instructions are chosen later by the
+// emitter.
 //
 // A vec vreg also carries the element data type of the values it holds. The
 // operations stay data-type generic. The builder tags each vec vreg with a
 // dtype and the emitter lowers each op to the instruction for that dtype.
+//
+// A tile vreg carries a data type and its physical shape (see `tile_shape_t`).
 //
 // The virtual registers are mutable. A virtual register is a named value that
 // may be written more than once. In this IR we deliberately allow reassignment,
@@ -46,6 +49,7 @@
 // running pointer that is advanced each iteration instead of recomputing an
 // index). Restricting addresses to one register keeps every memory op reading
 // at most one pointer, which lowers register pressure and simplifies spilling.
+// A tile load or store also reads a stride gpr, the byte distance between rows.
 //
 // Loops are explicit structured nodes with a runtime counter register
 // (loop_begin/loop_end). Compile-time loops are unrolled by the builder.
@@ -65,8 +69,22 @@ namespace ir {
 // vec  - Vector register
 // mask - Mask register (emitter decides whether lower it to k or vector
 //        register)
+// tile - Tile register, `rows` rows of `colsb` bytes (see `tile_shape_t`)
 
-enum class reg_kind_t { gpr, vec, mask };
+enum class reg_kind_t { gpr, vec, mask, tile };
+
+// Shape of a tile register: `rows` rows of `colsb` bytes each, as the tile
+// configuration sets it. A row holds `colsb / sizeof(dt)` elements of the data
+// type of the vreg. Tiles with the same shape share a register file whatever
+// their data type, and a tile allocates only from the file of its shape.
+struct tile_shape_t {
+    int rows;
+    int colsb;
+
+    bool operator==(const tile_shape_t &other) const {
+        return rows == other.rows && colsb == other.colsb;
+    }
+};
 
 // vreg_t is a strong alias for `int`. It does not implicitly convert to or from
 // `int`, so a vreg and a raw int cannot be mixed up by accident. `none` marks
@@ -142,6 +160,22 @@ enum class op_kind_t {
     // prefetch [base + disp] into cache. Reads base, writes nothing.
     prefetch,
 
+    // Tile operations
+    //
+    // dst = 0 (clear tile)
+    tzero,
+    // row r of dst = [base + disp + r * s1] for every row r. s1 is the stride
+    // gpr.
+    tload,
+    // [base + disp + r * s1] = row r of s0 for every row r. s1 is the stride
+    // gpr.
+    tstore,
+    // dst[m][n] += sum_k s0[m][k] * s1[k][n] (tile matrix multiply). A row of
+    // s0 holds `colsb / sizeof(dt)` elements of K. s1 packs K in groups of 4
+    // bytes: with g = 4 / sizeof(dt), s1[k][n] is element `n * g + k % g` of
+    // row `k / g`.
+    tmma,
+
     // Control flow
     //
     // initialize loop counter (dst = imm or s0 if init_is_reg)
@@ -177,6 +211,26 @@ struct mem_t {
     bool is_param = false;
 };
 
+// Hints of a memory access, combined with `|`. A hint never changes the result
+// or the legality of an operation. The emitter uses the hinted instruction
+// where the target has it and the plain instruction otherwise.
+//
+//   non_temporal - the data is not reused soon
+enum class mem_hint_t : unsigned {
+    none = 0,
+    non_temporal = 1u << 0,
+};
+
+inline mem_hint_t operator|(mem_hint_t a, mem_hint_t b) {
+    return static_cast<mem_hint_t>(
+            static_cast<unsigned>(a) | static_cast<unsigned>(b));
+}
+
+inline mem_hint_t operator&(mem_hint_t a, mem_hint_t b) {
+    return static_cast<mem_hint_t>(
+            static_cast<unsigned>(a) & static_cast<unsigned>(b));
+}
+
 // An `op_t` is a single IR operation. One fixed struct represents every
 // operation and works like a tagged union, where the `kind` field decides which
 // operation it is. Each operation only uses the fields it needs and ignores the
@@ -201,6 +255,7 @@ struct mem_t {
 // mem_dt - element data type in memory, set by every vector load and store. It
 //        is the data type of the vreg when the access moves the value as it
 //        is, and a different one when the access converts.
+// hint  - for tload, the hints of the access (see `mem_hint_t`).
 // match - for loop_end, index of matching loop_begin operation. For _else and
 //         if_end, index of matching if_begin operation.
 // cmp   - for if_begin, how s0 is compared with s1 or imm.
@@ -213,16 +268,19 @@ struct op_t {
     dim_t imm = 0;
     mem_t mem;
     data_type_t mem_dt = data_type::undef;
+    mem_hint_t hint = mem_hint_t::none;
     int match = -1;
     cmp_t cmp = cmp_t::eq;
     bool init_is_reg = false;
 };
 
 // Metadata for virtual registers that contains the register kind and the
-// data type of the values it holds. `dt` is `undef` for gpr and mask.
+// data type of the values it holds. `dt` is `undef` for gpr and mask. `shape`
+// is the shape of a tile and empty for the other kinds.
 struct vreg_info_t {
     reg_kind_t kind;
     data_type_t dt = data_type::undef;
+    tile_shape_t shape = {};
 };
 
 // Arguments of an `inject_postops` operation. They live in a side table in
@@ -278,6 +336,8 @@ struct DNNL_API ir_t {
     vreg_t new_gpr() { return new_vreg(reg_kind_t::gpr); }
     vreg_t new_vec(data_type_t dt) { return new_vreg(reg_kind_t::vec, dt); }
     vreg_t new_mask() { return new_vreg(reg_kind_t::mask); }
+    // `shape` must not be empty.
+    vreg_t new_tile(data_type_t dt, tile_shape_t shape);
 
     int n_vregs() const { return (int)vreg_info_.size(); }
     int n_ops() const { return (int)ops_.size(); }
@@ -328,6 +388,17 @@ struct DNNL_API ir_t {
 
     // mask
     void set_mask_imm(vreg_t mask, int n_elems);
+
+    // tile
+    void tzero(vreg_t dst);
+    // `stride` is a gpr that holds the byte distance between rows in memory.
+    void tload(vreg_t dst, vreg_t base, dim_t disp, vreg_t stride,
+            mem_hint_t hint = mem_hint_t::none);
+    void tstore(vreg_t base, dim_t disp, vreg_t src, vreg_t stride);
+    // `dst`, `a`, and `b` are different tiles with matching shapes:
+    // `dst.rows == a.rows`, `dst.colsb == b.colsb`, and `a.colsb == 4 * b.rows`
+    // (each row of `b` holds one 4-byte group of K for each column).
+    void tmma(vreg_t dst, vreg_t a, vreg_t b);
 
     // post-ops
     // Apply post-ops to `acc` in place. `base_ptr` and `out_byte_off` describe

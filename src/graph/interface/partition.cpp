@@ -328,15 +328,7 @@ status_t dnnl_graph_compiled_partition_execute_v2(
 
     if (get_verbose(dnnl::impl::verbose_t::exec_profile,
                 dnnl::impl::component_t::graph)) {
-        bool block_on_wait = true;
-#if DNNL_CPU_RUNTIME == DNNL_RUNTIME_THREADPOOL
-        dnnl::threadpool_interop::threadpool_iface *tp;
-        auto status = stream->get_threadpool(&tp);
-        block_on_wait = status == status::success && tp
-                && !(tp->get_flags()
-                        & dnnl::threadpool_interop::threadpool_iface::
-                                ASYNCHRONOUS);
-#endif
+        const bool block_on_wait = stream->is_syncable();
         if (block_on_wait) stream->wait();
         double start_ms = dnnl::impl::get_msec();
         CHECK(compiled_partition->execute(stream, ins, outs, scratchpad));
@@ -695,9 +687,7 @@ status_t dnnl_graph_partition::compile(compiled_partition_t *cp,
         auto part = pimpl_->clone();
         const std::vector<std::shared_ptr<op_t>> &fused_op = part->get_ops();
         if (fused_op.empty()) return status::invalid_arguments;
-        const auto &fpm = get_fpmath_mode();
-        auto agraph = graph_t(fused_op, get_engine_kind());
-        agraph.set_fpmath_mode(fpm.mode_, fpm.apply_to_int_);
+        auto agraph = graph_t(fused_op, get_engine_kind(), get_attr());
         // set user given logical tensors and infer shape
         agraph.set_user_inputs_outputs(tmp_inputs, tmp_outputs);
         agraph.infer_shape();

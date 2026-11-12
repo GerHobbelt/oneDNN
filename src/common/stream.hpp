@@ -77,6 +77,8 @@ struct dnnl_stream {
         return impl_->is_verbose_profiler_enabled();
     }
 
+    bool is_syncable() const { return impl_->is_syncable(); }
+
     virtual dnnl::impl::status_t run_verbose_profiler(
             const std::string &pd_info, double start_ms, uint64_t component) {
         return dnnl::impl::status::unimplemented;
@@ -86,16 +88,6 @@ struct dnnl_stream {
             const dnnl::impl::exec_ctx_t &ctx);
 
     dnnl::impl::stream_impl_t *impl() const { return impl_.get(); }
-
-#if DNNL_CPU_RUNTIME == DNNL_RUNTIME_THREADPOOL
-    dnnl::impl::status_t get_threadpool(
-            dnnl::threadpool_interop::threadpool_iface **threadpool) const {
-        using namespace dnnl::impl;
-        if (engine_->kind() != engine_kind::cpu)
-            return status::invalid_arguments;
-        return impl_->get_threadpool(threadpool);
-    }
-#endif
 
 protected:
     dnnl::impl::engine_t *engine_;

@@ -35,6 +35,14 @@ vreg_t ir_t::new_vreg(reg_kind_t k, data_type_t dt) {
     return static_cast<vreg_t>((int)vreg_info_.size() - 1);
 }
 
+vreg_t ir_t::new_tile(data_type_t dt, tile_shape_t shape) {
+    assert(shape.rows > 0 && shape.colsb > 0 && "new_tile: empty shape");
+
+    const vreg_t v = new_vreg(reg_kind_t::tile, dt);
+    vreg_info_[(int)v].shape = shape;
+    return v;
+}
+
 int ir_t::mov_imm(vreg_t dst, dim_t imm) {
     op_t op;
     op.kind = op_kind_t::mov_imm;
@@ -225,6 +233,61 @@ void ir_t::prefetch(vreg_t base, dim_t disp) {
     ops_.push_back(op);
 }
 
+void ir_t::tzero(vreg_t dst) {
+    op_t op;
+    op.kind = op_kind_t::tzero;
+    op.dst = dst;
+    ops_.push_back(op);
+}
+
+void ir_t::tload(
+        vreg_t dst, vreg_t base, dim_t disp, vreg_t stride, mem_hint_t hint) {
+    assert(stride != vreg_t::none && "tload: stride is required");
+
+    op_t op;
+    op.kind = op_kind_t::tload;
+    op.dst = dst;
+    op.s1 = stride;
+    op.mem.base = base;
+    op.mem.disp = disp;
+    op.hint = hint;
+    ops_.push_back(op);
+}
+
+void ir_t::tstore(vreg_t base, dim_t disp, vreg_t src, vreg_t stride) {
+    assert(stride != vreg_t::none && "tstore: stride is required");
+
+    op_t op;
+    op.kind = op_kind_t::tstore;
+    op.s0 = src;
+    op.s1 = stride;
+    op.mem.base = base;
+    op.mem.disp = disp;
+    ops_.push_back(op);
+}
+
+void ir_t::tmma(vreg_t dst, vreg_t a, vreg_t b) {
+    // `tmma` needs three different tiles with matching shapes (see its
+    // declaration). Checking that the vregs differ is enough, because the
+    // allocator gives different registers to the vregs that one operation reads.
+    assert(dst != a && dst != b && a != b && "tmma: operands must differ");
+    const tile_shape_t &ds = vreg_info_[(int)dst].shape;
+    const tile_shape_t &as = vreg_info_[(int)a].shape;
+    const tile_shape_t &bs = vreg_info_[(int)b].shape;
+    assert(ds.rows == as.rows && as.colsb == 4 * bs.rows && ds.colsb == bs.colsb
+            && "tmma: shapes do not fit");
+    MAYBE_UNUSED(ds);
+    MAYBE_UNUSED(as);
+    MAYBE_UNUSED(bs);
+
+    op_t op;
+    op.kind = op_kind_t::tmma;
+    op.dst = dst;
+    op.s0 = a;
+    op.s1 = b;
+    ops_.push_back(op);
+}
+
 void ir_t::inject_postops(const std::vector<vreg_t> &acc, vreg_t base_ptr,
         const std::vector<dim_t> &out_byte_off, int n_elems) {
     assert(n_elems > 0 && "inject_postops: no valid elements");
@@ -407,6 +470,7 @@ void ir_t::def_use(
             u(op.mem.base);
             break;
         case op_kind_t::vdot:
+        case op_kind_t::tmma:
             u(op.dst);
             u(op.s0);
             u(op.s1);
@@ -447,6 +511,17 @@ void ir_t::def_use(
             u(op.mem.base);
             break;
         case op_kind_t::prefetch: u(op.mem.base); break;
+        case op_kind_t::tzero: d(op.dst); break;
+        case op_kind_t::tload:
+            u(op.mem.base);
+            u(op.s1); // stride
+            d(op.dst);
+            break;
+        case op_kind_t::tstore:
+            u(op.s0);
+            u(op.s1); // stride
+            u(op.mem.base);
+            break;
         case op_kind_t::loop_begin:
             if (op.init_is_reg) u(op.s0);
             d(op.dst);

@@ -23,9 +23,8 @@
 
 set -eo pipefail
 
-# Skip these tests that will fail on CI for the RISC-V architecture.
-SKIPPED_TESTS="cpu-matmul-coo-cpp|cpu-matmul-csr-cpp|test_sum"
-SKIPPED_TESTS+="|cpu-graph-sdpa-cpp"
+# Skip the SDPA example that exceeds the CI time budget under QEMU.
+SKIPPED_TESTS="cpu-graph-sdpa-cpp"
 
 if [[ "$ONEDNN_TEST_SET" == "SMOKE" ]]; then
     # Skip time-consuming tests (QEMU is slow)
@@ -49,7 +48,6 @@ if [[ "$ONEDNN_TEST_SET" == "SMOKE" ]]; then
     SKIPPED_TESTS+="|test_graph_unit_dnnl_mqa_decomp_cpu"
     SKIPPED_TESTS+="|test_graph_unit_dnnl_sdp_decomp_cpu"
 elif [[ "$ONEDNN_TEST_SET" == "CI" ]]; then
-    SKIPPED_TESTS+="|test_benchdnn_modeC_matmul_sparse_ci_cpu"
     SKIPPED_TESTS+="|test_benchdnn_modeC_graph_ci_cpu"
     SKIPPED_TESTS+="|test_benchdnn_modeC_matmul_ci_cpu"
     SKIPPED_TESTS+="|test_benchdnn_modeC_ip_ci_cpu"

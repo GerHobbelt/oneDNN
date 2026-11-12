@@ -27,7 +27,7 @@ namespace dnnl_impl {
 
 genindex_executable_t::genindex_executable_t(std::shared_ptr<op_t> &op,
         const dnnl::engine &p_engine, pd_cache_t &pd_cache,
-        const fpmath_t &fpmath, bool use_block_layout)
+        const graph_attr_t &graph_attr, bool use_block_layout)
     : axis_(op->get_attr<int64_t>(op_attr::axis))
     , nelems_(0)
     , ndims_(0)
@@ -90,15 +90,7 @@ void genindex_executable_t::execute(const stream &stream,
         const std::unordered_map<int, memory> &args) const {
     if (get_verbose(dnnl::impl::verbose_t::exec_profile,
                 dnnl::impl::component_t::graph)) {
-        bool block_on_wait = true;
-#if DNNL_CPU_RUNTIME == DNNL_RUNTIME_THREADPOOL
-        dnnl::threadpool_interop::threadpool_iface *tp = nullptr;
-        auto st = stream.get()->get_threadpool(&tp);
-        block_on_wait = st == dnnl::impl::status::success && tp
-                && !(tp->get_flags()
-                        & dnnl::threadpool_interop::threadpool_iface::
-                                ASYNCHRONOUS);
-#endif
+        const bool block_on_wait = stream.get()->is_syncable();
         if (block_on_wait) stream.get()->wait();
         double start_ms = dnnl::impl::get_msec();
         execute_impl(stream, args);
