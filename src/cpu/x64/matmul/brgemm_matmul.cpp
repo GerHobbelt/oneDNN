@@ -31,6 +31,8 @@
 #include "cpu/x64/matmul/brgemm_matmul.hpp"
 #include "cpu/x64/matmul/jit_brgemm_matmul_reduce.hpp"
 
+#include <memory>
+
 namespace dnnl {
 namespace impl {
 namespace cpu {
@@ -221,19 +223,21 @@ status_t brgemm_matmul_t<isa>::pd_t::init(const engine_t *engine) {
             VDISPATCH_MATMUL(
                     !is_runtime_value(N()), VERBOSE_UNSUPPORTED_SCALES_CFG);
         }
-        // Impl suppports f32 scales only for non-weight decompression
-        if (!(is_bf16_with_int_wei || is_f16_with_int_wei || is_f32_with_int_wei
-                    || with_int8_grouped_quantization)) {
-            VDISPATCH_MATMUL(
-                    one_of(asc.get_data_type(DNNL_ARG_SRC), undef, f32),
-                    VERBOSE_UNSUPPORTED_SCALES_CFG);
-            VDISPATCH_MATMUL(
-                    one_of(asc.get_data_type(DNNL_ARG_WEIGHTS), undef, f32),
-                    VERBOSE_UNSUPPORTED_SCALES_CFG);
-            VDISPATCH_MATMUL(
-                    one_of(asc.get_data_type(DNNL_ARG_DST), undef, f32),
+        // Decompression and grouped quantization also support xf16 source and
+        // weights scales. ISA-specific restrictions are checked in init_conf.
+        const bool supports_xf16_scales = is_bf16_with_int_wei
+                || is_f16_with_int_wei || is_f32_with_int_wei
+                || with_int8_grouped_quantization;
+        for (const int arg : {DNNL_ARG_SRC, DNNL_ARG_WEIGHTS}) {
+            const auto scales_dt = asc.get_data_type(arg);
+            VDISPATCH_MATMUL(one_of(scales_dt, undef, f32)
+                            || (supports_xf16_scales
+                                    && one_of(scales_dt, bf16, f16)),
                     VERBOSE_UNSUPPORTED_SCALES_CFG);
         }
+        // The driver reads destination scales as float to compute the reciprocal.
+        VDISPATCH_MATMUL(one_of(asc.get_data_type(DNNL_ARG_DST), undef, f32),
+                VERBOSE_UNSUPPORTED_SCALES_CFG);
         // Implementation has limited support w.r.t. scales groups.
         if (!asc.has_default_values(DNNL_ARG_WEIGHTS)) {
             if (!asc.get(DNNL_ARG_WEIGHTS).has_default_groups()) {
@@ -660,6 +664,15 @@ status_t brgemm_matmul_t<isa>::execute_body(const exec_ctx_t &ctx) const {
     const auto dst_d = ctx.memory_mdw(DNNL_ARG_DST, pd()->dst_md());
     matmul_helper_t helper(src_d, weights_d, dst_d);
 
+    // Shared_ptr is mandatory for objects created on the stack to support
+    // asynchronous threadpool runtime: the parallel task captures-by-copy and
+    // may outlive the stack frame, so shared ownership keeps the object alive.
+    // Objects that are part of pd() must be passed inside the lambda by a plain
+    // pointer instead: pd() outlives the task as it's owned by the captured
+    // primitive, and a pointer avoids both a deep copy and a heap allocation.
+    // Note: use only `_ptr` name until the parallel call to avoid any
+    // shadowing.
+    // Anchor: CONTEXT_SHARED_PTR_ASYNC.
     auto brgmm_ctx_ptr
             = std::make_shared<brg_matmul_exec_ctx_t>(ctx, pd(), helper);
 

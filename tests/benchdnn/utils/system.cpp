@@ -14,6 +14,10 @@
 * limitations under the License.
 *******************************************************************************/
 
+#include <algorithm> // for std::find, std::any_of
+#include <climits> // for PATH_MAX
+#include <cstdio> // for snprintf
+#include <cstdlib> // for realpath
 #include <fstream> // for std::ifstream
 #include <string>
 #include <utility> // for std::move
@@ -29,6 +33,7 @@
 #include "oneapi/dnnl/dnnl.hpp"
 #if DNNL_GPU_RUNTIME == DNNL_RUNTIME_OCL
 #include "oneapi/dnnl/dnnl_ocl.hpp"
+#include <CL/cl_ext.h>
 #endif
 #if DNNL_GPU_RUNTIME == DNNL_RUNTIME_DPCPP
 #include "oneapi/dnnl/dnnl_sycl.hpp"
@@ -41,6 +46,7 @@
 
 #include "common.hpp"
 #include "utils/engine.hpp"
+#include "utils/parser.hpp"
 #include "utils/summary.hpp"
 #include "utils/system.hpp"
 
@@ -271,16 +277,19 @@ static std::vector<gpu_gt_t> find_gpu_gts_xe(const std::string &card) {
     const std::string device = card + "/device";
     for (const auto &tile : list_dir(device)) {
         if (tile.rfind("tile", 0) != 0) continue;
-        const std::string tile_path = device + "/" + tile;
+        const std::string tile_path
+                = parser::utils::str_join(device, tile, '/');
         for (const auto &gt : list_dir(tile_path)) {
-            const std::string freq = tile_path + "/" + gt + "/freq0";
+            const std::string gt_path
+                    = parser::utils::str_join(tile_path, gt, '/');
+            const std::string freq = gt_path + "/freq0";
             if (!path_exists(freq + "/min_freq")) continue;
-            const std::string eng = tile_path + "/" + gt + "/engines";
+            const std::string eng = gt_path + "/engines";
             if (path_exists(eng) && !path_exists(eng + "/rcs")
                     && !path_exists(eng + "/ccs"))
                 continue;
-            gts.push_back(
-                    {tile + "/" + gt, freq + "/min_freq", freq + "/max_freq"});
+            gts.push_back({parser::utils::str_join(tile, gt, '/'),
+                    freq + "/min_freq", freq + "/max_freq"});
         }
     }
     return gts;
@@ -292,9 +301,10 @@ static std::vector<gpu_gt_t> find_gpu_gts_i915(const std::string &card) {
     std::vector<gpu_gt_t> gts;
     const std::string gt_root = card + "/gt";
     for (const auto &gt : list_dir(gt_root)) {
-        const std::string min = gt_root + "/" + gt + "/rps_min_freq_mhz";
+        const std::string gt_path = parser::utils::str_join(gt_root, gt, '/');
+        const std::string min = gt_path + "/rps_min_freq_mhz";
         if (path_exists(min))
-            gts.push_back({gt, min, gt_root + "/" + gt + "/rps_max_freq_mhz"});
+            gts.push_back({gt, min, gt_path + "/rps_max_freq_mhz"});
     }
     if (gts.empty() && path_exists(card + "/gt_min_freq_mhz"))
         gts.push_back(
@@ -302,36 +312,151 @@ static std::vector<gpu_gt_t> find_gpu_gts_i915(const std::string &card) {
     return gts;
 }
 
+// Parses the kernel's cpulist format, e.g. "0-3,8,10-11".
+static std::vector<int> parse_cpulist(const std::string &list) {
+    std::vector<int> cpus;
+    size_t pos = list.empty() ? std::string::npos : 0;
+    while (pos != std::string::npos) {
+        const std::string range = parser::get_substr(list, pos, ',');
+        size_t range_pos = 0;
+        const int first = std::stoi(parser::get_substr(range, range_pos, '-'));
+        const int last = range_pos == std::string::npos
+                ? first
+                : std::stoi(parser::get_substr(range, range_pos, '-'));
+        for (int cpu = first; cpu <= last; cpu++)
+            cpus.push_back(cpu);
+    }
+    return cpus;
+}
+
+static std::string get_cpu_sysfs_path(int cpu) {
+    return "/sys/devices/system/cpu/cpu" + std::to_string(cpu);
+}
+
+struct cpu_group_t {
+    std::string name;
+    int cpu;
+};
+
+// Hybrid CPUs have core types with distinct frequency and idle-state settings,
+// so each type must be verified, but cores of the same type are configured
+// alike and a single representative per type keeps the check cheap.
+//
+// Intel hybrid systems expose a PMU per core type listing its CPUs. Atom cores
+// without L3 are LP E-cores, which reside on a separate low-power island with
+// own frequency limits, so the L3 presence tells them from regular E-cores.
+// Without policy or PMU groups, use a single unnamed group.
+static std::vector<cpu_group_t> get_cpu_groups() {
+    std::vector<cpu_group_t> groups;
+#if (defined(DNNL_AARCH64) && DNNL_AARCH64 == 1) \
+        || (defined(DNNL_RV64) && DNNL_RV64 == 1)
+    // CPUs in a cpufreq policy share frequency controls. Check one online
+    // representative per policy on AArch64 and RV64.
+    const std::string policy_root = "/sys/devices/system/cpu/cpufreq";
+    for (const auto &policy : list_dir(policy_root)) {
+        if (policy.rfind("policy", 0) != 0) continue;
+        const std::string policy_path
+                = parser::utils::str_join(policy_root, policy, '/');
+        std::ifstream cpus(policy_path + "/affected_cpus");
+        int cpu;
+        if (cpus >> cpu) groups.push_back({policy, cpu});
+    }
+    if (!groups.empty()) {
+        std::sort(groups.begin(), groups.end(),
+                [](const cpu_group_t &a, const cpu_group_t &b) {
+            return a.cpu < b.cpu;
+        });
+        return groups;
+    }
+#endif
+    const auto p_cpus
+            = parse_cpulist(read_sysfs_str("/sys/devices/cpu_core/cpus"));
+    const auto e_cpus
+            = parse_cpulist(read_sysfs_str("/sys/devices/cpu_atom/cpus"));
+    const auto has = [](const std::vector<int> &cpus, int cpu) {
+        return std::find(cpus.begin(), cpus.end(), cpu) != cpus.end();
+    };
+
+    for (int cpu :
+            parse_cpulist(read_sysfs_str("/sys/devices/system/cpu/online"))) {
+        std::string name;
+        if (has(p_cpus, cpu))
+            name = "P-core";
+        else if (has(e_cpus, cpu))
+            name = path_exists(get_cpu_sysfs_path(cpu) + "/cache/index3")
+                    ? "E-core"
+                    : "LP E-core";
+        const bool seen = std::any_of(groups.begin(), groups.end(),
+                [&](const cpu_group_t &g) { return g.name == name; });
+        if (!seen) groups.push_back({name, cpu});
+    }
+    return groups;
+}
+
 static bool report_cpu_perf_hints_impl() {
     bool any_hint = false;
 
-    constexpr const char *min_freq_path
-            = "/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq";
-    constexpr const char *max_freq_path
-            = "/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq";
-    constexpr const char *no_turbo_path
-            = "/sys/devices/system/cpu/intel_pstate/no_turbo";
-    constexpr const char *max_cstate_path
-            = "/sys/module/intel_idle/parameters/max_cstate";
+    for (const auto &group : get_cpu_groups()) {
+        const std::string cpu_path = get_cpu_sysfs_path(group.cpu);
+        const std::string cpu_name = "cpu" + std::to_string(group.cpu);
+        const std::string label = group.name.empty()
+                ? "CPU (" + cpu_name + ")"
+                : "CPU " + group.name + " (" + cpu_name + ")";
 
-    // The effective (scaling) min and max frequency are expected to coincide.
-    // When they don't, the frequency may float during the run and skew
-    // performance measurements. Note: `cpuinfo_*_freq` report the hardware
-    // limits and always differ, so `scaling_*_freq` (the governor's allowed
-    // range) is inspected instead as it reflects whether the frequency is
-    // pinned.
-    int64_t min_freq = 0, max_freq = 0;
-    if (read_sysfs_int(min_freq_path, min_freq) == OK
-            && read_sysfs_int(max_freq_path, max_freq) == OK) {
-        if (min_freq != max_freq) {
+        // The effective (scaling) min and max frequency are expected to
+        // coincide. When they don't, the frequency may float during the run
+        // and skew performance measurements. Note: `cpuinfo_*_freq` report
+        // the hardware limits and always differ, so `scaling_*_freq` (the
+        // governor's allowed range) is inspected instead as it reflects
+        // whether the frequency is pinned.
+        int64_t min_freq = 0, max_freq = 0;
+        if (read_sysfs_int(cpu_path + "/cpufreq/scaling_min_freq", min_freq)
+                        == OK
+                && read_sysfs_int(
+                           cpu_path + "/cpufreq/scaling_max_freq", max_freq)
+                        == OK) {
+            if (min_freq != max_freq) {
+                BENCHDNN_PRINT(0,
+                        "[PERF_HINTS] Info: %s min (%ld kHz) and max (%ld "
+                        "kHz) frequencies differ. Pin the frequency for "
+                        "stable performance measurements.\n",
+                        label.c_str(), (long)min_freq, (long)max_freq);
+                any_hint = true;
+            }
+        }
+
+        // Enabled cpuidle states are inspected rather than the
+        // `intel_idle.max_cstate` boot parameter because states can also be
+        // disabled at runtime and the check must not depend on the idle
+        // driver. State 0 is polling and state 1 is C1, both wake up fast.
+        const std::string idle_path = cpu_path + "/cpuidle";
+        int deepest_idx = 1;
+        std::string deepest_name;
+        for (const auto &state : list_dir(idle_path)) {
+            if (state.rfind("state", 0) != 0) continue;
+            const int idx = std::stoi(state.substr(5));
+            if (idx <= deepest_idx) continue;
+            const std::string state_path
+                    = parser::utils::str_join(idle_path, state, '/');
+            int64_t disabled = 0;
+            if (read_sysfs_int(state_path + "/disable", disabled) != OK
+                    || disabled)
+                continue;
+            deepest_idx = idx;
+            deepest_name = read_sysfs_str(state_path + "/name");
+        }
+        if (!deepest_name.empty()) {
             BENCHDNN_PRINT(0,
-                    "[PERF_HINTS] Info: CPU min (%ld kHz) and max (%ld kHz) "
-                    "frequencies differ. Pin the frequency for stable "
-                    "performance measurements.\n",
-                    (long)min_freq, (long)max_freq);
+                    "[PERF_HINTS] Info: %s idle states up to %s are enabled. "
+                    "Disable states deeper than C1 for stable performance "
+                    "measurements.\n",
+                    label.c_str(), deepest_name.c_str());
             any_hint = true;
         }
     }
+
+    constexpr const char *no_turbo_path
+            = "/sys/devices/system/cpu/intel_pstate/no_turbo";
 
     // Turbo mode is supposed to be disabled (`no_turbo` equals to `1`).
     int64_t no_turbo = 0;
@@ -344,20 +469,37 @@ static bool report_cpu_perf_hints_impl() {
         }
     }
 
-    // C-states are supposed to be no more than `1`.
-    int64_t max_cstate = 0;
-    if (read_sysfs_int(max_cstate_path, max_cstate) == OK) {
-        if (max_cstate > 1) {
-            BENCHDNN_PRINT(0,
-                    "[PERF_HINTS] Info: CPU max C-state is set to %ld. Set "
-                    "it to no more than 1 for stable performance "
-                    "measurements.\n",
-                    (long)max_cstate);
-            any_hint = true;
-        }
-    }
-
     return any_hint;
+}
+
+// Returns "dddd:bb:dd.f" of the test engine's GPU, or "" if unknown.
+static std::string get_gpu_pci_bdf() {
+    char bdf[16] = {};
+#if DNNL_GPU_RUNTIME == DNNL_RUNTIME_OCL
+    auto eng = dnnl::engine(get_test_engine(), true);
+    cl_device_pci_bus_info_khr p {};
+    if (clGetDeviceInfo(dnnl::ocl_interop::get_device(eng),
+                CL_DEVICE_PCI_BUS_INFO_KHR, sizeof(p), &p, nullptr)
+            != CL_SUCCESS)
+        return {};
+    snprintf(bdf, sizeof(bdf), "%04x:%02x:%02x.%x", p.pci_domain, p.pci_bus,
+            p.pci_device, p.pci_function);
+#elif DNNL_GPU_RUNTIME == DNNL_RUNTIME_ZE
+    auto eng = dnnl::engine(get_test_engine(), true);
+    ze_pci_ext_properties_t p {};
+    p.stype = ZE_STRUCTURE_TYPE_PCI_EXT_PROPERTIES;
+    if (zeDevicePciGetPropertiesExt(dnnl::ze_interop::get_device(eng), &p)
+            != ZE_RESULT_SUCCESS)
+        return {};
+    snprintf(bdf, sizeof(bdf), "%04x:%02x:%02x.%x", p.address.domain,
+            p.address.bus, p.address.device, p.address.function);
+#elif DNNL_GPU_RUNTIME == DNNL_RUNTIME_DPCPP
+    auto eng = dnnl::engine(get_test_engine(), true);
+    auto dev = dnnl::sycl_interop::get_device(eng);
+    if (!dev.has(::sycl::aspect::ext_intel_pci_address)) return {};
+    return dev.get_info<::sycl::ext::intel::info::device::pci_address>();
+#endif
+    return bdf;
 }
 
 // An unpinned GPU frequency (min != max) may float during the run and skew
@@ -366,14 +508,23 @@ static bool report_cpu_perf_hints_impl() {
 static bool report_gpu_perf_hints_impl() {
     bool any_hint = false;
 
+    const std::string bdf = get_gpu_pci_bdf();
     const std::string drm_root = "/sys/class/drm";
     for (const auto &card : list_dir(drm_root)) {
         // A `-` marks a connector node (e.g. `card0-HDMI-A-1`), not a device.
         if (card.rfind("card", 0) != 0 || card.find('-') != std::string::npos)
             continue;
-        const std::string card_path = drm_root + "/" + card;
+        const std::string card_path
+                = parser::utils::str_join(drm_root, card, '/');
         // Only Intel GPUs expose the frequency controls inspected below.
         if (read_sysfs_str(card_path + "/device/vendor") != "0x8086") continue;
+        // Skip cards other than the test engine's one; `device` links to the
+        // PCI node named by its BDF.
+        char real[PATH_MAX];
+        if (!bdf.empty() && realpath((card_path + "/device").c_str(), real)) {
+            const std::string node = real;
+            if (node.substr(node.rfind('/') + 1) != bdf) continue;
+        }
 
         auto gts = find_gpu_gts_xe(card_path);
         if (gts.empty()) gts = find_gpu_gts_i915(card_path);
